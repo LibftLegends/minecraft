@@ -1,41 +1,5 @@
 #include "../../src/gpur/GpuHudRenderer.hpp"
-
-static const char *OVERLAY_VERT = R"GLSL(
-#version 330 core
-layout(location = 0) in vec2 a_pos;
-void main() { gl_Position = vec4(a_pos, 0.0, 1.0); }
-)GLSL";
-
-static const char *OVERLAY_FRAG = R"GLSL(
-#version 330 core
-uniform vec4 u_overlay_color;
-out vec4 frag_color;
-void main() { frag_color = u_overlay_color; }
-)GLSL";
-
-static const char *OVERLAY_TEX_VERT = R"GLSL(
-#version 330 core
-uniform vec2 u_overlay_ndc_br;
-out vec2 v_uv;
-void main()
-{
-    bool is_right = (gl_VertexID == 1 || gl_VertexID == 3);
-    bool is_top   = (gl_VertexID == 2 || gl_VertexID == 3);
-    gl_Position = vec4(
-        is_right ? u_overlay_ndc_br.x : -1.0,
-        is_top   ? 1.0 : u_overlay_ndc_br.y,
-        0.0, 1.0);
-    v_uv = vec2(is_right ? 1.0 : 0.0, is_top ? 0.0 : 1.0);
-}
-)GLSL";
-
-static const char *OVERLAY_TEX_FRAG = R"GLSL(
-#version 330 core
-in vec2 v_uv;
-uniform sampler2D u_overlay_sampler;
-out vec4 frag_color;
-void main() { frag_color = texture(u_overlay_sampler, v_uv); }
-)GLSL";
+#include "../../src/gpur/GlslLoader.hpp"
 
 GpuHudRenderer::GpuHudRenderer()
     : _fullscreen_vao(0), _crosshair_vao(0), _crosshair_vbo(0),
@@ -49,11 +13,21 @@ GpuHudRenderer::~GpuHudRenderer() { destroy(); }
 GpuHudRenderer &GpuHudRenderer::operator=(const GpuHudRenderer &other)
 { (void)other; return *this; }
 
-bool GpuHudRenderer::initialize() noexcept
+bool GpuHudRenderer::initialize(const std::string &shader_dir) noexcept
 {
-    if (_overlay_shader.initialize(OVERLAY_VERT, OVERLAY_FRAG) != 0)
+    std::string overlay_vert = GlslLoader::load((shader_dir + "overlay.vert.glsl").c_str());
+    std::string overlay_frag = GlslLoader::load((shader_dir + "overlay.frag.glsl").c_str());
+    std::string overlay_tex_vert =
+        GlslLoader::load((shader_dir + "overlay_tex.vert.glsl").c_str());
+    std::string overlay_tex_frag =
+        GlslLoader::load((shader_dir + "overlay_tex.frag.glsl").c_str());
+    if (overlay_vert.empty() || overlay_frag.empty()
+        || overlay_tex_vert.empty() || overlay_tex_frag.empty())
         return false;
-    if (_overlay_tex_shader.initialize(OVERLAY_TEX_VERT, OVERLAY_TEX_FRAG) != 0)
+    if (_overlay_shader.initialize(overlay_vert.c_str(), overlay_frag.c_str()) != 0)
+        return false;
+    if (_overlay_tex_shader.initialize(overlay_tex_vert.c_str(),
+        overlay_tex_frag.c_str()) != 0)
         return false;
     _u_overlay_color   = _overlay_shader.uniform("u_overlay_color");
     _u_overlay_sampler = _overlay_tex_shader.uniform("u_overlay_sampler");

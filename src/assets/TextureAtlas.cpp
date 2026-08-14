@@ -106,8 +106,8 @@ bool TextureAtlas::load_bmp_texture_atlas(TextureAtlas *atlas, const char *path)
     std::fclose(file);
     atlas->width = hdr.width;
     atlas->height = hdr.height;
-    atlas->tile_width = hdr.width / 4;
-    atlas->tile_height = hdr.height / 4;
+    atlas->tile_width = hdr.width / ATLAS_GRID_COLUMNS;
+    atlas->tile_height = hdr.height / ATLAS_GRID_ROWS;
     atlas->loaded = atlas->tile_width > 0 && atlas->tile_height > 0;
     return atlas->loaded;
 }
@@ -144,7 +144,7 @@ TriangleTexture TextureAtlas::prepare_triangle_texture(uint32_t block_id, uint8_
     static TriangleTexture cache[TEXTURE_CACHE_BLOCKS][TEXTURE_CACHE_FACES];
     static bool cache_ready[TEXTURE_CACHE_BLOCKS][TEXTURE_CACHE_FACES];
 
-    if (block_id < 16U && face < 6U && cache_ready[block_id][face])
+    if (block_id < static_cast<uint32_t>(TEXTURE_CACHE_BLOCKS) && face < static_cast<uint8_t>(TEXTURE_CACHE_FACES) && cache_ready[block_id][face])
         return cache[block_id][face];
 
     const TextureAtlas &atlas = instance();
@@ -169,7 +169,7 @@ TriangleTexture TextureAtlas::prepare_triangle_texture(uint32_t block_id, uint8_
     tex.sample_width = std::max(1, atlas.get_tile_width() - mx * 2);
     tex.sample_height = std::max(1, atlas.get_tile_height() - my * 2);
     tex.loaded = true;
-    if (block_id < 16U && face < 6U)
+    if (block_id < static_cast<uint32_t>(TEXTURE_CACHE_BLOCKS) && face < static_cast<uint8_t>(TEXTURE_CACHE_FACES))
     {
         cache[block_id][face] = tex;
         cache_ready[block_id][face] = true;

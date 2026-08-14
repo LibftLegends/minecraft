@@ -1,35 +1,5 @@
 #include "../../src/gpur/GpuSkyRenderer.hpp"
-
-static const char *SKY_VERT = R"GLSL(
-#version 330 core
-void main()
-{
-    const vec2 QUAD[4] = vec2[4](
-        vec2(-1.0, -1.0), vec2(1.0, -1.0),
-        vec2(-1.0,  1.0), vec2(1.0,  1.0));
-    gl_Position = vec4(QUAD[gl_VertexID], 0.9999, 1.0);
-}
-)GLSL";
-
-static const char *SKY_FRAG = R"GLSL(
-#version 330 core
-uniform vec2 u_sky_size;
-out vec4 frag_color;
-void main()
-{
-    float t   = gl_FragCoord.y / u_sky_size.y;
-    vec3  bot = vec3(0.322, 0.604, 0.878);
-    vec3  top = vec3(0.384, 0.776, 0.965);
-    frag_color = vec4(mix(bot, top, t), 1.0);
-}
-)GLSL";
-
-static const char *TINT_FRAG = R"GLSL(
-#version 330 core
-uniform vec4 u_tint_color;
-out vec4 frag_color;
-void main() { frag_color = u_tint_color; }
-)GLSL";
+#include "../../src/gpur/GlslLoader.hpp"
 
 GpuSkyRenderer::GpuSkyRenderer()
     : _fullscreen_vao(0), _u_sky_size(-1), _u_tint_color(-1)
@@ -39,11 +9,16 @@ GpuSkyRenderer::~GpuSkyRenderer() { destroy(); }
 GpuSkyRenderer &GpuSkyRenderer::operator=(const GpuSkyRenderer &other)
 { (void)other; return *this; }
 
-bool GpuSkyRenderer::initialize() noexcept
+bool GpuSkyRenderer::initialize(const std::string &shader_dir) noexcept
 {
-    if (_sky_shader.initialize(SKY_VERT, SKY_FRAG) != 0)
+    std::string sky_vert = GlslLoader::load((shader_dir + "sky.vert.glsl").c_str());
+    std::string sky_frag = GlslLoader::load((shader_dir + "sky.frag.glsl").c_str());
+    std::string tint_frag = GlslLoader::load((shader_dir + "tint.frag.glsl").c_str());
+    if (sky_vert.empty() || sky_frag.empty() || tint_frag.empty())
         return false;
-    if (_tint_shader.initialize(SKY_VERT, TINT_FRAG) != 0)
+    if (_sky_shader.initialize(sky_vert.c_str(), sky_frag.c_str()) != 0)
+        return false;
+    if (_tint_shader.initialize(sky_vert.c_str(), tint_frag.c_str()) != 0)
         return false;
     _u_sky_size   = _sky_shader.uniform("u_sky_size");
     _u_tint_color = _tint_shader.uniform("u_tint_color");
