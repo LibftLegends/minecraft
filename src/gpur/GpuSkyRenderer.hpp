@@ -1,6 +1,7 @@
 #ifndef GPU_SKY_RENDERER_HPP
 # define GPU_SKY_RENDERER_HPP
 
+#include "../ft_vox.hpp"
 #include "../../Libft/Modules/GPGR/ft_gpu_shader.hpp"
 #include "../../Libft/Modules/GPGR/gpgr_gl_funcs.hpp"
 
@@ -18,7 +19,7 @@ class GpuSkyRenderer
         ~GpuSkyRenderer();
         GpuSkyRenderer &operator=(const GpuSkyRenderer &other);
 
-        bool initialize() noexcept;
+        bool initialize(const std::string &shader_dir) noexcept;
         void destroy() noexcept;
 
         void draw_sky(int width, int height) const noexcept;

@@ -78,8 +78,8 @@ void GpuWorldRenderer::upload_atlas_uniforms()
     _world_shader.use();
     glUniform1i(_u_atlas, 0);
     glUniform1i(_u_atlas_loaded, _atlas.is_loaded() ? 1 : 0);
-    glUniform4fv(_u_tile_uvs, 96, _tile_uvs);
-    glUniform3fv(_u_fallback, 16, _fallback_colors);
+    glUniform4fv(_u_tile_uvs, 384, _tile_uvs);
+    glUniform3fv(_u_fallback, 64, _fallback_colors);
 }
 
 bool GpuWorldRenderer::initialize(int width, int height, GLuint sky_vao, GLuint crosshair_vao,
@@ -182,6 +182,6 @@ void GpuWorldRenderer::render(const Camera &camera, const World &world)
 size_t GpuWorldRenderer::gpu_bytes() const
 {
     size_t b = _batch.gpu_bytes();
-    b += static_cast<size_t>(_atlas.is_loaded() ? 192 * 192 * 4 : 0);
+    b += static_cast<size_t>(_atlas.is_loaded() ? 384 * 384 * 4 : 0);
     return b;
 }
