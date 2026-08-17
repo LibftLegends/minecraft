@@ -21,14 +21,14 @@ class GpuTextureAtlas
     void destroy();
     bool is_loaded() const;
 
-    void fill_tile_uvs(const TextureAtlas &atlas, float uv_out[96 * 4]) const;
-    void fill_fallback_colors(float colors_out[16 * 3]) const;
+    void fill_tile_uvs(const TextureAtlas &atlas, float uv_out[384 * 4]) const;
+    void fill_fallback_colors(float colors_out[64 * 3]) const;
 
   private:
     GLuint _tex;
     bool _loaded;
 
-    static const uint32_t BLOCK_IDS[15];
+    static const uint32_t BLOCK_IDS[63];
     static const int BLOCK_COUNT;
 };
 

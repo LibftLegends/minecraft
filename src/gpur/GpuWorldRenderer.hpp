@@ -43,8 +43,8 @@ class GpuWorldRenderer
     int _width;
     int _height;
 
-    float _tile_uvs[96 * 4];
-    float _fallback_colors[16 * 3];
+    float _tile_uvs[384 * 4];
+    float _fallback_colors[64 * 3];
 
     GLint _u_mvp;
     GLint _u_chunk_offset;

@@ -23,6 +23,7 @@ class BlockTextureRegistry
         int def_x;
         int tile_y;
         int up_x;
+        int down_x;
     };
     static const Entry ENTRIES[];
     static const int ENTRY_COUNT;

@@ -42,8 +42,10 @@ class TextureAtlas
         uint32_t compression;
     };
 
-    static const int TEXTURE_CACHE_BLOCKS = 16;
+    static const int TEXTURE_CACHE_BLOCKS = 64;
     static const int TEXTURE_CACHE_FACES = 6;
+    static const int ATLAS_GRID_COLUMNS = 8;
+    static const int ATLAS_GRID_ROWS = 8;
 
     std::vector<uint32_t> pixels;
     int32_t width;

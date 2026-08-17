@@ -3,8 +3,7 @@
 
 #include "../../Libft/Modules/GPGR/ft_gpu_shader.hpp"
 #include "../../Libft/Modules/GPGR/gpgr_gl_funcs.hpp"
-#include <cstdint>
-#include <vector>
+#include "../ft_vox.hpp"
 
 class GpuHudRenderer
 {
@@ -41,7 +40,7 @@ class GpuHudRenderer
         ~GpuHudRenderer();
         GpuHudRenderer &operator=(const GpuHudRenderer &other);
 
-        bool initialize() noexcept;
+        bool initialize(const std::string &shader_dir) noexcept;
         void destroy() noexcept;
 
         void draw_crosshair(int width, int height) const noexcept;

@@ -6,14 +6,14 @@ flat in uint v_face;
 
 uniform sampler2D u_atlas;
 uniform int u_atlas_loaded;
-uniform vec4 u_tile_uvs[96];
-uniform vec3 u_fallback_colors[16];
+uniform vec4 u_tile_uvs[384];
+uniform vec3 u_fallback_colors[64];
 
 out vec4 frag_color;
 
 void main()
 {
-    uint bid = min(v_block_id, 15u);
+    uint bid = min(v_block_id, 63u);
     uint fid = min(v_face, 5u);
     if (bid == 8u)
     {
