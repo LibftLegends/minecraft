@@ -34,17 +34,17 @@ Current build command:
 make
 ```
 
-GNU Make 4.0 or newer is required; parallel builds use
-`--output-sync=target` without custom output locks.
+GNU Make 3.81 or newer is supported. GNU Make 4.0 and newer may optionally
+use `--output-sync=target` for grouped parallel output.
 
 The parent Makefile includes Libft's flattened GNU Make graph, so a parallel
 build can schedule ft_vox and Libft object files through the same job pool.
 Useful validation commands are:
 
 ```sh
-make --output-sync=target -j2 all
-make --trace --output-sync=target -j2 all
-make --output-sync=target -j2 tests
+make -j2 all
+make --trace -j2 all
+make -j2 tests
 make test
 ```
 

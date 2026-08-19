@@ -7,9 +7,11 @@ SHELL := /bin/bash
 endif
 
 MAKEFLAGS += -r
-FT_VOX_SUPPORTED_MAKE_VERSION := $(filter 4.% 5.% 6.% 7.% 8.% 9.%,$(MAKE_VERSION))
+# The parent graph uses GNU Make features available in 3.81. Output
+# synchronization is optional and must not prevent builds on Apple Make 3.81.
+FT_VOX_SUPPORTED_MAKE_VERSION := $(filter 3.81 3.82 4.% 5.% 6.% 7.% 8.% 9.%,$(MAKE_VERSION))
 ifeq ($(FT_VOX_SUPPORTED_MAKE_VERSION),)
-$(error GNU Make 4.0 or newer is required for --output-sync support; found $(MAKE_VERSION))
+$(error GNU Make 3.81 or newer is required; found $(MAKE_VERSION))
 endif
 include mk/project.mk
 include mk/tools.mk
