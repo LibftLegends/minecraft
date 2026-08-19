@@ -59,19 +59,6 @@ endif
 
 DEPFLAGS = -MMD -MP
 CFLAGS = $(COMPILE_FLAGS)
-FIXDEP = dep_file="$(@:.o=.d)"; \
-         if [ -f "$$dep_file" ]; then \
-             dep_root="$(CURDIR)"; \
-             case "$$dep_root" in \
-                 /mnt/[a-zA-Z]/*) \
-                     drive=$$(printf '%s' "$$dep_root" | cut -d/ -f3 | tr '[:lower:]' '[:upper:]'); \
-                     rest=$$(printf '%s' "$$dep_root" | sed "s|^/mnt/$$drive||"); \
-                     dep_root="$$drive:$$rest"; \
-                     ;; \
-             esac; \
-             dep_root="$${dep_root%/}/"; \
-             perl -0pi -e "s|\\Q$$dep_root\\E|./|g; s/\\r//g" "$$dep_file"; \
-         fi
 
 REPRODUCIBLE ?= 1
 SOURCE_DATE_EPOCH ?= 1700000000
@@ -146,3 +133,11 @@ endif
 ifeq ($(HAVE_FREETYPE),1)
     LDFLAGS += $(FREETYPE_LIBS)
 endif
+
+# Native ft_vox objects must never be reused across incompatible compiler,
+# feature, or link configurations.  Compute one invocation-level identity;
+# do not launch a fingerprinting process per object.
+FT_VOX_CONFIG_FINGERPRINT := $(shell printf '%s\n' \
+    '$(CC)|$(CFLAGS)|$(COMPILE_FLAGS)|$(LDFLAGS)|$(OPT_LEVEL)|$(DEBUG)|$(COVERAGE)|$(ENABLE_LTO)|$(ENABLE_PGO)|$(HAVE_FREETYPE)|$(REPRODUCIBLE)' | \
+    cksum | awk '{print $$1}')
+LIBFT_BUILD_OUTPUT_SUFFIX := _ft_vox_opt$(OPT_LEVEL)_cfg$(FT_VOX_CONFIG_FINGERPRINT)

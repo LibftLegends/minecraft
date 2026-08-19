@@ -34,6 +34,33 @@ Current build command:
 make
 ```
 
+GNU Make 4.0 or newer is required; parallel builds use
+`--output-sync=target` without custom output locks.
+
+The parent Makefile includes Libft's flattened GNU Make graph, so a parallel
+build can schedule ft_vox and Libft object files through the same job pool.
+Useful validation commands are:
+
+```sh
+make --output-sync=target -j2 all
+make --trace --output-sync=target -j2 all
+make --output-sync=target -j2 tests
+make test
+```
+
+`make test` runs the complete headless validator set. It does not launch the
+interactive game; use `make all` and run `./ft_vox` separately for that.
+
+The trace for a no-op build should contain no compiler, archiver, linker, or
+recursive `make -C Libft` command. Use `make clean` for native objects and
+`make fclean` when the selected in-tree Libft configuration should also be
+removed.
+
+Native ft_vox objects are stored under configuration-specific `objs_*_cfg...`
+directories. Changing compiler flags, optimization, debug, coverage, LTO, or
+feature-detection inputs therefore cannot reuse incompatible objects from a
+previous configuration.
+
 Submodule initialization:
 
 ```sh

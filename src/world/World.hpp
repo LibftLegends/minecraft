@@ -16,6 +16,19 @@
 class World
 {
   public:
+    struct StreamDiagnostics
+    {
+        uint64_t frame;
+        uint64_t progress_frame;
+        size_t candidate_count;
+        size_t ready_count;
+        size_t pending_count;
+        size_t retryable_count;
+        size_t failed_count;
+        uint64_t oldest_pending_age;
+        int32_t last_error;
+    };
+
     WorldChunk chunks[WorldCoordinates::CHUNK_COUNT];
     WorldChunk *chunk_index[WorldCoordinates::CHUNK_COUNT];
     int32_t chunk_index_center_x;
@@ -47,6 +60,9 @@ class World
     int32_t update_around(double camera_x, double camera_z, int32_t generation_budget);
     int32_t update_around(double camera_x, double camera_z, int32_t generation_budget,
                           int32_t render_distance);
+    int32_t stream_last_error() const;
+    int32_t stream_retryable_count() const;
+    StreamDiagnostics stream_diagnostics() const;
     bool validate_visible_distance(double camera_x, double camera_z, double yaw,
                                    int32_t required_distance) const;
     bool surface_top_at(int32_t world_x, int32_t world_z, double *surface_top) const;
@@ -72,10 +88,25 @@ class World
         int32_t offset_x;
         int32_t offset_z;
         int32_t dist_sq;
+        uint8_t state;
+        uint32_t retry_count;
+        int32_t retry_frames;
+        int32_t last_error;
+        uint64_t relevance_epoch;
+        uint32_t generation_revision;
+        uint64_t queued_frame;
     };
 
     std::vector<StreamCandidate> stream_candidates_;
     int32_t stream_candidates_radius_;
+    size_t stream_candidate_cursor_;
+    int32_t generation_credit_;
+    int32_t stream_last_error_;
+    int32_t stream_retryable_count_;
+    uint64_t stream_relevance_epoch_;
+    uint32_t generation_revision_;
+    uint64_t stream_frame_;
+    uint64_t stream_progress_frame_;
 
     void copy_seed(const char *seed_value);
     void clear_chunk_index();

@@ -6,16 +6,75 @@ else
 SHELL := /bin/bash
 endif
 
+MAKEFLAGS += -r
+FT_VOX_SUPPORTED_MAKE_VERSION := $(filter 4.% 5.% 6.% 7.% 8.% 9.%,$(MAKE_VERSION))
+ifeq ($(FT_VOX_SUPPORTED_MAKE_VERSION),)
+$(error GNU Make 4.0 or newer is required for --output-sync support; found $(MAKE_VERSION))
+endif
 include mk/project.mk
 include mk/tools.mk
 include mk/output.mk
 include mk/sources.mk
 include mk/directories.mk
-include mk/libft.mk
 include mk/compiler.mk
+include mk/libft.mk
 include mk/objects.mk
 
-.SILENT:
+# Include Libft's canonical object/archive graph in the parent graph.  The
+# graph is configured with Libft-relative paths so one GNU Make scheduler can
+# compile ft_vox and Libft objects together.
+FT_VOX_LIBFT_TARGET := $(TARGET)
+FT_VOX_LIBFT_DEBUG_TARGET := $(NAME_DEBUG)
+FT_VOX_LIBFT_COMPILE_FLAGS := $(COMPILE_FLAGS)
+FT_VOX_OBJECTS := $(OBJS)
+FT_VOX_TEST_OBJECTS := $(TEST_OBJS)
+FT_VOX_DEPENDENCIES := $(DEPS)
+FT_VOX_CC := $(CC)
+FT_VOX_CFLAGS := $(CFLAGS)
+LIBFT_GLOBAL_GRAPH := 1
+LIBFT_GLOBAL_GRAPH_PREFIX := Libft/
+LIBFT_GLOBAL_ARCHIVE_SUFFIX := $(LIBFT_ARCHIVE_SUFFIX)
+BUILD_OUTPUT_SUFFIX := $(LIBFT_BUILD_OUTPUT_SUFFIX)
+COMPILE_FLAGS := $(LIBFT_COMPILE_FLAGS)
+include Libft/mk/global_graph.mk
+LIBFT_PARENT_SELECTED_BUILD_ROOT := $(LIBFT_GLOBAL_ROOT)
+COMPILE_FLAGS := $(FT_VOX_LIBFT_COMPILE_FLAGS)
+TARGET := $(FT_VOX_LIBFT_TARGET)
+OBJS := $(FT_VOX_OBJECTS)
+TEST_OBJS := $(FT_VOX_TEST_OBJECTS)
+DEPS := $(FT_VOX_DEPENDENCIES)
+CC := $(FT_VOX_CC)
+CFLAGS := $(FT_VOX_CFLAGS)
+
+.SECONDEXPANSION:
+FT_VOX_OBJECT_DIRECTORIES := $(sort $(dir $(OBJS) $(TEST_OBJS)))
+
+$(FT_VOX_OBJECT_DIRECTORIES):
+	@-$(MKDIR) $@
+
+FT_VOX_BUILD_CONFIG_INPUTS := mk/compiler.mk mk/project.mk mk/libft.mk
+LIBFT_PARENT_GLOBAL_TARGET := $(LIBFT_FULL_LIB)
+LIBFT_PARENT_GLOBAL_DEBUG_TARGET := $(LIBFT_FULL_DEBUG_LIB)
+LIBFT_PARENT_SELECTED_ARCHIVES := $(LIBFT_GLOBAL_RELEASE_ARCHIVES) \
+        $(LIBFT_GLOBAL_DEBUG_ARCHIVES) $(LIBFT_PARENT_GLOBAL_TARGET) \
+        $(LIBFT_PARENT_GLOBAL_DEBUG_TARGET)
+
+define LIBFT_PARENT_ARCHIVE_RULE
+$(1): $(2) $(LIBFT_GLOBAL_ARCHIVE_CONFIG_INPUTS)
+	@$(MKDIR) $(dir $$@)
+	@$(RM) $$@.tmp
+	@if [ "$$(uname -s)" = "Darwin" ]; then \
+		libtool -static -o "$$@.tmp" $(2); \
+	else \
+		{ printf 'CREATE %s\n' "$$@.tmp"; \
+		  for lib in $(2); do printf 'ADDLIB %s\n' "$$$$lib"; done; \
+		  printf 'SAVE\nEND\n'; } | $(AR) -M; \
+	fi
+	@mv $$@.tmp $$@
+endef
+
+$(eval $(call LIBFT_PARENT_ARCHIVE_RULE,$(LIBFT_PARENT_GLOBAL_TARGET),$(LIBFT_GLOBAL_RELEASE_ARCHIVES)))
+$(eval $(call LIBFT_PARENT_ARCHIVE_RULE,$(LIBFT_PARENT_GLOBAL_DEBUG_TARGET),$(LIBFT_GLOBAL_DEBUG_ARCHIVES)))
 
 ifeq ($(OS),Windows_NT)
 SUBMODULE_UPDATE_CMD = tools\update_libft.cmd
@@ -23,9 +82,9 @@ else
 SUBMODULE_UPDATE_CMD = sh tools/update_libft.sh
 endif
 
-all: dirs $(TARGET)
+all: $(TARGET)
 
-tests: dirs $(TEST_NAME)
+tests: $(TEST_NAME)
 
 dirs:
 	@-$(MKDIR) $(OBJ_DIR)
@@ -55,76 +114,23 @@ submodule_update:
 debug:
 	$(MAKE) all DEBUG=1
 
-$(TARGET): $(OBJS) $(LIBFT_LINK_LIB)
+$(TARGET): $(OBJS) $(LIBFT_LINK_LIB) $(FT_VOX_BUILD_CONFIG_INPUTS)
 	@printf '\033[1;36m[FT_VOX BUILD] Linking %s\033[0m\n' "$@"
 	@$(CC) $(CFLAGS) $(OBJS) $(LIBFT_LINK_FLAGS) -o $@ $(LDFLAGS)
 
-$(LIBFT_FULL_LIB): FORCE
-	@$(MAKE) -C $(LIBFT_DIR) $(LIBFT_PARALLEL_FLAGS) $(notdir $@) COMPILE_FLAGS="$(LIBFT_COMPILE_FLAGS)" BUILD_OUTPUT_SUFFIX="$(LIBFT_BUILD_OUTPUT_SUFFIX)" LIBFT_ARCHIVE_SUFFIX="$(LIBFT_ARCHIVE_SUFFIX)" LIBFT_BATCH_OUTPUT=$(LIBFT_CHILD_BATCH_OUTPUT)
-
-$(LIBFT_FULL_DEBUG_LIB): FORCE
-	@$(MAKE) -C $(LIBFT_DIR) $(LIBFT_PARALLEL_FLAGS) $(notdir $@) COMPILE_FLAGS="$(LIBFT_COMPILE_FLAGS)" BUILD_OUTPUT_SUFFIX="$(LIBFT_BUILD_OUTPUT_SUFFIX)" LIBFT_ARCHIVE_SUFFIX="$(LIBFT_ARCHIVE_SUFFIX)" LIBFT_BATCH_OUTPUT=$(LIBFT_CHILD_BATCH_OUTPUT)
-
-$(TEST_NAME): $(TEST_OBJS) $(OBJS_NO_MAIN) $(TARGET) $(LIBFT_FULL_LIB)
+$(TEST_NAME): $(TEST_OBJS) $(OBJS_NO_MAIN) $(TARGET) $(LIBFT_FULL_LIB) \
+        $(FT_VOX_BUILD_CONFIG_INPUTS)
 	@printf '\033[1;36m[FT_VOX BUILD] Linking %s\033[0m\n' "$@"
 	@$(CC) $(CFLAGS) $(TEST_OBJS) $(OBJS_NO_MAIN) $(LIBFT_LINK_FLAGS) -o $@ $(LDFLAGS)
 
-$(OBJS) $(TEST_OBJS): | $(LIBFT_LINK_LIB)
+$(OBJ_DIR)/%.o: %.cpp | $$(dir $$@)
+	$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $< -o $@
 
-$(OBJ_DIR)/%.o: %.cpp
-	@if [ "$(FT_VOX_BATCH_OUTPUT)" = "1" ]; then \
-		log_file=".ft_vox_build_$$(printf '%s' "$@" | tr '/.' '__')_$$$$.log"; \
-		{ \
-			$(MKDIR) $(dir $@); \
-			$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@; \
-			$(FIXDEP); \
-			built=$$(find $(OBJ_DIR) -type f -name '*.o' 2>/dev/null | wc -l); \
-			printf '\033[1;36m[FT_VOX PROGRESS] %s (%d/%d)\033[0m\n' "$<" $$built $(TOTAL_OBJS); \
-		} > "$$log_file" 2>&1; \
-		status=$$?; \
-		while ! mkdir $(FT_VOX_OUTPUT_LOCK) 2>/dev/null; do sleep 0.02; done; \
-		cat "$$log_file"; \
-		rmdir $(FT_VOX_OUTPUT_LOCK); \
-		$(RM) "$$log_file"; \
-		if [ $$status -ne 0 ]; then exit $$status; fi; \
-	else \
-		$(MKDIR) $(dir $@); \
-		$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@; \
-		$(FIXDEP); \
-		built=$$(find $(OBJ_DIR) -type f -name '*.o' 2>/dev/null | wc -l); \
-		printf '\033[1;36m[FT_VOX PROGRESS] %s (%d/%d)\033[0m\n' "$<" $$built $(TOTAL_OBJS); \
-	fi
+$(OBJ_DIR)/%.o: %.mm | $$(dir $$@)
+	$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $< -o $@
 
-$(OBJ_DIR)/%.o: %.mm
-	@$(MKDIR) $(dir $@)
-	@$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
-	@$(FIXDEP)
-	@built=$$(find $(OBJ_DIR) -type f -name '*.o' 2>/dev/null | wc -l); \
-	printf '\033[1;36m[FT_VOX PROGRESS] %s (%d/%d)\033[0m\n' "$<" $$built $(TOTAL_OBJS)
-
-$(OBJ_DIR_TEST)/%.o: %.cpp
-	@if [ "$(FT_VOX_BATCH_OUTPUT)" = "1" ]; then \
-		log_file=".ft_vox_build_$$(printf '%s' "$@" | tr '/.' '__')_$$$$.log"; \
-		{ \
-			$(MKDIR) $(dir $@); \
-			$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@; \
-			$(FIXDEP); \
-			built=$$(find $(OBJ_DIR_TEST) -type f -name '*.o' 2>/dev/null | wc -l); \
-			printf '\033[1;36m[FT_VOX TEST PROGRESS] %s (%d/%d)\033[0m\n' "$<" $$built $(TOTAL_TEST_OBJS); \
-		} > "$$log_file" 2>&1; \
-		status=$$?; \
-		while ! mkdir $(FT_VOX_OUTPUT_LOCK) 2>/dev/null; do sleep 0.02; done; \
-		cat "$$log_file"; \
-		rmdir $(FT_VOX_OUTPUT_LOCK); \
-		$(RM) "$$log_file"; \
-		if [ $$status -ne 0 ]; then exit $$status; fi; \
-	else \
-		$(MKDIR) $(dir $@); \
-		$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@; \
-		$(FIXDEP); \
-		built=$$(find $(OBJ_DIR_TEST) -type f -name '*.o' 2>/dev/null | wc -l); \
-		printf '\033[1;36m[FT_VOX TEST PROGRESS] %s (%d/%d)\033[0m\n' "$<" $$built $(TOTAL_TEST_OBJS); \
-	fi
+$(OBJ_DIR_TEST)/%.o: %.cpp | $$(dir $$@)
+	$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $< -o $@
 
 -include $(DEPS)
 
@@ -133,11 +139,12 @@ clean:
 	-$(RM) test_example_compiler.c test_example_compiler.bin test_example_compiler.txt
 	-$(RM) test_example_invalid_compiler.c test_example_invalid_compiler.bin test_example_invalid_compiler.log
 	-$(RM) test_runtime_file.txt
-	-$(RMDIR) $(BUILD_LOG_DIR) $(FT_VOX_OUTPUT_LOCK)
-	-$(RM) $(FT_VOX_OUTPUT_LOGS)
+	-$(RMDIR) $(BUILD_LOG_DIR)
 
 fclean: clean
-	@$(MAKE) -C $(LIBFT_DIR) $(LIBFT_PARALLEL_FLAGS) fclean
+	-$(RMDIR) $(LIBFT_PARENT_SELECTED_BUILD_ROOT)
+	-$(RMDIR) $(LIBFT_PARENT_SELECTED_BUILD_ROOT)
+	-$(RM) $(LIBFT_PARENT_SELECTED_ARCHIVES)
 	-$(RM) $(NAME) $(NAME_DEBUG) $(TEST_NAME)
 	-$(RMDIR) $(OBJ_DIR) $(OBJ_DIR_DEBUG) $(OBJ_DIR_TEST) data
 
@@ -146,15 +153,14 @@ re:
 	@$(MAKE) all
 
 test: $(TEST_NAME)
-	@if [ -x "$(GOINFRE_LOCAL_PREFIX)/bin/cobc" ]; then \
-		PATH="$(GOINFRE_LOCAL_PREFIX)/bin:$$PATH" \
-		LD_LIBRARY_PATH="$(GOINFRE_LOCAL_PREFIX)/lib:$(GOINFRE_LOCAL_PREFIX)/lib64$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH}" \
-		CPATH="$(GOINFRE_LOCAL_PREFIX)/include$${CPATH:+:$$CPATH}" \
-		LIBRARY_PATH="$(GOINFRE_LOCAL_PREFIX)/lib:$(GOINFRE_LOCAL_PREFIX)/lib64$${LIBRARY_PATH:+:$$LIBRARY_PATH}" \
-		./$(TEST_NAME); \
-	else \
-		./$(TEST_NAME); \
-	fi
+	@./$(TEST_NAME) --validate-camera-speed
+	@./$(TEST_NAME) --validate-collision
+	@./$(TEST_NAME) --validate-block-edit
+	@./$(TEST_NAME) --validate-visible-distance
+	@./$(TEST_NAME) --validate-terrain-determinism
+	@./$(TEST_NAME) --validate-world-scale
+	@./$(TEST_NAME) --validate-caves
+	@./$(TEST_NAME) --validate-terrain-configuration
 
 both: all debug
 
@@ -195,6 +201,4 @@ ci:
 
 .PHONY: all dirs clean fclean re debug both re_both tests test lint coverage \
         ci-build ci-test ci-lint ci-coverage ci submodule_init submodule_update \
-        ft_vox install_cobc tests_with_cobc FORCE
-
-FORCE:
+        ft_vox install_cobc tests_with_cobc

@@ -1,5 +1,5 @@
 BUILD_LOG_DIR = ./build_logs
 
-OBJ_DIR         = ./objs
-OBJ_DIR_DEBUG   = ./objs_debug
-OBJ_DIR_TEST    = ./objs_tests
+OBJ_DIR         = ./objs$(LIBFT_BUILD_OUTPUT_SUFFIX)
+OBJ_DIR_DEBUG   = ./objs_debug$(LIBFT_BUILD_OUTPUT_SUFFIX)
+OBJ_DIR_TEST    = ./objs_tests$(LIBFT_BUILD_OUTPUT_SUFFIX)
