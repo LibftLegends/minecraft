@@ -7,6 +7,9 @@ SHELL := /bin/bash
 endif
 
 MAKEFLAGS += -r
+# BUILD_PLAN_MODE=1 is used by the stale-work planning wrapper.  Recipes emit
+# machine-readable markers in that mode and concise status lines otherwise.
+BUILD_PLAN_MODE ?= 0
 # The parent graph uses GNU Make features available in 3.81. Output
 # synchronization is optional and must not prevent builds on Apple Make 3.81.
 FT_VOX_SUPPORTED_MAKE_VERSION := $(filter 3.81 3.82 4.% 5.% 6.% 7.% 8.% 9.%,$(MAKE_VERSION))
@@ -63,6 +66,7 @@ LIBFT_PARENT_SELECTED_ARCHIVES := $(LIBFT_GLOBAL_RELEASE_ARCHIVES) \
 
 define LIBFT_PARENT_ARCHIVE_RULE
 $(1): $(2) $(LIBFT_GLOBAL_ARCHIVE_CONFIG_INPUTS)
+	@if [ "$$(BUILD_PLAN_MODE)" = "1" ]; then printf '%s\n' "__BUILD_PLAN__|archive|libft|Full_Libft|$(1)"; else printf '\033[1;35m[LIBFT] Archiving %s\033[0m\n' "$(1)"; fi
 	@$(MKDIR) $(dir $$@)
 	@$(RM) $$@.tmp
 	@if [ "$$(uname -s)" = "Darwin" ]; then \
@@ -70,9 +74,10 @@ $(1): $(2) $(LIBFT_GLOBAL_ARCHIVE_CONFIG_INPUTS)
 	else \
 		{ printf 'CREATE %s\n' "$$@.tmp"; \
 		  for lib in $(2); do printf 'ADDLIB %s\n' "$$$$lib"; done; \
-		  printf 'SAVE\nEND\n'; } | $(AR) -M; \
+		  printf 'SAVE\nEND\n'; } | $(AR) -M >/dev/null; \
 	fi
 	@mv $$@.tmp $$@
+	@printf '\033[1;35m[LIBFT] Archive ready: %s\033[0m\n' "$(1)"
 endef
 
 $(eval $(call LIBFT_PARENT_ARCHIVE_RULE,$(LIBFT_PARENT_GLOBAL_TARGET),$(LIBFT_GLOBAL_RELEASE_ARCHIVES)))
@@ -84,9 +89,20 @@ else
 SUBMODULE_UPDATE_CMD = sh tools/update_libft.sh
 endif
 
-all: $(TARGET)
+all:
+	@sh Libft/mk/print_build_plan.sh "$(MAKE)" internal-all
+	+$(MAKE) --no-print-directory internal-all BUILD_WRAPPER_ACTIVE=1
 
-tests: $(TEST_NAME)
+plan:
+	@sh Libft/mk/print_build_plan.sh "$(MAKE)" internal-all
+
+internal-all: $(TARGET)
+
+tests:
+	@sh Libft/mk/print_build_plan.sh "$(MAKE)" internal-tests
+	+$(MAKE) --no-print-directory internal-tests BUILD_WRAPPER_ACTIVE=1
+
+internal-tests: $(TEST_NAME)
 
 dirs:
 	@-$(MKDIR) $(OBJ_DIR)
@@ -114,25 +130,33 @@ submodule_update:
 	@$(SUBMODULE_UPDATE_CMD)
 
 debug:
-	$(MAKE) all DEBUG=1
+	@sh Libft/mk/print_build_plan.sh "$(MAKE)" internal-debug
+	+$(MAKE) --no-print-directory internal-debug BUILD_WRAPPER_ACTIVE=1
+
+internal-debug: $(NAME_DEBUG)
 
 $(TARGET): $(OBJS) $(LIBFT_LINK_LIB) $(FT_VOX_BUILD_CONFIG_INPUTS)
-	@printf '\033[1;36m[FT_VOX BUILD] Linking %s\033[0m\n' "$@"
+	@if [ "$(BUILD_PLAN_MODE)" = "1" ]; then printf '%s\n' "__BUILD_PLAN__|link|minecraft|Minecraft|$@"; else printf '\033[1;35m[MINECRAFT] Linking %s\033[0m\n' "$@"; fi
 	@$(CC) $(CFLAGS) $(OBJS) $(LIBFT_LINK_FLAGS) -o $@ $(LDFLAGS)
+	@printf '\033[1;35m[MINECRAFT] Link ready: %s\033[0m\n' "$@"
 
 $(TEST_NAME): $(TEST_OBJS) $(OBJS_NO_MAIN) $(TARGET) $(LIBFT_FULL_LIB) \
         $(FT_VOX_BUILD_CONFIG_INPUTS)
-	@printf '\033[1;36m[FT_VOX BUILD] Linking %s\033[0m\n' "$@"
+	@if [ "$(BUILD_PLAN_MODE)" = "1" ]; then printf '%s\n' "__BUILD_PLAN__|link|minecraft|MinecraftTest|$@"; else printf '\033[1;35m[MINECRAFT][Test] Linking %s\033[0m\n' "$@"; fi
 	@$(CC) $(CFLAGS) $(TEST_OBJS) $(OBJS_NO_MAIN) $(LIBFT_LINK_FLAGS) -o $@ $(LDFLAGS)
+	@printf '\033[1;35m[MINECRAFT][Test] Link ready: %s\033[0m\n' "$@"
 
 $(OBJ_DIR)/%.o: %.cpp | $$(dir $$@)
-	$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $< -o $@
+	@if [ "$(BUILD_PLAN_MODE)" = "1" ]; then printf '%s\n' "__BUILD_PLAN__|compile|minecraft|Minecraft|$<"; else printf '\033[1;36m[MINECRAFT] Compiling %s\033[0m\n' "$<"; fi
+	@$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $< -o $@
 
 $(OBJ_DIR)/%.o: %.mm | $$(dir $$@)
-	$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $< -o $@
+	@if [ "$(BUILD_PLAN_MODE)" = "1" ]; then printf '%s\n' "__BUILD_PLAN__|compile|minecraft|Minecraft|$<"; else printf '\033[1;36m[MINECRAFT] Compiling %s\033[0m\n' "$<"; fi
+	@$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $< -o $@
 
 $(OBJ_DIR_TEST)/%.o: %.cpp | $$(dir $$@)
-	$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $< -o $@
+	@if [ "$(BUILD_PLAN_MODE)" = "1" ]; then printf '%s\n' "__BUILD_PLAN__|compile|minecraft|MinecraftTest|$<"; else printf '\033[1;36m[MINECRAFT][Test] Compiling %s\033[0m\n' "$<"; fi
+	@$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $< -o $@
 
 -include $(DEPS)
 
@@ -154,7 +178,7 @@ re:
 	@$(MAKE) fclean
 	@$(MAKE) all
 
-test: $(TEST_NAME)
+test: tests
 	@./$(TEST_NAME) --validate-camera-speed
 	@./$(TEST_NAME) --validate-collision
 	@./$(TEST_NAME) --validate-block-edit
@@ -201,6 +225,6 @@ ci:
 	$(MAKE) ci-lint
 	$(MAKE) ci-coverage
 
-.PHONY: all dirs clean fclean re debug both re_both tests test lint coverage \
+.PHONY: all plan internal-all dirs clean fclean re debug internal-debug both re_both tests internal-tests test lint coverage \
         ci-build ci-test ci-lint ci-coverage ci submodule_init submodule_update \
         ft_vox install_cobc tests_with_cobc

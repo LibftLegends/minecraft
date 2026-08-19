@@ -43,10 +43,19 @@ Useful validation commands are:
 
 ```sh
 make -j2 all
+make plan
 make --trace -j2 all
 make -j2 tests
 make test
 ```
+
+The public build and test targets first perform a read-only Make planning pass
+and report how many stale source targets require rebuilding. Minecraft and
+Libft work are grouped separately, with Libft broken down by module. The real
+build then prints concise compile, archive, and link messages while preserving
+compiler diagnostics. The planning pass uses the same flattened dependency
+graph as the build and does not maintain shared progress files or object-count
+scans.
 
 `make test` runs the complete headless validator set. It does not launch the
 interactive game; use `make all` and run `./ft_vox` separately for that.
