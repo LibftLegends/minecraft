@@ -10,6 +10,8 @@ MAKEFLAGS += -r
 # BUILD_PLAN_MODE=1 is used by the stale-work planning wrapper.  Recipes emit
 # machine-readable markers in that mode and concise status lines otherwise.
 BUILD_PLAN_MODE ?= 0
+BUILD_PROGRESS_ACTIVE ?= 0
+BUILD_PROGRESS_SESSION_DIR ?=
 # The parent graph uses GNU Make features available in 3.81. Output
 # synchronization is optional and must not prevent builds on Apple Make 3.81.
 FT_VOX_SUPPORTED_MAKE_VERSION := $(filter 3.81 3.82 4.% 5.% 6.% 7.% 8.% 9.%,$(MAKE_VERSION))
@@ -78,6 +80,9 @@ $(1): $(2) $(LIBFT_GLOBAL_ARCHIVE_CONFIG_INPUTS)
 	fi
 	@mv $$@.tmp $$@
 	@printf '\033[1;35m[LIBFT] Archive ready: %s\033[0m\n' "$(1)"
+	@if [ "$$(BUILD_PROGRESS_ACTIVE)" = "1" ]; then \
+		sh Libft/mk/update_build_progress.sh "$$(BUILD_PROGRESS_SESSION_DIR)" archive libft Full_Libft || true; \
+	fi
 endef
 
 $(eval $(call LIBFT_PARENT_ARCHIVE_RULE,$(LIBFT_PARENT_GLOBAL_TARGET),$(LIBFT_GLOBAL_RELEASE_ARCHIVES)))
@@ -90,8 +95,7 @@ SUBMODULE_UPDATE_CMD = sh tools/update_libft.sh
 endif
 
 all:
-	@sh Libft/mk/print_build_plan.sh "$(MAKE)" internal-all
-	+$(MAKE) --no-print-directory internal-all BUILD_WRAPPER_ACTIVE=1
+	@sh Libft/mk/run_build_with_progress.sh "$(MAKE)" internal-all
 
 plan:
 	@sh Libft/mk/print_build_plan.sh "$(MAKE)" internal-all
@@ -99,8 +103,7 @@ plan:
 internal-all: $(TARGET)
 
 tests:
-	@sh Libft/mk/print_build_plan.sh "$(MAKE)" internal-tests
-	+$(MAKE) --no-print-directory internal-tests BUILD_WRAPPER_ACTIVE=1
+	@sh Libft/mk/run_build_with_progress.sh "$(MAKE)" internal-tests
 
 internal-tests: $(TEST_NAME)
 
@@ -130,8 +133,7 @@ submodule_update:
 	@$(SUBMODULE_UPDATE_CMD)
 
 debug:
-	@sh Libft/mk/print_build_plan.sh "$(MAKE)" internal-debug
-	+$(MAKE) --no-print-directory internal-debug BUILD_WRAPPER_ACTIVE=1
+	@sh Libft/mk/run_build_with_progress.sh "$(MAKE)" internal-debug
 
 internal-debug: $(NAME_DEBUG)
 
@@ -149,14 +151,23 @@ $(TEST_NAME): $(TEST_OBJS) $(OBJS_NO_MAIN) $(TARGET) $(LIBFT_FULL_LIB) \
 $(OBJ_DIR)/%.o: %.cpp | $$(dir $$@)
 	@if [ "$(BUILD_PLAN_MODE)" = "1" ]; then printf '%s\n' "__BUILD_PLAN__|compile|minecraft|Minecraft|$<"; else printf '\033[1;36m[MINECRAFT] Compiling %s\033[0m\n' "$<"; fi
 	@$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $< -o $@
+	@if [ "$(BUILD_PROGRESS_ACTIVE)" = "1" ]; then \
+		sh Libft/mk/update_build_progress.sh "$(BUILD_PROGRESS_SESSION_DIR)" compile minecraft Minecraft || true; \
+	fi
 
 $(OBJ_DIR)/%.o: %.mm | $$(dir $$@)
 	@if [ "$(BUILD_PLAN_MODE)" = "1" ]; then printf '%s\n' "__BUILD_PLAN__|compile|minecraft|Minecraft|$<"; else printf '\033[1;36m[MINECRAFT] Compiling %s\033[0m\n' "$<"; fi
 	@$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $< -o $@
+	@if [ "$(BUILD_PROGRESS_ACTIVE)" = "1" ]; then \
+		sh Libft/mk/update_build_progress.sh "$(BUILD_PROGRESS_SESSION_DIR)" compile minecraft Minecraft || true; \
+	fi
 
 $(OBJ_DIR_TEST)/%.o: %.cpp | $$(dir $$@)
 	@if [ "$(BUILD_PLAN_MODE)" = "1" ]; then printf '%s\n' "__BUILD_PLAN__|compile|minecraft|MinecraftTest|$<"; else printf '\033[1;36m[MINECRAFT][Test] Compiling %s\033[0m\n' "$<"; fi
 	@$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $< -o $@
+	@if [ "$(BUILD_PROGRESS_ACTIVE)" = "1" ]; then \
+		sh Libft/mk/update_build_progress.sh "$(BUILD_PROGRESS_SESSION_DIR)" compile minecraft MinecraftTest || true; \
+	fi
 
 -include $(DEPS)
 
