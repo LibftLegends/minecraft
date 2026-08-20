@@ -149,24 +149,30 @@ $(TEST_NAME): $(TEST_OBJS) $(OBJS_NO_MAIN) $(TARGET) $(LIBFT_FULL_LIB) \
 	@printf '\033[1;35m[MINECRAFT][Test] Link ready: %s\033[0m\n' "$@"
 
 $(OBJ_DIR)/%.o: %.cpp | $$(dir $$@)
-	@if [ "$(BUILD_PLAN_MODE)" = "1" ]; then printf '%s\n' "__BUILD_PLAN__|compile|minecraft|Minecraft|$<"; else printf '\033[1;36m[MINECRAFT] Compiling %s\033[0m\n' "$<"; fi
+	@if [ "$(BUILD_PLAN_MODE)" = "1" ]; then printf '%s\n' "__BUILD_PLAN__|compile|minecraft|Minecraft|$<"; fi
 	@$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $< -o $@
 	@if [ "$(BUILD_PROGRESS_ACTIVE)" = "1" ]; then \
-		sh Libft/mk/update_build_progress.sh "$(BUILD_PROGRESS_SESSION_DIR)" compile minecraft Minecraft || true; \
+		sh Libft/mk/update_build_progress.sh "$(BUILD_PROGRESS_SESSION_DIR)" compile minecraft Minecraft "$<" || true; \
+	else \
+		printf '\033[1;36m[MINECRAFT] Compiling %s\033[0m\n' "$<"; \
 	fi
 
 $(OBJ_DIR)/%.o: %.mm | $$(dir $$@)
-	@if [ "$(BUILD_PLAN_MODE)" = "1" ]; then printf '%s\n' "__BUILD_PLAN__|compile|minecraft|Minecraft|$<"; else printf '\033[1;36m[MINECRAFT] Compiling %s\033[0m\n' "$<"; fi
+	@if [ "$(BUILD_PLAN_MODE)" = "1" ]; then printf '%s\n' "__BUILD_PLAN__|compile|minecraft|Minecraft|$<"; fi
 	@$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $< -o $@
 	@if [ "$(BUILD_PROGRESS_ACTIVE)" = "1" ]; then \
-		sh Libft/mk/update_build_progress.sh "$(BUILD_PROGRESS_SESSION_DIR)" compile minecraft Minecraft || true; \
+		sh Libft/mk/update_build_progress.sh "$(BUILD_PROGRESS_SESSION_DIR)" compile minecraft Minecraft "$<" || true; \
+	else \
+		printf '\033[1;36m[MINECRAFT] Compiling %s\033[0m\n' "$<"; \
 	fi
 
 $(OBJ_DIR_TEST)/%.o: %.cpp | $$(dir $$@)
-	@if [ "$(BUILD_PLAN_MODE)" = "1" ]; then printf '%s\n' "__BUILD_PLAN__|compile|minecraft|MinecraftTest|$<"; else printf '\033[1;36m[MINECRAFT][Test] Compiling %s\033[0m\n' "$<"; fi
+	@if [ "$(BUILD_PLAN_MODE)" = "1" ]; then printf '%s\n' "__BUILD_PLAN__|compile|minecraft|MinecraftTest|$<"; fi
 	@$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -MT $@ -c $< -o $@
 	@if [ "$(BUILD_PROGRESS_ACTIVE)" = "1" ]; then \
-		sh Libft/mk/update_build_progress.sh "$(BUILD_PROGRESS_SESSION_DIR)" compile minecraft MinecraftTest || true; \
+		sh Libft/mk/update_build_progress.sh "$(BUILD_PROGRESS_SESSION_DIR)" compile minecraft MinecraftTest "$<" || true; \
+	else \
+		printf '\033[1;36m[MINECRAFT][Test] Compiling %s\033[0m\n' "$<"; \
 	fi
 
 -include $(DEPS)
