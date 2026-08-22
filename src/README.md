@@ -51,6 +51,25 @@ templates are supplied through `terrain_feature_rule`. Validate a policy with
 `terrain_generation_config_is_valid` before starting generation. The
 integration check is available through `--validate-terrain-configuration`.
 
+Biome sizing is explicit and can be tuned globally or per biome. Set
+`enable_biome_size_control` to `FT_FALSE` to use the fixed legacy zone size,
+or enable it and set the global fallback range with
+`set_biome_size_range(minimum, maximum)`. Individual biomes can opt into their
+own range with `set_biome_size_range_for_biome(index, minimum, maximum)` and
+can be disabled again with `set_biome_size_override_enabled(index, FT_FALSE)`.
+The same fields can be supplied to a regeneration request, so a small,
+temporary mountain range does not alter the saved baseline policy:
+
+```cpp
+terrain_generation_config revision_config;
+revision_config.initialize(world.terrain_generation_settings());
+revision_config.set_biome_size_control_enabled(FT_TRUE);
+revision_config.set_biome_size_range_for_biome(
+    TERRAIN_BIOME_MOUNTAINS, 16, 64);
+request.config.initialize(revision_config);
+world.apply_revision_request(request, &result);
+```
+
 ## World revisions
 
 `World` exposes server-side revision primitives for applying a new terrain

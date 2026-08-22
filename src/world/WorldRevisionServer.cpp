@@ -73,9 +73,68 @@ int32_t WorldRevisionServer::handle_revision_message(const char *message)
         json_item *mode_item = json_find_item(revision, "mode");
         int32_t mode = mode_item == nullptr ? -1 : ft_atoi(mode_item->value);
         if (mode >= World::REGEN_DECORATION_REFRESH && mode <= World::REGEN_FULL)
-            result = this->world_->begin_world_revision(
-                this->world_->terrain_generation_settings(),
-                static_cast<World::RegenerationMode>(mode));
+        {
+            terrain_generation_config revision_config;
+            result = revision_config.initialize(
+                this->world_->terrain_generation_settings());
+            json_item *sizes_enabled = json_find_item(revision,
+                "biome_sizes_enabled");
+            json_item *size_min = json_find_item(revision, "biome_size_min");
+            json_item *size_max = json_find_item(revision, "biome_size_max");
+            if (result == FT_ERR_SUCCESS && sizes_enabled != nullptr)
+            {
+                int32_t enabled = ft_atoi(sizes_enabled->value);
+                if (enabled < 0 || enabled > 1)
+                    result = FT_ERR_INVALID_ARGUMENT;
+                else
+                    result = revision_config.set_biome_size_control_enabled(
+                        static_cast<ft_bool>(enabled));
+            }
+            if (result == FT_ERR_SUCCESS && (size_min != nullptr
+                || size_max != nullptr))
+            {
+                if (size_min == nullptr || size_max == nullptr)
+                    result = FT_ERR_INVALID_ARGUMENT;
+                else
+                    result = revision_config.set_biome_size_range(
+                        ft_atoi(size_min->value), ft_atoi(size_max->value));
+            }
+            json_item *biome_index = json_find_item(revision, "biome_index");
+            json_item *biome_min = json_find_item(revision, "biome_min");
+            json_item *biome_max = json_find_item(revision, "biome_max");
+            json_item *biome_override = json_find_item(revision,
+                "biome_size_override_enabled");
+            if (result == FT_ERR_SUCCESS && (biome_index != nullptr
+                || biome_min != nullptr || biome_max != nullptr
+                || biome_override != nullptr))
+            {
+                uint32_t index = biome_index == nullptr ? TERRAIN_MAX_CUSTOM_BIOMES
+                    : static_cast<uint32_t>(ft_atoi(biome_index->value));
+                if (biome_index == nullptr || index >= TERRAIN_MAX_CUSTOM_BIOMES)
+                    result = FT_ERR_INVALID_ARGUMENT;
+                else if (biome_min != nullptr || biome_max != nullptr)
+                {
+                    if (biome_min == nullptr || biome_max == nullptr)
+                        result = FT_ERR_INVALID_ARGUMENT;
+                    else
+                        result = revision_config.set_biome_size_range_for_biome(
+                            index, ft_atoi(biome_min->value),
+                            ft_atoi(biome_max->value));
+                }
+                if (result == FT_ERR_SUCCESS && biome_override != nullptr)
+                {
+                    int32_t enabled = ft_atoi(biome_override->value);
+                    if (enabled < 0 || enabled > 1)
+                        result = FT_ERR_INVALID_ARGUMENT;
+                    else
+                        result = revision_config.set_biome_size_override_enabled(
+                            index, static_cast<ft_bool>(enabled));
+                }
+            }
+            if (result == FT_ERR_SUCCESS)
+                result = this->world_->begin_world_revision(revision_config,
+                    static_cast<World::RegenerationMode>(mode));
+        }
     }
     else if (std::strcmp(action, "select") == 0 || std::strcmp(action, "protect") == 0)
     {

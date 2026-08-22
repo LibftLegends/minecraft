@@ -20,19 +20,32 @@ int TerrainConfigValidator::validate() const
     terrain_default_generation_config(config);
     uint32_t block_id;
 
-    if (config.biome_size_min != TERRAIN_BIOME_ZONE_WIDTH
+    if (config.enable_biome_size_control != FT_TRUE
+        || config.biome_size_min != TERRAIN_BIOME_ZONE_WIDTH
         || config.biome_size_max != TERRAIN_BIOME_ZONE_WIDTH
         || config.set_biome_size_range(1024, 2048) != FT_ERR_SUCCESS
-        || config.set_biome_size_range(2048, 1024) == FT_ERR_SUCCESS)
+        || config.set_biome_size_range(2048, 1024) == FT_ERR_SUCCESS
+        || config.set_biome_size_range_for_biome(TERRAIN_BIOME_MOUNTAINS,
+            16, 64) != FT_ERR_SUCCESS
+        || config.set_biome_size_override_enabled(TERRAIN_BIOME_MOUNTAINS,
+            FT_FALSE) != FT_ERR_SUCCESS
+        || config.set_biome_size_override_enabled(TERRAIN_BIOME_MOUNTAINS,
+            FT_TRUE) != FT_ERR_SUCCESS)
         return (1);
+    config.set_biome_size_override_enabled(TERRAIN_BIOME_MOUNTAINS,
+        FT_TRUE);
     uint64_t validator_seed = UINT64_C(0xC0FFEE1234567890);
     int32_t biome_width = terrain_get_biome_zone_width(config,
         validator_seed);
+    int32_t mountain_width = terrain_get_biome_zone_width_for_biome(config,
+        validator_seed, TERRAIN_BIOME_MOUNTAINS);
     if (biome_width < 1024 || biome_width > 2048
-        || terrain_select_biome(config,
-            validator_seed, 0, 0)
-            != terrain_select_biome(config,
-                validator_seed, biome_width - 1, 0))
+        || mountain_width < 16 || mountain_width > 64
+        || config.set_biome_size_control_enabled(FT_FALSE) != FT_ERR_SUCCESS
+        || terrain_get_biome_zone_width(config, validator_seed) != 128
+        || config.set_biome_size_control_enabled(FT_TRUE) != FT_ERR_SUCCESS
+        || terrain_select_biome(config, validator_seed, 0, 0)
+            != terrain_select_biome(config, validator_seed, 0, 0))
         return (1);
 
     config.set_biome_count(1U);
