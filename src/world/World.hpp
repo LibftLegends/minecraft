@@ -16,6 +16,62 @@
 class World
 {
   public:
+    enum RegenerationMode
+    {
+        REGEN_DECORATION_REFRESH = 0,
+        REGEN_UNDERGROUND_REFRESH = 1,
+        REGEN_TERRAIN_RESHAPING = 2,
+        REGEN_FULL = 3
+    };
+
+    enum ChunkRevisionState
+    {
+        REVISION_UNCHANGED = 0,
+        REVISION_PROTECTED = 1,
+        REVISION_SELECTED = 2,
+        REVISION_TRANSITION = 3
+    };
+
+    struct WorldRevision
+    {
+        uint32_t identifier;
+        uint32_t stage_mask;
+        RegenerationMode mode;
+        bool pending;
+        size_t selected_count;
+        size_t manually_protected_count;
+    };
+
+    struct RevisionPreviewEntry
+    {
+        int32_t chunk_x;
+        int32_t chunk_z;
+        ChunkRevisionState state;
+    };
+
+    struct RevisionChunkCoordinate
+    {
+        int32_t chunk_x;
+        int32_t chunk_z;
+    };
+
+    struct RevisionRequest
+    {
+        terrain_generation_config config;
+        RegenerationMode mode;
+        uint32_t stage_mask;
+        std::vector<RevisionChunkCoordinate> selected_chunks;
+        std::vector<RevisionChunkCoordinate> protected_chunks;
+    };
+
+    struct RevisionRequestResult
+    {
+        uint32_t revision_identifier;
+        uint32_t stage_mask;
+        int32_t regenerated_count;
+        int32_t skipped_count;
+    };
+
     struct StreamDiagnostics
     {
         uint64_t frame;
@@ -70,6 +126,23 @@ class World
     bool block_id_at(int32_t world_x, int32_t world_y, int32_t world_z, uint32_t *block_id) const;
     int32_t delete_block_at(int32_t world_x, int32_t world_y, int32_t world_z);
     int32_t place_block_at(int32_t world_x, int32_t world_y, int32_t world_z, uint32_t block_id);
+    int32_t begin_world_revision(const terrain_generation_config &config,
+                                 RegenerationMode mode);
+    int32_t cancel_world_revision();
+    WorldRevision world_revision() const;
+    int32_t select_revision_chunk(int32_t chunk_x, int32_t chunk_z, bool selected);
+    int32_t set_chunk_protected(int32_t chunk_x, int32_t chunk_z, bool protected_state);
+    bool is_chunk_protected(int32_t chunk_x, int32_t chunk_z) const;
+    ChunkRevisionState revision_state(int32_t chunk_x, int32_t chunk_z) const;
+    int32_t build_revision_preview(int32_t preview_center_x, int32_t preview_center_z,
+                                   int32_t radius,
+                                   std::vector<RevisionPreviewEntry> &preview) const;
+    int32_t regenerate_selected_chunks(int32_t *regenerated_count,
+                                       int32_t *skipped_count);
+    int32_t apply_revision_request(const RevisionRequest &request,
+                                   RevisionRequestResult *result);
+    int32_t save_revision_metadata(const char *file_path) const;
+    int32_t load_revision_metadata(const char *file_path);
     int32_t raycast_solid(double origin_x, double origin_y, double origin_z, double direction_x,
                           double direction_y, double direction_z, double max_distance,
                           int32_t *block_x, int32_t *block_y, int32_t *block_z) const;
@@ -108,6 +181,19 @@ class World
     uint64_t stream_frame_;
     uint64_t stream_progress_frame_;
 
+    struct RevisionChunk
+    {
+        int32_t chunk_x;
+        int32_t chunk_z;
+    };
+    bool revision_pending_;
+    uint32_t world_revision_id_;
+    uint32_t revision_stage_mask_;
+    RegenerationMode revision_mode_;
+    terrain_generation_config revision_config_;
+    std::vector<RevisionChunk> revision_selected_;
+    std::vector<RevisionChunk> revision_manual_protected_;
+
     void copy_seed(const char *seed_value);
     void clear_chunk_index();
     void rebuild_chunk_index();
@@ -115,6 +201,13 @@ class World
     int32_t try_load_chunk_at(int32_t chunk_x, int32_t chunk_z);
     int32_t stream_chunks(int32_t stream_radius, int32_t budget, int32_t *generated);
     void prepare_stream_candidates(int32_t stream_radius);
+    static uint32_t stage_mask_for_mode(RegenerationMode mode);
+    static bool revision_contains(const std::vector<RevisionChunk> &list,
+                                  int32_t chunk_x, int32_t chunk_z);
+    static void revision_set(std::vector<RevisionChunk> &list,
+                             int32_t chunk_x, int32_t chunk_z, bool enabled);
+    int32_t regenerate_chunk_for_revision(WorldChunk &chunk);
+    void blend_transition_boundary(WorldChunk &chunk);
 };
 
 #endif

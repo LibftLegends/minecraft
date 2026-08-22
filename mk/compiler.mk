@@ -103,7 +103,7 @@ endif
 export COMPILE_FLAGS
 
 ifeq ($(OS),Windows_NT)
-    LDFLAGS = -lopengl32 -lgdi32 -lws2_32 -ldbghelp
+    LDFLAGS = -lopengl32 -lgdi32 -lws2_32 -ldbghelp -lz
     ifneq ($(OPT_LEVEL),0)
         LDFLAGS += -s -Wl,--gc-sections
     endif

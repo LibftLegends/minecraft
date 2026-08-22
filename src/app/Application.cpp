@@ -113,6 +113,8 @@ int Application::run_validators(const ApplicationOptions &options)
         return ApplicationValidator::validate_caves();
     if (options.validate_terrain_configuration_mode)
         return ApplicationValidator::validate_terrain_configuration();
+    if (options.validate_world_revision_mode)
+        return ApplicationValidator::validate_world_revision();
     return -1;
 }
 

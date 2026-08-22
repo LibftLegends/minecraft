@@ -20,6 +20,21 @@ int TerrainConfigValidator::validate() const
     terrain_default_generation_config(config);
     uint32_t block_id;
 
+    if (config.biome_size_min != TERRAIN_BIOME_ZONE_WIDTH
+        || config.biome_size_max != TERRAIN_BIOME_ZONE_WIDTH
+        || config.set_biome_size_range(1024, 2048) != FT_ERR_SUCCESS
+        || config.set_biome_size_range(2048, 1024) == FT_ERR_SUCCESS)
+        return (1);
+    uint64_t validator_seed = UINT64_C(0xC0FFEE1234567890);
+    int32_t biome_width = terrain_get_biome_zone_width(config,
+        validator_seed);
+    if (biome_width < 1024 || biome_width > 2048
+        || terrain_select_biome(config,
+            validator_seed, 0, 0)
+            != terrain_select_biome(config,
+                validator_seed, biome_width - 1, 0))
+        return (1);
+
     config.set_biome_count(1U);
     config.set_sea_level(0);
     config.set_water_chance_percent(0U);

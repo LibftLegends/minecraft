@@ -171,6 +171,46 @@ void DebugOverlayRenderer::draw_overlay_info(ft_render_framebuffer &fb, const Re
     }
 }
 
+void DebugOverlayRenderer::draw_revision_preview(ft_render_framebuffer &fb,
+                                                  const RenderDebug *d)
+{
+    if (d == nullptr || !d->revision_preview_visible || d->revision_map_radius == 0)
+        return;
+    const int32_t radius = d->revision_map_radius;
+    const int32_t cell = 12;
+    const int32_t origin_x = 285;
+    const int32_t origin_y = 18;
+    for (int32_t z = -radius; z <= radius; ++z)
+    {
+        for (int32_t x = -radius; x <= radius; ++x)
+        {
+            const int32_t map_index = (z + radius) * (radius * 2 + 1) + x + radius;
+            const uint8_t state = d->revision_map[map_index];
+            uint32_t color = RendererColor::rgba(70U, 70U, 70U);
+            if (state == 1U)
+                color = RendererColor::rgba(210U, 75U, 75U);
+            else if (state == 2U)
+                color = RendererColor::rgba(75U, 190U, 85U);
+            else if (state == 3U)
+                color = RendererColor::rgba(220U, 185U, 70U);
+            const int32_t px = origin_x + (x + radius) * cell;
+            const int32_t py = origin_y + (z + radius) * cell;
+            for (int32_t sy = 0; sy < cell - 1; ++sy)
+                for (int32_t sx = 0; sx < cell - 1; ++sx)
+                    if (px + sx >= 0 && px + sx < fb.width && py + sy >= 0 && py + sy < fb.height)
+                        fb.pixels[(py + sy) * fb.width + px + sx] = color;
+        }
+    }
+    char text[128];
+    std::snprintf(text, sizeof(text), "%s  P:%u S:%u T:%u U:%u",
+                  d->revision_pending ? "REVISION PENDING" : "REVISION PREVIEW",
+                  d->revision_protected_count, d->revision_selected_count,
+                  d->revision_transition_count, d->revision_unchanged_count);
+    draw_debug_text(fb, origin_x, origin_y + (radius * 2 + 1) * cell + 8, text, 2);
+    draw_debug_text(fb, origin_x, origin_y + (radius * 2 + 1) * cell + 28,
+                    "RED PROTECTED  GREEN SELECTED  GOLD TRANSITION", 2);
+}
+
 void DebugOverlayRenderer::draw_debug_overlay(ft_render_framebuffer &framebuffer,
                                               const RenderDebug *debug)
 {
@@ -185,4 +225,5 @@ void DebugOverlayRenderer::draw_debug_overlay(ft_render_framebuffer &framebuffer
     draw_overlay_world(framebuffer, debug, x, line, lh, scale);
     draw_overlay_camera(framebuffer, debug, x, line, lh, scale);
     draw_overlay_info(framebuffer, debug, x, line, lh, scale);
+    draw_revision_preview(framebuffer, debug);
 }

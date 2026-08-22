@@ -19,6 +19,7 @@ class ApplicationOptions
     bool validate_world_scale_mode;
     bool validate_caves_mode;
     bool validate_terrain_configuration_mode;
+    bool validate_world_revision_mode;
     double perf_seconds_limit;
 
     ApplicationOptions();

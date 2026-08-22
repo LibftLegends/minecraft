@@ -204,6 +204,7 @@ test: tests
 	@./$(TEST_NAME) --validate-world-scale
 	@./$(TEST_NAME) --validate-caves
 	@./$(TEST_NAME) --validate-terrain-configuration
+	@./$(TEST_NAME) --validate-world-revision
 
 both: all debug
 
