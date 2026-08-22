@@ -29,6 +29,7 @@ SRC = \
     src/validators/TerrainDeterminismValidator.cpp \
     src/validators/TerrainCaveValidator.cpp \
     src/validators/TerrainConfigValidator.cpp \
+    src/validators/WorldRevisionValidator.cpp \
     src/validators/WorldScaleValidator.cpp \
     src/policy/RenderDistanceStrategy.cpp \
     src/policy/AdaptiveRenderStrategy.cpp \
@@ -55,6 +56,7 @@ SRC = \
     src/meshes/PerspectiveTriangleRasterizer.cpp \
     src/meshes/ChunkMeshRenderer.cpp \
     src/world/World.cpp \
+    src/world/WorldRevisionServer.cpp \
     src/coordinates/WorldCoordinates.cpp \
     src/chunks/WorldChunk.cpp \
     src/chunks/WorldChunkStore.cpp \

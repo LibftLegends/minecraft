@@ -8,6 +8,3 @@ else ifneq ($(FT_VOX_PARALLEL_JOBS),)
         FT_VOX_BATCH_OUTPUT := 0
     endif
 endif
-
-FT_VOX_OUTPUT_LOCK = .ft_vox_output_lock
-FT_VOX_OUTPUT_LOGS = .ft_vox_build_*.log

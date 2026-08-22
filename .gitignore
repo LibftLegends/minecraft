@@ -2,8 +2,10 @@ ft_vox
 ft_vox.exe
 ft_vox_debug
 automated_tests
+automated_tests.exe
 objs/
 objs_debug/
 objs_tests/
+/objs*_cfg*/
 build_logs/
 ft_vox_config.json

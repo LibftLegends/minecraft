@@ -51,6 +51,52 @@ templates are supplied through `terrain_feature_rule`. Validate a policy with
 `terrain_generation_config_is_valid` before starting generation. The
 integration check is available through `--validate-terrain-configuration`.
 
+Biome sizing is explicit and can be tuned globally or per biome. Set
+`enable_biome_size_control` to `FT_FALSE` to use the fixed legacy zone size,
+or enable it and set the global fallback range with
+`set_biome_size_range(minimum, maximum)`. Individual biomes can opt into their
+own range with `set_biome_size_range_for_biome(index, minimum, maximum)` and
+can be disabled again with `set_biome_size_override_enabled(index, FT_FALSE)`.
+The same fields can be supplied to a regeneration request, so a small,
+temporary mountain range does not alter the saved baseline policy:
+
+```cpp
+terrain_generation_config revision_config;
+revision_config.initialize(world.terrain_generation_settings());
+revision_config.set_biome_size_control_enabled(FT_TRUE);
+revision_config.set_biome_size_range_for_biome(
+    TERRAIN_BIOME_MOUNTAINS, 16, 64);
+request.config.initialize(revision_config);
+world.apply_revision_request(request, &result);
+```
+
+## World revisions
+
+`World` exposes server-side revision primitives for applying a new terrain
+policy to selected chunks. Call `begin_world_revision` with a regeneration mode,
+protect edited or important chunks with `set_chunk_protected`, select eligible
+coordinates with `select_revision_chunk`, and call
+`regenerate_selected_chunks` only after the preview is confirmed. Edited chunks
+are automatically protected, manual protection includes a one-chunk safety
+ring, and `build_revision_preview` supplies the protected/selected/transition/
+unchanged categories for a map client. Revision identifiers and manual
+protection can be persisted with `save_revision_metadata` and restored with
+`load_revision_metadata`.
+
+Network or multiplayer adapters should submit a `World::RevisionRequest` to
+`World::apply_revision_request`; it performs the server-side validation and
+returns a `RevisionRequestResult` rather than requiring clients to mutate the
+world directly.
+
+In the interactive client, press `M` to show the read-only revision preview in
+the HUD. It is centered on the player and uses red/protected, green/selected,
+gold/transition, and gray/unchanged cells.
+
+The terrain library supports the same stage masks used by the four modes, so
+decoration and underground refreshes operate on the existing chunk while full
+regeneration rebuilds it. Selected boundaries adjacent to loaded protected
+chunks receive a height blend before their meshes are rebuilt.
+
 ## Folders
 
 - `app`: `Application`, the application facade and main loop entry point.

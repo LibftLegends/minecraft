@@ -58,3 +58,8 @@ int ApplicationValidator::validate_terrain_configuration()
 {
     return (TerrainConfigValidator().validate());
 }
+
+int ApplicationValidator::validate_world_revision()
+{
+    return (WorldRevisionValidator().validate());
+}

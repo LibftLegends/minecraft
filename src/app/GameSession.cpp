@@ -13,7 +13,7 @@ GameSession::GameSession()
       rd_accumulator_(0.0), display_fps_(0.0), frame_ms_(0.0), performance_frame_ms_(16.67),
       fps_frame_count_(0U),
       selected_block_id_(TERRAIN_GENERATOR_DIRT_BLOCK), boost_enabled_(false), active_(false),
-      error_code_(FT_ERR_SUCCESS)
+      revision_preview_visible_(false), error_code_(FT_ERR_SUCCESS)
 {
     seed_[0] = '\0';
 }
@@ -24,7 +24,7 @@ GameSession::GameSession(const GameSession &other)
       rd_accumulator_(0.0), display_fps_(0.0), frame_ms_(0.0), performance_frame_ms_(16.67),
       fps_frame_count_(0U),
       selected_block_id_(TERRAIN_GENERATOR_DIRT_BLOCK), boost_enabled_(false), active_(false),
-      error_code_(FT_ERR_SUCCESS)
+      revision_preview_visible_(false), error_code_(FT_ERR_SUCCESS)
 {
     (void)other;
     seed_[0] = '\0';
@@ -89,6 +89,7 @@ int GameSession::start(const std::string &seed, ApplicationWindow &window, Voxel
     sync_player_character_location();
     active_render_distance_ = Settings::instance().render_distance();
     boost_enabled_ = false;
+    revision_preview_visible_ = false;
     selected_block_id_ = TERRAIN_GENERATOR_DIRT_BLOCK;
     fps_accumulator_ = 0.0;
     fps_frame_count_ = 0U;
@@ -175,6 +176,8 @@ GameSession::Action GameSession::handle_navigation(ApplicationWindow &window)
         return Action::OPEN_SETTINGS;
     if (ft_dumb_control_was_pressed(FT_DUMB_CONTROL_BOOST) == FT_TRUE)
         boost_enabled_ = !boost_enabled_;
+    if (ft_dumb_control_was_pressed(FT_DUMB_CONTROL_SETTINGS) == FT_TRUE)
+        revision_preview_visible_ = !revision_preview_visible_;
     return Action::CONTINUE;
 }
 
@@ -275,6 +278,38 @@ void GameSession::build_render_debug(VoxelRenderer &renderer)
         std::snprintf(render_debug_.biome_name, sizeof(render_debug_.biome_name),
             "CUSTOM_%u", biome_index);
     render_debug_.biome_name[sizeof(render_debug_.biome_name) - 1] = '\0';
+    render_debug_.revision_preview_visible = revision_preview_visible_;
+    if (!revision_preview_visible_)
+        return;
+    render_debug_.revision_pending = world_.world_revision().pending;
+    std::vector<World::RevisionPreviewEntry> preview;
+    const int32_t center_x = WorldCoordinates::floor_divide(
+        static_cast<int32_t>(std::floor(camera_.x)), GAME_VOXEL_CHUNK_WIDTH);
+    const int32_t center_z = WorldCoordinates::floor_divide(
+        static_cast<int32_t>(std::floor(camera_.z)), GAME_VOXEL_CHUNK_DEPTH);
+    if (world_.build_revision_preview(center_x, center_z, 6, preview) != FT_ERR_SUCCESS)
+        return;
+    render_debug_.revision_map_radius = 6;
+    render_debug_.revision_protected_count = 0U;
+    render_debug_.revision_selected_count = 0U;
+    render_debug_.revision_transition_count = 0U;
+    render_debug_.revision_unchanged_count = 0U;
+    for (const World::RevisionPreviewEntry &entry : preview)
+    {
+        const int32_t local_x = entry.chunk_x - center_x + 6;
+        const int32_t local_z = entry.chunk_z - center_z + 6;
+        const int32_t map_index = local_z * 13 + local_x;
+        render_debug_.revision_map[map_index] =
+            static_cast<uint8_t>(entry.state);
+        if (entry.state == World::REVISION_PROTECTED)
+            render_debug_.revision_protected_count += 1U;
+        else if (entry.state == World::REVISION_SELECTED)
+            render_debug_.revision_selected_count += 1U;
+        else if (entry.state == World::REVISION_TRANSITION)
+            render_debug_.revision_transition_count += 1U;
+        else
+            render_debug_.revision_unchanged_count += 1U;
+    }
 }
 
 void GameSession::sync_player_character_location()
@@ -290,6 +325,7 @@ void GameSession::render(ApplicationWindow &window, VoxelRenderer &renderer, boo
         return;
     build_render_debug(renderer);
     const RenderDebug *dbg =
-        (with_overlay && Settings::instance().fps_overlay()) ? &render_debug_ : nullptr;
+        (with_overlay && (Settings::instance().fps_overlay() || revision_preview_visible_))
+        ? &render_debug_ : nullptr;
     renderer.render_world(window.framebuffer(), camera_, world_, dbg);
 }

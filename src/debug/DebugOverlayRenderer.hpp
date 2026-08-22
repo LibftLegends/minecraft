@@ -36,7 +36,8 @@ class DebugOverlayRenderer
     static void draw_overlay_camera(ft_render_framebuffer &fb, const RenderDebug *d, int32_t x,
                                     int32_t &line, int32_t lh, int32_t scale);
     static void draw_overlay_info(ft_render_framebuffer &fb, const RenderDebug *d, int32_t x,
-                                  int32_t &line, int32_t lh, int32_t scale);
+                                   int32_t &line, int32_t lh, int32_t scale);
+    static void draw_revision_preview(ft_render_framebuffer &fb, const RenderDebug *d);
 };
 
 #endif

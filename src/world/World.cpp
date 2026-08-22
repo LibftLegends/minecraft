@@ -1,6 +1,20 @@
 #include "../../src/world/World.hpp"
 
-World::World(const World &other) : stream_candidates_radius_(-1) { (void)other; }
+static const uint8_t WORLD_STREAM_CANDIDATE_ABSENT = 0U;
+static const uint8_t WORLD_STREAM_CANDIDATE_QUEUED = 1U;
+static const uint8_t WORLD_STREAM_CANDIDATE_GENERATING = 2U;
+static const uint8_t WORLD_STREAM_CANDIDATE_GENERATED = 3U;
+static const uint8_t WORLD_STREAM_CANDIDATE_MESHING = 4U;
+static const uint8_t WORLD_STREAM_CANDIDATE_READY = 5U;
+static const uint8_t WORLD_STREAM_CANDIDATE_FAILED_RETRYABLE = 6U;
+
+World::World(const World &other) : stream_candidates_radius_(-1),
+    stream_candidate_cursor_(0U), generation_credit_(0), stream_last_error_(0),
+    stream_retryable_count_(0), stream_relevance_epoch_(1U),
+    generation_revision_(1U), stream_frame_(0U), stream_progress_frame_(0U),
+    revision_pending_(false), world_revision_id_(1U), revision_stage_mask_(0U),
+    revision_mode_(REGEN_FULL)
+{ (void)other; }
 World &World::operator=(const World &other)
 { (void)other; return (*this); }
 
@@ -15,6 +29,18 @@ World::World()
     this->chunk_index_center_z = 0;
     this->active_render_distance = WorldCoordinates::REQUIRED_VISIBLE_DISTANCE;
     this->stream_candidates_radius_ = -1;
+    this->stream_candidate_cursor_ = 0U;
+    this->generation_credit_ = 0;
+    this->stream_last_error_ = FT_ERR_SUCCESS;
+    this->stream_retryable_count_ = 0;
+    this->stream_relevance_epoch_ = 1U;
+    this->generation_revision_ = 1U;
+    this->stream_frame_ = 0U;
+    this->stream_progress_frame_ = 0U;
+    this->revision_pending_ = false;
+    this->world_revision_id_ = 1U;
+    this->revision_stage_mask_ = 0U;
+    this->revision_mode_ = REGEN_FULL;
     this->seed[0] = '\0';
     terrain_default_generation_config(this->terrain_config);
     this->terrain_generation_started = false;
@@ -129,6 +155,11 @@ int32_t World::initialize(const char *seed_value,
     this->center_chunk_x = 0;
     this->center_chunk_z = 0;
     this->active_render_distance = WorldCoordinates::REQUIRED_VISIBLE_DISTANCE;
+    this->generation_credit_ = 0;
+    this->stream_last_error_ = FT_ERR_SUCCESS;
+    this->stream_retryable_count_ = 0;
+    this->stream_frame_ = 0U;
+    this->stream_progress_frame_ = 0U;
     this->clear_chunk_index();
     this->copy_seed(seed_value);
     if (terrain_config_file_path != nullptr)
@@ -163,6 +194,7 @@ void World::prepare_stream_candidates(int32_t stream_radius)
     if (this->stream_candidates_radius_ == stream_radius)
         return;
     this->stream_candidates_.clear();
+    this->stream_candidate_cursor_ = 0U;
     this->stream_candidates_.reserve(static_cast<size_t>((stream_radius * 2 + 1) *
                                                          (stream_radius * 2 + 1)));
     const int32_t radius_sq = stream_radius * stream_radius;
@@ -172,7 +204,10 @@ void World::prepare_stream_candidates(int32_t stream_radius)
         {
             const int32_t dist_sq = (x * x) + (z * z);
             if (dist_sq <= radius_sq)
-                this->stream_candidates_.push_back({x, z, dist_sq});
+                this->stream_candidates_.push_back({x, z, dist_sq,
+                    WORLD_STREAM_CANDIDATE_ABSENT, 0U, 0, FT_ERR_SUCCESS,
+                    this->stream_relevance_epoch_, this->generation_revision_,
+                    0U});
         }
     }
     std::sort(this->stream_candidates_.begin(), this->stream_candidates_.end(),
@@ -189,6 +224,9 @@ void World::prepare_stream_candidates(int32_t stream_radius)
                   return a.offset_x < b.offset_x;
               });
     this->stream_candidates_radius_ = stream_radius;
+    this->stream_retryable_count_ = 0;
+    this->stream_relevance_epoch_ += 1U;
+    this->generation_revision_ += 1U;
 }
 
 void World::set_terrain_config(const terrain_generation_config &config)
@@ -196,6 +234,430 @@ void World::set_terrain_config(const terrain_generation_config &config)
     if (this->terrain_generation_started)
         return;
     this->terrain_config.initialize(config);
+}
+
+uint32_t World::stage_mask_for_mode(RegenerationMode mode)
+{
+    if (mode == REGEN_DECORATION_REFRESH)
+        return (TERRAIN_STAGE_DECORATION | TERRAIN_STAGE_STRUCTURES);
+    if (mode == REGEN_UNDERGROUND_REFRESH)
+        return (TERRAIN_STAGE_CAVES | TERRAIN_STAGE_ORES);
+    if (mode == REGEN_TERRAIN_RESHAPING)
+        return (TERRAIN_STAGE_BASE_TERRAIN | TERRAIN_STAGE_FLUIDS
+            | TERRAIN_STAGE_DECORATION | TERRAIN_STAGE_STRUCTURES);
+    return (TERRAIN_STAGE_BASE_TERRAIN | TERRAIN_STAGE_CAVES
+        | TERRAIN_STAGE_FLUIDS | TERRAIN_STAGE_DECORATION
+        | TERRAIN_STAGE_STRUCTURES | TERRAIN_STAGE_ORES);
+}
+
+bool World::revision_contains(const std::vector<RevisionChunk> &list,
+                              int32_t chunk_x, int32_t chunk_z)
+{
+    for (const RevisionChunk &entry : list)
+    {
+        if (entry.chunk_x == chunk_x && entry.chunk_z == chunk_z)
+            return (true);
+    }
+    return (false);
+}
+
+void World::revision_set(std::vector<RevisionChunk> &list,
+                         int32_t chunk_x, int32_t chunk_z, bool enabled)
+{
+    for (std::vector<RevisionChunk>::iterator it = list.begin(); it != list.end(); ++it)
+    {
+        if (it->chunk_x == chunk_x && it->chunk_z == chunk_z)
+        {
+            if (!enabled)
+                list.erase(it);
+            return;
+        }
+    }
+    if (enabled)
+        list.push_back({chunk_x, chunk_z});
+}
+
+int32_t World::begin_world_revision(const terrain_generation_config &config,
+                                    RegenerationMode mode)
+{
+    if (!this->terrain_generation_started || this->revision_pending_)
+        return (FT_ERR_INVALID_OPERATION);
+    if (mode < REGEN_DECORATION_REFRESH || mode > REGEN_FULL)
+        return (FT_ERR_INVALID_ARGUMENT);
+    if (this->revision_config_.initialize(config) != FT_ERR_SUCCESS)
+        return (FT_ERR_INVALID_ARGUMENT);
+    if (terrain_generation_config_is_valid(this->revision_config_) == FT_FALSE)
+        return (FT_ERR_INVALID_ARGUMENT);
+    this->revision_pending_ = true;
+    this->revision_mode_ = mode;
+    this->revision_stage_mask_ = stage_mask_for_mode(mode);
+    this->revision_selected_.clear();
+    return (FT_ERR_SUCCESS);
+}
+
+int32_t World::cancel_world_revision()
+{
+    if (!this->revision_pending_)
+        return (FT_ERR_INVALID_OPERATION);
+    this->revision_pending_ = false;
+    this->revision_selected_.clear();
+    return (FT_ERR_SUCCESS);
+}
+
+World::WorldRevision World::world_revision() const
+{
+    WorldRevision result;
+    result.identifier = this->world_revision_id_;
+    result.stage_mask = this->revision_stage_mask_;
+    result.mode = this->revision_mode_;
+    result.pending = this->revision_pending_;
+    result.selected_count = this->revision_selected_.size();
+    result.manually_protected_count = this->revision_manual_protected_.size();
+    return (result);
+}
+
+int32_t World::select_revision_chunk(int32_t chunk_x, int32_t chunk_z, bool selected)
+{
+    if (!this->revision_pending_)
+        return (FT_ERR_INVALID_OPERATION);
+    if (selected && this->is_chunk_protected(chunk_x, chunk_z))
+        return (FT_ERR_INVALID_OPERATION);
+    revision_set(this->revision_selected_, chunk_x, chunk_z, selected);
+    return (FT_ERR_SUCCESS);
+}
+
+int32_t World::set_chunk_protected(int32_t chunk_x, int32_t chunk_z,
+                                   bool protected_state)
+{
+    revision_set(this->revision_manual_protected_, chunk_x, chunk_z, protected_state);
+    if (protected_state)
+        revision_set(this->revision_selected_, chunk_x, chunk_z, false);
+    return (FT_ERR_SUCCESS);
+}
+
+bool World::is_chunk_protected(int32_t chunk_x, int32_t chunk_z) const
+{
+    const WorldChunk *chunk = this->find_chunk(chunk_x, chunk_z);
+    if (chunk != nullptr && chunk->chunk.is_generation_protected() == FT_TRUE)
+        return (true);
+    for (const RevisionChunk &entry : this->revision_manual_protected_)
+    {
+        if (std::abs(entry.chunk_x - chunk_x) <= 1
+            && std::abs(entry.chunk_z - chunk_z) <= 1)
+            return (true);
+    }
+    return (false);
+}
+
+World::ChunkRevisionState World::revision_state(int32_t chunk_x, int32_t chunk_z) const
+{
+    if (this->is_chunk_protected(chunk_x, chunk_z))
+        return (REVISION_PROTECTED);
+    if (revision_contains(this->revision_selected_, chunk_x, chunk_z))
+        return (REVISION_SELECTED);
+    if (this->revision_pending_)
+    {
+        for (const RevisionChunk &entry : this->revision_selected_)
+        {
+            if (std::abs(entry.chunk_x - chunk_x) <= 1
+                && std::abs(entry.chunk_z - chunk_z) <= 1)
+                return (REVISION_TRANSITION);
+        }
+    }
+    return (REVISION_UNCHANGED);
+}
+
+int32_t World::build_revision_preview(int32_t preview_center_x, int32_t preview_center_z,
+                                      int32_t radius,
+                                      std::vector<RevisionPreviewEntry> &preview) const
+{
+    if (radius < 0 || radius > WorldCoordinates::CACHE_CHUNK_RADIUS)
+        return (FT_ERR_INVALID_ARGUMENT);
+    preview.clear();
+    preview.reserve(static_cast<size_t>((radius * 2 + 1) * (radius * 2 + 1)));
+    for (int32_t z = -radius; z <= radius; ++z)
+    {
+        for (int32_t x = -radius; x <= radius; ++x)
+        {
+            if (x * x + z * z > radius * radius)
+                continue;
+            RevisionPreviewEntry entry;
+            entry.chunk_x = preview_center_x + x;
+            entry.chunk_z = preview_center_z + z;
+            entry.state = this->revision_state(entry.chunk_x, entry.chunk_z);
+            preview.push_back(entry);
+        }
+    }
+    return (FT_ERR_SUCCESS);
+}
+
+int32_t World::regenerate_chunk_for_revision(WorldChunk &chunk)
+{
+    if (this->is_chunk_protected(chunk.chunk_x, chunk.chunk_z))
+        return (FT_ERR_INVALID_OPERATION);
+    const int32_t chunk_x = chunk.chunk_x;
+    const int32_t chunk_z = chunk.chunk_z;
+    int32_t error_code;
+    if (this->revision_mode_ == REGEN_FULL)
+    {
+        chunk.destroy();
+        error_code = WorldChunkLoader::initialize_chunk(&chunk, chunk_x, chunk_z,
+            this->seed, this->chunks, this->chunk_count, this->revision_config_);
+    }
+    else
+    {
+        error_code = terrain_generate_chunk_with_stage_mask(chunk.chunk,
+            chunk.world_x, chunk.world_z, this->seed, this->revision_config_,
+            this->revision_stage_mask_);
+        if (error_code == FT_ERR_SUCCESS)
+            error_code = WorldChunkLoader::remesh_chunk(this->chunks,
+                this->chunk_count, chunk_x, chunk_z, true);
+    }
+    if (error_code != FT_ERR_SUCCESS)
+        return (error_code);
+    return (FT_ERR_SUCCESS);
+}
+
+static int32_t world_chunk_surface_y(const WorldChunk &chunk, int32_t local_x,
+                                     int32_t local_z)
+{
+    for (int32_t y = GAME_VOXEL_CHUNK_HEIGHT - 1; y >= 0; --y)
+    {
+        uint32_t block_id;
+        if (chunk.chunk.read_block(local_x, y, local_z, &block_id) != FT_ERR_SUCCESS)
+            return (0);
+        if (terrain_get_block_metadata(block_id).solid == FT_TRUE)
+            return (y);
+    }
+    return (0);
+}
+
+void World::blend_transition_boundary(WorldChunk &chunk)
+{
+    const int32_t width = GAME_VOXEL_CHUNK_WIDTH;
+    const int32_t depth = GAME_VOXEL_CHUNK_DEPTH;
+    const WorldChunk *west = this->find_chunk(chunk.chunk_x - 1, chunk.chunk_z);
+    const WorldChunk *east = this->find_chunk(chunk.chunk_x + 1, chunk.chunk_z);
+    const WorldChunk *north = this->find_chunk(chunk.chunk_x, chunk.chunk_z - 1);
+    const WorldChunk *south = this->find_chunk(chunk.chunk_x, chunk.chunk_z + 1);
+    const bool west_blend = west != nullptr && this->is_chunk_protected(
+        chunk.chunk_x - 1, chunk.chunk_z);
+    const bool east_blend = east != nullptr && this->is_chunk_protected(
+        chunk.chunk_x + 1, chunk.chunk_z);
+    const bool north_blend = north != nullptr && this->is_chunk_protected(
+        chunk.chunk_x, chunk.chunk_z - 1);
+    const bool south_blend = south != nullptr && this->is_chunk_protected(
+        chunk.chunk_x, chunk.chunk_z + 1);
+    for (int32_t local_z = 0; local_z < depth; ++local_z)
+    {
+        for (int32_t local_x = 0; local_x < width; ++local_x)
+        {
+            const WorldChunk *neighbor = nullptr;
+            int32_t neighbor_x = local_x;
+            int32_t neighbor_z = local_z;
+            if (local_x == 0 && west_blend)
+            {
+                neighbor = west;
+                neighbor_x = width - 1;
+            }
+            else if (local_x == width - 1 && east_blend)
+            {
+                neighbor = east;
+                neighbor_x = 0;
+            }
+            else if (local_z == 0 && north_blend)
+            {
+                neighbor = north;
+                neighbor_z = depth - 1;
+            }
+            else if (local_z == depth - 1 && south_blend)
+            {
+                neighbor = south;
+                neighbor_z = 0;
+            }
+            if (neighbor == nullptr)
+                continue;
+            const int32_t current_y = world_chunk_surface_y(chunk, local_x, local_z);
+            const int32_t neighbor_y = world_chunk_surface_y(*neighbor, neighbor_x, neighbor_z);
+            const int32_t blended_y = (current_y * 2 + neighbor_y + 1) / 3;
+            if (blended_y == current_y)
+                continue;
+            if (blended_y > current_y)
+            {
+                for (int32_t y = current_y + 1; y <= blended_y; ++y)
+                    (void)chunk.chunk.write_generated_block(local_x, y, local_z,
+                        TERRAIN_GENERATOR_STONE_BLOCK);
+            }
+            else
+            {
+                for (int32_t y = blended_y + 1; y <= current_y; ++y)
+                    (void)chunk.chunk.write_generated_block(local_x, y, local_z,
+                        TERRAIN_GENERATOR_AIR_BLOCK);
+            }
+        }
+    }
+}
+
+int32_t World::regenerate_selected_chunks(int32_t *regenerated_count,
+                                          int32_t *skipped_count)
+{
+    if (regenerated_count == nullptr || skipped_count == nullptr)
+        return (FT_ERR_INVALID_ARGUMENT);
+    *regenerated_count = 0;
+    *skipped_count = 0;
+    if (!this->revision_pending_)
+        return (FT_ERR_INVALID_OPERATION);
+    for (const RevisionChunk &entry : this->revision_selected_)
+    {
+        WorldChunk *chunk = this->find_chunk_mutable(entry.chunk_x, entry.chunk_z);
+        if (chunk == nullptr || this->revision_state(entry.chunk_x, entry.chunk_z)
+            != REVISION_SELECTED)
+        {
+            *skipped_count += 1;
+            continue;
+        }
+        int32_t error_code = this->regenerate_chunk_for_revision(*chunk);
+        if (error_code != FT_ERR_SUCCESS)
+            return (error_code);
+        this->blend_transition_boundary(*chunk);
+        (void)WorldChunkLoader::remesh_chunk(this->chunks, this->chunk_count,
+            entry.chunk_x, entry.chunk_z, true);
+        *regenerated_count += 1;
+    }
+    this->terrain_config.initialize(this->revision_config_);
+    (void)this->terrain_context.destroy();
+    int32_t error_code = terrain_generation_context_initialize(this->terrain_context,
+                                                               this->terrain_config);
+    if (error_code != FT_ERR_SUCCESS)
+        return (error_code);
+    this->world_revision_id_ += 1U;
+    this->revision_pending_ = false;
+    this->revision_selected_.clear();
+    for (int32_t z = -1; z <= 1; ++z)
+        for (int32_t x = -1; x <= 1; ++x)
+            world_remesh_loaded_neighbor(this, this->center_chunk_x + x,
+                                         this->center_chunk_z + z);
+    return (FT_ERR_SUCCESS);
+}
+
+int32_t World::apply_revision_request(const RevisionRequest &request,
+                                      RevisionRequestResult *result)
+{
+    if (result == nullptr || request.mode < REGEN_DECORATION_REFRESH
+        || request.mode > REGEN_FULL)
+        return (FT_ERR_INVALID_ARGUMENT);
+    const uint32_t valid_stage_mask = TERRAIN_STAGE_BASE_TERRAIN
+        | TERRAIN_STAGE_CAVES | TERRAIN_STAGE_FLUIDS
+        | TERRAIN_STAGE_DECORATION | TERRAIN_STAGE_STRUCTURES
+        | TERRAIN_STAGE_ORES;
+    if ((request.stage_mask & ~valid_stage_mask) != 0U)
+        return (FT_ERR_INVALID_ARGUMENT);
+    if (this->revision_pending_)
+        return (FT_ERR_INVALID_OPERATION);
+    for (const RevisionChunkCoordinate &selected : request.selected_chunks)
+    {
+        if (this->is_chunk_protected(selected.chunk_x, selected.chunk_z))
+            return (FT_ERR_INVALID_OPERATION);
+        for (const RevisionChunkCoordinate &protected_entry : request.protected_chunks)
+        {
+            if (std::abs(selected.chunk_x - protected_entry.chunk_x) <= 1
+                && std::abs(selected.chunk_z - protected_entry.chunk_z) <= 1)
+                return (FT_ERR_INVALID_OPERATION);
+        }
+    }
+    int32_t error_code = this->begin_world_revision(request.config, request.mode);
+    if (error_code != FT_ERR_SUCCESS)
+        return (error_code);
+    if (request.stage_mask != 0U)
+        this->revision_stage_mask_ = request.stage_mask;
+    for (const RevisionChunkCoordinate &entry : request.protected_chunks)
+    {
+        error_code = this->set_chunk_protected(entry.chunk_x, entry.chunk_z, true);
+        if (error_code != FT_ERR_SUCCESS)
+        {
+            (void)this->cancel_world_revision();
+            return (error_code);
+        }
+    }
+    for (const RevisionChunkCoordinate &entry : request.selected_chunks)
+    {
+        error_code = this->select_revision_chunk(entry.chunk_x, entry.chunk_z, true);
+        if (error_code != FT_ERR_SUCCESS)
+        {
+            (void)this->cancel_world_revision();
+            return (error_code);
+        }
+    }
+    error_code = this->regenerate_selected_chunks(&result->regenerated_count,
+                                                   &result->skipped_count);
+    if (error_code != FT_ERR_SUCCESS)
+        return (error_code);
+    const WorldRevision revision = this->world_revision();
+    result->revision_identifier = revision.identifier;
+    result->stage_mask = revision.stage_mask;
+    return (FT_ERR_SUCCESS);
+}
+
+int32_t World::save_revision_metadata(const char *file_path) const
+{
+    if (file_path == nullptr)
+        return (FT_ERR_INVALID_ARGUMENT);
+    FILE *file = std::fopen(file_path, "wb");
+    if (file == nullptr)
+        return (FT_ERR_IO);
+    const uint32_t magic = 0x57525631U;
+    const uint32_t version = 1U;
+    const uint32_t manual_count = static_cast<uint32_t>(
+        this->revision_manual_protected_.size());
+    bool ok = std::fwrite(&magic, sizeof(magic), 1, file) == 1
+        && std::fwrite(&version, sizeof(version), 1, file) == 1
+        && std::fwrite(&this->world_revision_id_, sizeof(this->world_revision_id_), 1, file) == 1
+        && std::fwrite(&manual_count, sizeof(manual_count), 1, file) == 1;
+    for (const RevisionChunk &entry : this->revision_manual_protected_)
+    {
+        ok = ok && std::fwrite(&entry.chunk_x, sizeof(entry.chunk_x), 1, file) == 1
+            && std::fwrite(&entry.chunk_z, sizeof(entry.chunk_z), 1, file) == 1;
+    }
+    if (std::fclose(file) != 0)
+        ok = false;
+    return (ok ? FT_ERR_SUCCESS : FT_ERR_IO);
+}
+
+int32_t World::load_revision_metadata(const char *file_path)
+{
+    if (file_path == nullptr)
+        return (FT_ERR_INVALID_ARGUMENT);
+    FILE *file = std::fopen(file_path, "rb");
+    if (file == nullptr)
+        return (FT_ERR_IO);
+    uint32_t magic;
+    uint32_t version;
+    uint32_t manual_count;
+    bool ok = std::fread(&magic, sizeof(magic), 1, file) == 1
+        && std::fread(&version, sizeof(version), 1, file) == 1
+        && std::fread(&this->world_revision_id_, sizeof(this->world_revision_id_), 1, file) == 1
+        && std::fread(&manual_count, sizeof(manual_count), 1, file) == 1;
+    if (!ok || magic != 0x57525631U || version != 1U || manual_count > 100000U)
+    {
+        std::fclose(file);
+        return (FT_ERR_INVALID_ARGUMENT);
+    }
+    this->revision_manual_protected_.clear();
+    for (uint32_t index = 0; index < manual_count; ++index)
+    {
+        RevisionChunk entry;
+        if (std::fread(&entry.chunk_x, sizeof(entry.chunk_x), 1, file) != 1
+            || std::fread(&entry.chunk_z, sizeof(entry.chunk_z), 1, file) != 1)
+        {
+            std::fclose(file);
+            this->revision_manual_protected_.clear();
+            return (FT_ERR_IO);
+        }
+        this->revision_manual_protected_.push_back(entry);
+    }
+    if (std::fclose(file) != 0)
+        return (FT_ERR_IO);
+    return (FT_ERR_SUCCESS);
 }
 
 const terrain_generation_config &World::terrain_generation_settings() const
@@ -238,6 +700,14 @@ void World::destroy()
     }
     this->loaded_chunk_count = 0;
     this->clear_chunk_index();
+    this->stream_candidates_radius_ = -1;
+    this->stream_candidate_cursor_ = 0U;
+    this->generation_credit_ = 0;
+    this->stream_last_error_ = FT_ERR_SUCCESS;
+    this->stream_retryable_count_ = 0;
+    this->revision_pending_ = false;
+    this->revision_selected_.clear();
+    this->revision_manual_protected_.clear();
     (void)this->terrain_context.destroy();
     this->terrain_generation_started = false;
 }
@@ -276,14 +746,62 @@ int32_t World::stream_chunks(int32_t stream_radius, int32_t budget, int32_t *gen
 {
     int32_t result;
     this->prepare_stream_candidates(stream_radius);
-    for (const StreamCandidate &candidate : this->stream_candidates_)
+    size_t candidate_count;
+    size_t scanned_count;
+
+    candidate_count = this->stream_candidates_.size();
+    scanned_count = 0U;
+    while (scanned_count < candidate_count)
     {
+        StreamCandidate &candidate = this->stream_candidates_[
+            this->stream_candidate_cursor_];
+        this->stream_candidate_cursor_ = (this->stream_candidate_cursor_ + 1U)
+            % candidate_count;
+        scanned_count += 1U;
+        if (candidate.retry_frames > 0)
+        {
+            candidate.retry_frames -= 1;
+            continue;
+        }
+        if (candidate.state == WORLD_STREAM_CANDIDATE_READY)
+            continue;
+        if (candidate.relevance_epoch != this->stream_relevance_epoch_
+            || candidate.generation_revision != this->generation_revision_)
+        {
+            candidate.state = WORLD_STREAM_CANDIDATE_ABSENT;
+            candidate.retry_count = 0U;
+            candidate.retry_frames = 0;
+            candidate.last_error = FT_ERR_SUCCESS;
+            candidate.relevance_epoch = this->stream_relevance_epoch_;
+            candidate.generation_revision = this->generation_revision_;
+            candidate.queued_frame = 0U;
+        }
+        candidate.state = WORLD_STREAM_CANDIDATE_QUEUED;
+        if (candidate.queued_frame == 0U)
+            candidate.queued_frame = this->stream_frame_;
+        candidate.state = WORLD_STREAM_CANDIDATE_GENERATING;
         result = this->try_load_chunk_at(this->center_chunk_x + candidate.offset_x,
                                          this->center_chunk_z + candidate.offset_z);
         if (result < 0)
-            return (result);
+        {
+            candidate.state = WORLD_STREAM_CANDIDATE_FAILED_RETRYABLE;
+            candidate.retry_count += 1U;
+            candidate.last_error = result;
+            candidate.retry_frames = 1 << std::min(candidate.retry_count, 6U);
+            this->stream_last_error_ = result;
+            this->stream_retryable_count_ += 1;
+            continue;
+        }
         if (result > 0)
         {
+            candidate.state = WORLD_STREAM_CANDIDATE_GENERATED;
+            candidate.state = WORLD_STREAM_CANDIDATE_MESHING;
+            candidate.state = WORLD_STREAM_CANDIDATE_READY;
+            candidate.retry_count = 0U;
+            candidate.retry_frames = 0;
+            candidate.last_error = FT_ERR_SUCCESS;
+            candidate.queued_frame = 0U;
+            this->stream_progress_frame_ = this->stream_frame_;
             *generated = *generated + 1;
             if (budget > 0 && *generated >= budget)
                 return (FT_ERR_SUCCESS);
@@ -292,12 +810,66 @@ int32_t World::stream_chunks(int32_t stream_radius, int32_t budget, int32_t *gen
     return (FT_ERR_SUCCESS);
 }
 
+int32_t World::stream_last_error() const
+{
+    return (this->stream_last_error_);
+}
+
+int32_t World::stream_retryable_count() const
+{
+    return (this->stream_retryable_count_);
+}
+
+World::StreamDiagnostics World::stream_diagnostics() const
+{
+    StreamDiagnostics diagnostics;
+    size_t candidate_index;
+
+    diagnostics.frame = this->stream_frame_;
+    diagnostics.progress_frame = this->stream_progress_frame_;
+    diagnostics.candidate_count = this->stream_candidates_.size();
+    diagnostics.ready_count = 0U;
+    diagnostics.pending_count = 0U;
+    diagnostics.retryable_count = 0U;
+    diagnostics.failed_count = 0U;
+    diagnostics.oldest_pending_age = 0U;
+    diagnostics.last_error = this->stream_last_error_;
+    candidate_index = 0U;
+    while (candidate_index < this->stream_candidates_.size())
+    {
+        const StreamCandidate &candidate =
+            this->stream_candidates_[candidate_index];
+        if (candidate.state == WORLD_STREAM_CANDIDATE_READY)
+            diagnostics.ready_count++;
+        else if (candidate.state == WORLD_STREAM_CANDIDATE_FAILED_RETRYABLE)
+        {
+            diagnostics.retryable_count++;
+            diagnostics.pending_count++;
+        }
+        else if (candidate.state != WORLD_STREAM_CANDIDATE_ABSENT)
+            diagnostics.pending_count++;
+        if (candidate.queued_frame != 0U
+            && this->stream_frame_ >= candidate.queued_frame)
+        {
+            uint64_t age = this->stream_frame_ - candidate.queued_frame;
+            if (age > diagnostics.oldest_pending_age)
+                diagnostics.oldest_pending_age = age;
+        }
+        if (candidate.last_error != FT_ERR_SUCCESS
+            && candidate.state == WORLD_STREAM_CANDIDATE_FAILED_RETRYABLE)
+            diagnostics.failed_count++;
+        candidate_index++;
+    }
+    return (diagnostics);
+}
+
 int32_t World::update_around(double camera_x, double camera_z, int32_t generation_budget,
                              int32_t render_distance)
 {
     int32_t stream_radius;
     int32_t generated;
 
+    this->stream_frame_++;
     this->center_chunk_x = WorldCoordinates::floor_divide(
         static_cast<int32_t>(std::floor(camera_x)), GAME_VOXEL_CHUNK_WIDTH);
     this->center_chunk_z = WorldCoordinates::floor_divide(
@@ -305,18 +877,44 @@ int32_t World::update_around(double camera_x, double camera_z, int32_t generatio
     this->active_render_distance =
         WorldCoordinates::clamp_int(render_distance, WorldCoordinates::MIN_RENDER_DISTANCE,
                                     WorldCoordinates::CACHE_CHUNK_RADIUS * GAME_VOXEL_CHUNK_WIDTH);
-    if (this->chunk_index_valid == false || this->chunk_index_center_x != this->center_chunk_x ||
-        this->chunk_index_center_z != this->center_chunk_z)
+    const bool center_changed = this->chunk_index_center_x != this->center_chunk_x ||
+        this->chunk_index_center_z != this->center_chunk_z;
+    if (this->chunk_index_valid == false || center_changed)
     {
         WorldChunkStore::evict_far_chunks(this->chunks, this->chunk_count,
                                           &this->loaded_chunk_count, this->center_chunk_x,
                                           this->center_chunk_z);
         this->rebuild_chunk_index();
     }
+    if (center_changed)
+    {
+        this->stream_relevance_epoch_ += 1U;
+        this->stream_candidate_cursor_ = 0U;
+        for (StreamCandidate &candidate : this->stream_candidates_)
+        {
+            candidate.state = WORLD_STREAM_CANDIDATE_ABSENT;
+            candidate.retry_count = 0U;
+            candidate.retry_frames = 0;
+            candidate.last_error = FT_ERR_SUCCESS;
+            candidate.relevance_epoch = this->stream_relevance_epoch_;
+            candidate.generation_revision = this->generation_revision_;
+            candidate.queued_frame = 0U;
+        }
+        this->stream_retryable_count_ = 0;
+    }
     stream_radius = WorldCoordinates::render_distance_to_chunk_radius(this->active_render_distance);
-    if (generation_budget <= 0)
-        return (FT_ERR_SUCCESS);
     generated = 0;
+    if (generation_budget <= 0)
+    {
+        if (this->generation_credit_ < 4)
+            this->generation_credit_ = this->generation_credit_ + 1;
+        if (this->generation_credit_ < 4)
+            return (this->stream_chunks(stream_radius, 0, &generated));
+        this->generation_credit_ = 0;
+        generation_budget = 1;
+    }
+    else
+        this->generation_credit_ = 0;
     return (this->stream_chunks(stream_radius, generation_budget, &generated));
 }
 

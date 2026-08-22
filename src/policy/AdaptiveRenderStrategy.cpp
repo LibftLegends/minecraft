@@ -48,10 +48,13 @@ int32_t AdaptiveRenderStrategy::update_render_distance(int32_t current_distance,
 int32_t AdaptiveRenderStrategy::generation_budget_for_frame(double frame_ms,
                                                             bool boost_enabled) const
 {
-    if (frame_ms > 12.0)
-        return (0);
-    (void)boost_enabled;
-    return (1);
+    if (frame_ms > 30.0)
+        return (1);
+    if (frame_ms > 20.0)
+        return (1);
+    if (boost_enabled == true)
+        return (3);
+    return (2);
 }
 
 bool AdaptiveRenderStrategy::should_update_render_distance(double elapsed_since_update) const

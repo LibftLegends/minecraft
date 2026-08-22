@@ -32,8 +32,6 @@ int32_t FixedRenderStrategy::generation_budget_for_frame(double frame_ms, bool b
 {
     (void)frame_ms;
     (void)boost_enabled;
-    if (frame_ms > 12.0)
-        return (0);
     return (1);
 }
 
