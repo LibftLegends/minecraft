@@ -59,6 +59,7 @@ class GameSession
     uint32_t selected_block_id_;
     bool boost_enabled_;
     bool active_;
+    bool revision_preview_visible_;
     int32_t error_code_;
     char seed_[32];
 

@@ -58,7 +58,9 @@ int32_t WorldCoordinates::render_distance_to_chunk_radius(int32_t render_distanc
 {
     int32_t clamped = clamp_int(render_distance, MIN_RENDER_DISTANCE,
                                 CACHE_CHUNK_RADIUS * GAME_VOXEL_CHUNK_WIDTH);
-    int32_t chunk_radius = (clamped + GAME_VOXEL_CHUNK_WIDTH - 1) / GAME_VOXEL_CHUNK_WIDTH;
+    int32_t chunk_radius = (clamped + (GAME_VOXEL_CHUNK_WIDTH / 2) +
+                            GAME_VOXEL_CHUNK_WIDTH - 1) /
+                           GAME_VOXEL_CHUNK_WIDTH;
     if (chunk_radius < 1)
         chunk_radius = 1;
     if (chunk_radius > CACHE_CHUNK_RADIUS)

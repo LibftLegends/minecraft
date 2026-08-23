@@ -21,6 +21,14 @@ class RenderDebug
     double boost_speed;
     char seed[32];
     char biome_name[24];
+    bool revision_preview_visible;
+    bool revision_pending;
+    uint8_t revision_map_radius;
+    uint8_t revision_map[13 * 13];
+    uint32_t revision_protected_count;
+    uint32_t revision_selected_count;
+    uint32_t revision_transition_count;
+    uint32_t revision_unchanged_count;
 
     RenderDebug();
     RenderDebug(const RenderDebug &other);

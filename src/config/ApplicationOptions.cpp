@@ -5,7 +5,9 @@ ApplicationOptions::ApplicationOptions()
       perf_boost_mode(false), validate_camera_speed_mode(false), validate_collision_mode(false),
       validate_block_edit_mode(false), validate_visible_distance_mode(false),
       validate_terrain_determinism_mode(false), validate_world_scale_mode(false),
-      validate_caves_mode(false), validate_terrain_configuration_mode(false), perf_seconds_limit(10.0)
+      validate_caves_mode(false), validate_terrain_configuration_mode(false),
+      validate_world_revision_mode(false), validate_async_generation_mode(false),
+      perf_seconds_limit(10.0)
 {
 }
 
@@ -14,7 +16,9 @@ ApplicationOptions::ApplicationOptions(const ApplicationOptions &other)
       perf_boost_mode(false), validate_camera_speed_mode(false), validate_collision_mode(false),
       validate_block_edit_mode(false), validate_visible_distance_mode(false),
       validate_terrain_determinism_mode(false), validate_world_scale_mode(false),
-      validate_caves_mode(false), validate_terrain_configuration_mode(false), perf_seconds_limit(10.0)
+      validate_caves_mode(false), validate_terrain_configuration_mode(false),
+      validate_world_revision_mode(false), validate_async_generation_mode(false),
+      perf_seconds_limit(10.0)
 {
     *this = other;
 }
@@ -39,6 +43,8 @@ ApplicationOptions &ApplicationOptions::operator=(const ApplicationOptions &othe
         validate_world_scale_mode = other.validate_world_scale_mode;
         validate_caves_mode = other.validate_caves_mode;
         validate_terrain_configuration_mode = other.validate_terrain_configuration_mode;
+        validate_world_revision_mode = other.validate_world_revision_mode;
+        validate_async_generation_mode = other.validate_async_generation_mode;
         perf_seconds_limit = other.perf_seconds_limit;
     }
     return *this;
@@ -61,6 +67,10 @@ int ApplicationOptions::parse(int argc, char **argv)
     validate_caves_mode = CommandLine::has_flag(argc, argv, "--validate-caves");
     validate_terrain_configuration_mode =
         CommandLine::has_flag(argc, argv, "--validate-terrain-configuration");
+    validate_world_revision_mode =
+        CommandLine::has_flag(argc, argv, "--validate-world-revision");
+    validate_async_generation_mode =
+        CommandLine::has_flag(argc, argv, "--validate-async-generation");
     int result = CommandLine::parse_perf_seconds(argc, argv, &perf_seconds_limit);
     if (result < 0)
     {

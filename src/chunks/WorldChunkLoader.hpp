@@ -7,7 +7,7 @@
 #include "../ft_vox.hpp"
 #include "../../src/chunks/WorldChunkStore.hpp"
 #include "../../src/coordinates/WorldCoordinates.hpp"
-#include "../../Libft/Modules/Voxel/voxel.hpp"
+#include "../../Libft/Modules/Voxel/terrain_api.hpp"
 
 class WorldChunkLoader
 {

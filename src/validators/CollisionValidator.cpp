@@ -67,7 +67,6 @@ int CollisionValidator::setup_step_blocks(World   &world,
                                           int32_t &step_y,
                                           int32_t &step_z)
 {
-    double  step_ground_eye_y;
     int32_t frame;
     int32_t error_code;
 
@@ -75,15 +74,8 @@ int CollisionValidator::setup_step_blocks(World   &world,
     PlayerController::spawn_player_on_ground(&camera, world);
     step_x = static_cast<int32_t>(std::floor(camera.x));
     step_z = static_cast<int32_t>(std::floor(camera.z + 1.0));
-    if (PlayerController::ground_eye_y_at(world, static_cast<double>(step_x) + 0.5,
-                                          static_cast<double>(step_z) + 0.5,
-                                          &step_ground_eye_y) == false)
-    {
-        std::fprintf(stderr, "collision: failed step surface setup\n");
-        return (1);
-    }
     step_y = static_cast<int32_t>(
-        std::floor(step_ground_eye_y - PlayerController::PLAYER_EYE_HEIGHT));
+        std::floor(camera.y - PlayerController::PLAYER_EYE_HEIGHT));
     frame = 0;
     while (frame < 4)
     {

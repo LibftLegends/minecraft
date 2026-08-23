@@ -140,6 +140,9 @@ int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk, int32_t chun
     }
     world_chunk->initialized = true;
     world_chunk->mesh_revision += 1U;
+    world_chunk->voxel_revision += 1U;
+    world_chunk->pending_mesh_request_id = 0U;
+    world_chunk->mesh_dirty = false;
     return FT_ERR_SUCCESS;
 }
 
@@ -158,6 +161,9 @@ int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk, int32_t chun
         return err;
     world_chunk->initialized = true;
     world_chunk->mesh_revision += 1U;
+    world_chunk->voxel_revision += 1U;
+    world_chunk->pending_mesh_request_id = 0U;
+    world_chunk->mesh_dirty = false;
     return FT_ERR_SUCCESS;
 }
 
@@ -177,6 +183,9 @@ int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk, int32_t chun
         return err;
     world_chunk->initialized = true;
     world_chunk->mesh_revision += 1U;
+    world_chunk->voxel_revision += 1U;
+    world_chunk->pending_mesh_request_id = 0U;
+    world_chunk->mesh_dirty = false;
     return FT_ERR_SUCCESS;
 }
 
@@ -201,11 +210,16 @@ int32_t WorldChunkLoader::remesh_chunk(WorldChunk *chunks, int32_t chunk_count, 
     WorldChunk *wc = WorldChunkStore::find_chunk_mutable(chunks, chunk_count, chunk_x, chunk_z);
     if (!wc)
         return FT_ERR_SUCCESS;
+    wc->pending_mesh_request_id = 0U;
+    wc->mesh_dirty = true;
     int32_t err = chunk_mesh_clear(wc->mesh);
     if (err == FT_ERR_SUCCESS)
         err = chunk_mesh_generate_from_chunk(wc->mesh, wc->chunk);
     if (err == FT_ERR_SUCCESS)
+    {
         wc->mesh_revision += 1U;
+        wc->mesh_dirty = false;
+    }
     return err;
 }
 
@@ -215,6 +229,8 @@ int32_t WorldChunkLoader::remesh_chunk(WorldChunk *chunks, int32_t chunk_count, 
     WorldChunk *wc = WorldChunkStore::find_chunk_mutable(chunks, chunk_count, chunk_x, chunk_z);
     if (!wc)
         return FT_ERR_SUCCESS;
+    wc->pending_mesh_request_id = 0U;
+    wc->mesh_dirty = true;
     int32_t err = chunk_mesh_clear(wc->mesh);
     if (err != FT_ERR_SUCCESS)
         return err;
@@ -222,7 +238,10 @@ int32_t WorldChunkLoader::remesh_chunk(WorldChunk *chunks, int32_t chunk_count, 
     {
         err = chunk_mesh_generate_from_chunk(wc->mesh, wc->chunk);
         if (err == FT_ERR_SUCCESS)
+        {
             wc->mesh_revision += 1U;
+            wc->mesh_dirty = false;
+        }
         return err;
     }
     NeighborContext ctx = {WorldChunkStore::find_chunk(chunks, chunk_count, chunk_x - 1, chunk_z),
@@ -234,7 +253,10 @@ int32_t WorldChunkLoader::remesh_chunk(WorldChunk *chunks, int32_t chunk_count, 
     err = chunk_mesh_generate_from_chunk_with_neighbors(wc->mesh, wc->chunk, chunk_x, chunk_z,
                                                         &lookup_block, &ctx);
     if (err == FT_ERR_SUCCESS)
+    {
         wc->mesh_revision += 1U;
+        wc->mesh_dirty = false;
+    }
     return err;
 }
 
