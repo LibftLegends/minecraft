@@ -7,7 +7,7 @@
 #include "../../src/chunks/WorldChunkStore.hpp"
 #include "../../src/coordinates/WorldCoordinates.hpp"
 #include "../../Libft/Modules/Errno/errno.hpp"
-#include "../../Libft/Modules/Voxel/voxel.hpp"
+#include "../../Libft/Modules/Voxel/terrain_api.hpp"
 #include "../../src/queries/WorldBlockQuery.hpp"
 #include "../../src/edits/WorldBlockEditor.hpp"
 #include "../../src/queries/WorldRaycaster.hpp"
