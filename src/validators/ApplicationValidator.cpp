@@ -63,3 +63,8 @@ int ApplicationValidator::validate_world_revision()
 {
     return (WorldRevisionValidator().validate());
 }
+
+int ApplicationValidator::validate_async_generation()
+{
+    return (WorldAsyncGenerationValidator().validate());
+}

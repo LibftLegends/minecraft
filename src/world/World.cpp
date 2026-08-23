@@ -12,8 +12,12 @@ World::World(const World &other) : stream_candidates_radius_(-1),
     stream_candidate_cursor_(0U), generation_credit_(0), stream_last_error_(0),
     stream_retryable_count_(0), stream_relevance_epoch_(1U),
     generation_revision_(1U), stream_frame_(0U), stream_progress_frame_(0U),
+    world_epoch_(1U), next_request_id_(1U), generation_pipeline_(),
     revision_pending_(false), world_revision_id_(1U), revision_stage_mask_(0U),
-    revision_mode_(REGEN_FULL)
+    revision_mode_(REGEN_FULL), revision_regeneration_active_(false),
+    revision_generation_epoch_(0U), revision_job_count_(0U),
+    revision_completed_job_count_(0U), revision_regenerated_count_(0),
+    revision_skipped_count_(0), revision_generation_error_(FT_ERR_SUCCESS)
 { (void)other; }
 World &World::operator=(const World &other)
 { (void)other; return (*this); }
@@ -37,10 +41,19 @@ World::World()
     this->generation_revision_ = 1U;
     this->stream_frame_ = 0U;
     this->stream_progress_frame_ = 0U;
+    this->world_epoch_ = 1U;
+    this->next_request_id_ = 1U;
     this->revision_pending_ = false;
     this->world_revision_id_ = 1U;
     this->revision_stage_mask_ = 0U;
     this->revision_mode_ = REGEN_FULL;
+    this->revision_regeneration_active_ = false;
+    this->revision_generation_epoch_ = 0U;
+    this->revision_job_count_ = 0U;
+    this->revision_completed_job_count_ = 0U;
+    this->revision_regenerated_count_ = 0;
+    this->revision_skipped_count_ = 0;
+    this->revision_generation_error_ = FT_ERR_SUCCESS;
     this->seed[0] = '\0';
     terrain_default_generation_config(this->terrain_config);
     this->terrain_generation_started = false;
@@ -172,6 +185,9 @@ int32_t World::initialize(const char *seed_value,
                                                        this->terrain_config);
     if (error_code != FT_ERR_SUCCESS)
         return (error_code);
+    error_code = this->generation_pipeline_.initialize(0U, 0U);
+    if (error_code != FT_ERR_SUCCESS)
+        return (error_code);
     this->terrain_generation_started = true;
     index = 0;
     while (index < this->chunk_count)
@@ -180,10 +196,24 @@ int32_t World::initialize(const char *seed_value,
         this->chunks[index].initialized = false;
         index = index + 1;
     }
+    error_code = WorldChunkLoader::initialize_chunk(&this->chunks[0], 0, 0,
+        this->seed, this->chunks, this->chunk_count, this->terrain_context.config());
+    if (error_code != FT_ERR_SUCCESS)
+    {
+        this->destroy();
+        return (error_code);
+    }
+    this->loaded_chunk_count = 1;
+    this->rebuild_chunk_index();
+    this->generation_revision_ += 1U;
     // Keep first launch bounded. The game loop keeps streaming chunks after init,
-    // so we only need a small starter set here instead of filling the whole ring.
-    error_code =
-        this->update_around(0.0, 0.0, 64, this->active_render_distance);
+    // so only the starter set is generated synchronously here.
+    const int32_t initial_radius = WorldCoordinates::render_distance_to_chunk_radius(
+        this->active_render_distance);
+    this->stream_frame_ += 1U;
+    this->prepare_stream_candidates(initial_radius);
+    int32_t initial_generated = 0;
+    error_code = this->stream_chunks_sync(initial_radius, 64, &initial_generated);
     if (error_code != FT_ERR_SUCCESS)
         this->destroy();
     return (error_code);
@@ -204,10 +234,10 @@ void World::prepare_stream_candidates(int32_t stream_radius)
         {
             const int32_t dist_sq = (x * x) + (z * z);
             if (dist_sq <= radius_sq)
-                this->stream_candidates_.push_back({x, z, dist_sq,
+                    this->stream_candidates_.push_back({x, z, dist_sq,
                     WORLD_STREAM_CANDIDATE_ABSENT, 0U, 0, FT_ERR_SUCCESS,
                     this->stream_relevance_epoch_, this->generation_revision_,
-                    0U});
+                    0U, 0U});
         }
     }
     std::sort(this->stream_candidates_.begin(), this->stream_candidates_.end(),
@@ -280,7 +310,8 @@ void World::revision_set(std::vector<RevisionChunk> &list,
 int32_t World::begin_world_revision(const terrain_generation_config &config,
                                     RegenerationMode mode)
 {
-    if (!this->terrain_generation_started || this->revision_pending_)
+    if (!this->terrain_generation_started || this->revision_pending_
+        || this->revision_regeneration_active_)
         return (FT_ERR_INVALID_OPERATION);
     if (mode < REGEN_DECORATION_REFRESH || mode > REGEN_FULL)
         return (FT_ERR_INVALID_ARGUMENT);
@@ -299,6 +330,12 @@ int32_t World::cancel_world_revision()
 {
     if (!this->revision_pending_)
         return (FT_ERR_INVALID_OPERATION);
+    if (this->revision_regeneration_active_)
+    {
+        this->generation_pipeline_.cancel_queued();
+        this->revision_generation_epoch_ += 1U;
+        this->revision_regeneration_active_ = false;
+    }
     this->revision_pending_ = false;
     this->revision_selected_.clear();
     return (FT_ERR_SUCCESS);
@@ -311,6 +348,7 @@ World::WorldRevision World::world_revision() const
     result.stage_mask = this->revision_stage_mask_;
     result.mode = this->revision_mode_;
     result.pending = this->revision_pending_;
+    result.regenerating = this->revision_regeneration_active_;
     result.selected_count = this->revision_selected_.size();
     result.manually_protected_count = this->revision_manual_protected_.size();
     return (result);
@@ -498,46 +536,121 @@ void World::blend_transition_boundary(WorldChunk &chunk)
     }
 }
 
-int32_t World::regenerate_selected_chunks(int32_t *regenerated_count,
-                                          int32_t *skipped_count)
+int32_t World::start_revision_regeneration()
 {
-    if (regenerated_count == nullptr || skipped_count == nullptr)
-        return (FT_ERR_INVALID_ARGUMENT);
-    *regenerated_count = 0;
-    *skipped_count = 0;
-    if (!this->revision_pending_)
+    if (!this->revision_pending_ || this->revision_regeneration_active_)
         return (FT_ERR_INVALID_OPERATION);
+    this->revision_generation_epoch_ = ++this->next_request_id_;
+    this->revision_job_count_ = 0U;
+    this->revision_completed_job_count_ = 0U;
+    this->revision_regenerated_count_ = 0;
+    this->revision_skipped_count_ = 0;
+    this->revision_generation_error_ = FT_ERR_SUCCESS;
+    this->revision_regeneration_active_ = true;
     for (const RevisionChunk &entry : this->revision_selected_)
     {
         WorldChunk *chunk = this->find_chunk_mutable(entry.chunk_x, entry.chunk_z);
         if (chunk == nullptr || this->revision_state(entry.chunk_x, entry.chunk_z)
             != REVISION_SELECTED)
         {
-            *skipped_count += 1;
+            this->revision_skipped_count_ += 1;
             continue;
         }
-        int32_t error_code = this->regenerate_chunk_for_revision(*chunk);
+        WorldChunkSnapshot snapshot;
+        const WorldChunkSnapshot *source_snapshot = nullptr;
+        if (this->revision_mode_ != REGEN_FULL)
+        {
+            int32_t snapshot_error = this->generation_pipeline_.capture_snapshot(
+                *chunk, nullptr, nullptr, nullptr, nullptr, snapshot);
+            if (snapshot_error != FT_ERR_SUCCESS)
+            {
+                this->revision_generation_error_ = snapshot_error;
+                this->revision_regeneration_active_ = false;
+                return (snapshot_error);
+            }
+            source_snapshot = &snapshot;
+        }
+        const uint64_t request_id = ++this->next_request_id_;
+        int32_t error_code = this->generation_pipeline_.submit_generation(request_id,
+            this->world_epoch_, this->revision_generation_epoch_, this->world_revision_id_,
+            entry.chunk_x, entry.chunk_z, this->seed, this->revision_config_,
+            this->revision_stage_mask_, WorldGenerationOperation::REGENERATE,
+            source_snapshot);
         if (error_code != FT_ERR_SUCCESS)
+        {
+            this->revision_generation_error_ = error_code;
+            this->revision_regeneration_active_ = false;
+            this->generation_pipeline_.cancel_queued();
             return (error_code);
-        this->blend_transition_boundary(*chunk);
-        (void)WorldChunkLoader::remesh_chunk(this->chunks, this->chunk_count,
-            entry.chunk_x, entry.chunk_z, true);
-        *regenerated_count += 1;
+        }
+        this->revision_job_count_ += 1U;
     }
-    this->terrain_config.initialize(this->revision_config_);
-    (void)this->terrain_context.destroy();
-    int32_t error_code = terrain_generation_context_initialize(this->terrain_context,
-                                                               this->terrain_config);
+    if (this->revision_job_count_ == 0U)
+        return (this->finish_revision_regeneration());
+    return (FT_ERR_SUCCESS);
+}
+
+int32_t World::finish_revision_regeneration()
+{
+    if (!this->revision_regeneration_active_)
+        return (this->revision_generation_error_);
+    const int32_t generation_error = this->revision_generation_error_;
+    this->revision_regeneration_active_ = false;
+    if (generation_error != FT_ERR_SUCCESS)
+    {
+        this->revision_pending_ = false;
+        this->revision_selected_.clear();
+        return (generation_error);
+    }
+    int32_t error_code = this->terrain_config.initialize(this->revision_config_);
+    if (error_code == FT_ERR_SUCCESS)
+    {
+        (void)this->terrain_context.destroy();
+        error_code = terrain_generation_context_initialize(this->terrain_context,
+            this->terrain_config);
+    }
     if (error_code != FT_ERR_SUCCESS)
+    {
+        this->revision_pending_ = false;
+        this->revision_selected_.clear();
         return (error_code);
+    }
     this->world_revision_id_ += 1U;
+    this->generation_revision_ += 1U;
     this->revision_pending_ = false;
     this->revision_selected_.clear();
-    for (int32_t z = -1; z <= 1; ++z)
-        for (int32_t x = -1; x <= 1; ++x)
-            world_remesh_loaded_neighbor(this, this->center_chunk_x + x,
-                                         this->center_chunk_z + z);
+    this->generation_pipeline_.cancel_queued();
+    for (StreamCandidate &candidate : this->stream_candidates_)
+    {
+        if (candidate.state != WORLD_STREAM_CANDIDATE_READY)
+            candidate.state = WORLD_STREAM_CANDIDATE_ABSENT;
+        candidate.request_id = 0U;
+        candidate.generation_revision = this->generation_revision_;
+    }
     return (FT_ERR_SUCCESS);
+}
+
+int32_t World::regenerate_selected_chunks(int32_t *regenerated_count,
+                                          int32_t *skipped_count)
+{
+    if (regenerated_count == nullptr || skipped_count == nullptr)
+        return (FT_ERR_INVALID_ARGUMENT);
+    int32_t error_code = this->start_revision_regeneration();
+    if (error_code != FT_ERR_SUCCESS)
+        return (error_code);
+    while (this->revision_regeneration_active_)
+    {
+        error_code = this->drain_generation_results();
+        if (error_code != FT_ERR_SUCCESS)
+            break;
+        if (this->revision_regeneration_active_)
+            std::this_thread::yield();
+    }
+    *regenerated_count = this->revision_regenerated_count_;
+    *skipped_count = this->revision_skipped_count_;
+    if (error_code != FT_ERR_SUCCESS)
+        return (error_code);
+    return (this->revision_generation_error_);
 }
 
 int32_t World::apply_revision_request(const RevisionRequest &request,
@@ -690,6 +803,8 @@ int32_t World::save_terrain_config(const char *file_path) const
 
 void World::destroy()
 {
+    this->world_epoch_ += 1U;
+    (void)this->generation_pipeline_.destroy();
     int32_t index;
 
     index = 0;
@@ -706,8 +821,15 @@ void World::destroy()
     this->stream_last_error_ = FT_ERR_SUCCESS;
     this->stream_retryable_count_ = 0;
     this->revision_pending_ = false;
+    this->revision_regeneration_active_ = false;
+    this->revision_job_count_ = 0U;
+    this->revision_completed_job_count_ = 0U;
+    this->revision_regenerated_count_ = 0;
+    this->revision_skipped_count_ = 0;
+    this->revision_generation_error_ = FT_ERR_SUCCESS;
     this->revision_selected_.clear();
     this->revision_manual_protected_.clear();
+    this->deferred_edits_.clear();
     (void)this->terrain_context.destroy();
     this->terrain_generation_started = false;
 }
@@ -742,7 +864,7 @@ int32_t World::try_load_chunk_at(int32_t chunk_x, int32_t chunk_z)
     return (1);
 }
 
-int32_t World::stream_chunks(int32_t stream_radius, int32_t budget, int32_t *generated)
+int32_t World::stream_chunks_sync(int32_t stream_radius, int32_t budget, int32_t *generated)
 {
     int32_t result;
     this->prepare_stream_candidates(stream_radius);
@@ -779,6 +901,13 @@ int32_t World::stream_chunks(int32_t stream_radius, int32_t budget, int32_t *gen
         candidate.state = WORLD_STREAM_CANDIDATE_QUEUED;
         if (candidate.queued_frame == 0U)
             candidate.queued_frame = this->stream_frame_;
+        if (this->find_chunk(this->center_chunk_x + candidate.offset_x,
+                             this->center_chunk_z + candidate.offset_z) != nullptr)
+        {
+            candidate.state = WORLD_STREAM_CANDIDATE_READY;
+            candidate.request_id = 0U;
+            continue;
+        }
         candidate.state = WORLD_STREAM_CANDIDATE_GENERATING;
         result = this->try_load_chunk_at(this->center_chunk_x + candidate.offset_x,
                                          this->center_chunk_z + candidate.offset_z);
@@ -863,6 +992,363 @@ World::StreamDiagnostics World::stream_diagnostics() const
     return (diagnostics);
 }
 
+World::StreamCandidate *World::find_stream_candidate(int32_t chunk_x,
+                                                     int32_t chunk_z)
+{
+    for (StreamCandidate &candidate : this->stream_candidates_)
+    {
+        if (this->center_chunk_x + candidate.offset_x == chunk_x
+            && this->center_chunk_z + candidate.offset_z == chunk_z)
+            return (&candidate);
+    }
+    return (nullptr);
+}
+
+static int32_t world_move_mesh(chunk_mesh &destination, chunk_mesh &source)
+{
+    int32_t error_code = destination.vertices.move(source.vertices);
+    if (error_code != FT_ERR_SUCCESS)
+        return (error_code);
+    error_code = destination.indices.move(source.indices);
+    if (error_code != FT_ERR_SUCCESS)
+        return (error_code);
+    destination.bounds = source.bounds;
+    destination.occupied_bounds = source.occupied_bounds;
+    destination.has_occupied_bounds = source.has_occupied_bounds;
+    return (FT_ERR_SUCCESS);
+}
+
+int32_t World::queue_chunk_remesh(WorldChunk &chunk)
+{
+    if (!chunk.initialized || !chunk.mesh_dirty
+        || chunk.pending_mesh_request_id != 0U)
+        return (FT_ERR_SUCCESS);
+    if (this->generation_pipeline_.remesh_in_flight_count() >= 1U)
+        return (FT_ERR_FULL);
+    if (this->generation_pipeline_.queued_count() >= 8U)
+        return (FT_ERR_FULL);
+    WorldChunkSnapshot snapshot;
+    int32_t error_code = this->generation_pipeline_.capture_snapshot(chunk,
+        this->find_chunk(chunk.chunk_x - 1, chunk.chunk_z),
+        this->find_chunk(chunk.chunk_x + 1, chunk.chunk_z),
+        this->find_chunk(chunk.chunk_x, chunk.chunk_z - 1),
+        this->find_chunk(chunk.chunk_x, chunk.chunk_z + 1), snapshot);
+    if (error_code != FT_ERR_SUCCESS)
+        return (error_code);
+    const uint64_t request_id = this->next_request_id_++;
+    error_code = this->generation_pipeline_.submit_remesh(request_id,
+        this->world_epoch_, this->stream_relevance_epoch_, this->generation_revision_,
+        chunk.chunk_x, chunk.chunk_z, chunk.voxel_revision, snapshot);
+    if (error_code == FT_ERR_SUCCESS)
+        chunk.pending_mesh_request_id = request_id;
+    return (error_code);
+}
+
+int32_t World::queue_neighbor_remeshes(int32_t chunk_x, int32_t chunk_z)
+{
+    const int32_t coordinates[5][2] = {
+        {chunk_x, chunk_z}, {chunk_x - 1, chunk_z}, {chunk_x + 1, chunk_z},
+        {chunk_x, chunk_z - 1}, {chunk_x, chunk_z + 1}
+    };
+    int32_t index = 0;
+    while (index < 5)
+    {
+        WorldChunk *chunk = this->find_chunk_mutable(coordinates[index][0],
+            coordinates[index][1]);
+        if (chunk != nullptr)
+        {
+            chunk->mesh_dirty = true;
+            const int32_t error_code = this->queue_chunk_remesh(*chunk);
+            if (error_code != FT_ERR_SUCCESS && error_code != FT_ERR_FULL)
+                return (error_code);
+        }
+        index += 1;
+    }
+    return (FT_ERR_SUCCESS);
+}
+
+int32_t World::apply_deferred_edits()
+{
+    std::sort(this->deferred_edits_.begin(), this->deferred_edits_.end(),
+        [](const WorldDeferredBlockEdit &left, const WorldDeferredBlockEdit &right)
+        {
+            if (left.world_x != right.world_x)
+                return (left.world_x < right.world_x);
+            if (left.world_y != right.world_y)
+                return (left.world_y < right.world_y);
+            if (left.world_z != right.world_z)
+                return (left.world_z < right.world_z);
+            if (left.request_id != right.request_id)
+                return (left.request_id < right.request_id);
+            return (left.sequence < right.sequence);
+        });
+    std::vector<WorldDeferredBlockEdit> pending;
+    for (const WorldDeferredBlockEdit &edit : this->deferred_edits_)
+    {
+        const int32_t chunk_x = WorldCoordinates::floor_divide(
+            edit.world_x, GAME_VOXEL_CHUNK_WIDTH);
+        const int32_t chunk_z = WorldCoordinates::floor_divide(
+            edit.world_z, GAME_VOXEL_CHUNK_DEPTH);
+        WorldChunk *chunk = this->find_chunk_mutable(chunk_x, chunk_z);
+        if (chunk == nullptr || !chunk->initialized)
+        {
+            pending.push_back(edit);
+            continue;
+        }
+        const int32_t local_x = WorldCoordinates::positive_modulo(
+            edit.world_x, GAME_VOXEL_CHUNK_WIDTH);
+        const int32_t local_z = WorldCoordinates::positive_modulo(
+            edit.world_z, GAME_VOXEL_CHUNK_DEPTH);
+        if (chunk->chunk.write_generated_block(local_x, edit.world_y, local_z,
+                                               edit.block_id) != FT_ERR_SUCCESS)
+            return (FT_ERR_INVALID_OPERATION);
+        chunk->voxel_revision += 1U;
+        chunk->mesh_dirty = true;
+        (void)this->queue_chunk_remesh(*chunk);
+    }
+    this->deferred_edits_.swap(pending);
+    return (FT_ERR_SUCCESS);
+}
+
+int32_t World::commit_generation_result(
+    std::unique_ptr<WorldGenerationPipeline::Result> &result) noexcept
+{
+    if (result == nullptr)
+        return (FT_ERR_INVALID_ARGUMENT);
+    if (result->world_epoch != this->world_epoch_)
+        return (FT_ERR_SUCCESS);
+    if (result->operation == WorldGenerationOperation::REGENERATE)
+    {
+        if (!this->revision_regeneration_active_
+            || result->relevance_epoch != this->revision_generation_epoch_)
+            return (FT_ERR_SUCCESS);
+        this->revision_completed_job_count_ += 1U;
+        if (result->error_code != FT_ERR_SUCCESS || result->chunk == nullptr)
+        {
+            if (this->revision_generation_error_ == FT_ERR_SUCCESS)
+                this->revision_generation_error_ = result->error_code;
+        }
+        else
+        {
+            WorldChunk *chunk = this->find_chunk_mutable(result->chunk_x,
+                result->chunk_z);
+            if (chunk == nullptr || !chunk->initialized)
+                this->revision_skipped_count_ += 1;
+            else
+            {
+                chunk->destroy();
+                if (chunk->chunk.move(result->chunk->chunk) != FT_ERR_SUCCESS
+                    || chunk_mesh_initialize(chunk->mesh) != FT_ERR_SUCCESS
+                    || world_move_mesh(chunk->mesh, result->chunk->mesh)
+                        != FT_ERR_SUCCESS)
+                {
+                    chunk->destroy();
+                    if (this->revision_generation_error_ == FT_ERR_SUCCESS)
+                        this->revision_generation_error_ = FT_ERR_NO_MEMORY;
+                }
+                else
+                {
+                    chunk->chunk_x = result->chunk_x;
+                    chunk->chunk_z = result->chunk_z;
+                    chunk->world_x = result->chunk_x * GAME_VOXEL_CHUNK_WIDTH;
+                    chunk->world_z = result->chunk_z * GAME_VOXEL_CHUNK_DEPTH;
+                    chunk->initialized = true;
+                    chunk->mesh_revision += 1U;
+                    chunk->voxel_revision += 1U;
+                    chunk->pending_mesh_request_id = 0U;
+                    chunk->mesh_dirty = true;
+                    this->revision_regenerated_count_ += 1;
+                    (void)this->queue_neighbor_remeshes(result->chunk_x,
+                        result->chunk_z);
+                    this->deferred_edits_.insert(this->deferred_edits_.end(),
+                        result->deferred_edits.begin(), result->deferred_edits.end());
+                }
+            }
+        }
+        if (this->revision_completed_job_count_ >= this->revision_job_count_)
+            return (this->finish_revision_regeneration());
+        return (FT_ERR_SUCCESS);
+    }
+    if (result->operation == WorldGenerationOperation::REMESH)
+    {
+        WorldChunk *chunk = this->find_chunk_mutable(result->chunk_x,
+            result->chunk_z);
+        if (chunk == nullptr || !chunk->initialized
+            || chunk->pending_mesh_request_id != result->request_id
+            || chunk->voxel_revision != result->voxel_revision)
+            return (FT_ERR_SUCCESS);
+        chunk->pending_mesh_request_id = 0U;
+        if (result->error_code != FT_ERR_SUCCESS || result->mesh == nullptr)
+            return (FT_ERR_SUCCESS);
+        (void)chunk_mesh_destroy(chunk->mesh);
+        if (chunk_mesh_initialize(chunk->mesh) != FT_ERR_SUCCESS
+            || world_move_mesh(chunk->mesh, *result->mesh) != FT_ERR_SUCCESS)
+            return (FT_ERR_NO_MEMORY);
+        chunk->mesh_revision += 1U;
+        chunk->mesh_dirty = false;
+        return (FT_ERR_SUCCESS);
+    }
+    StreamCandidate *candidate = this->find_stream_candidate(result->chunk_x,
+        result->chunk_z);
+    if (candidate == nullptr || candidate->request_id != result->request_id
+        || candidate->relevance_epoch != result->relevance_epoch
+        || candidate->generation_revision != result->generation_revision)
+        return (FT_ERR_SUCCESS);
+    if (result->error_code != FT_ERR_SUCCESS || result->chunk == nullptr)
+    {
+        candidate->state = WORLD_STREAM_CANDIDATE_FAILED_RETRYABLE;
+        candidate->retry_count += 1U;
+        candidate->last_error = result->error_code;
+        candidate->retry_frames = 1 << std::min(candidate->retry_count, 6U);
+        this->stream_last_error_ = result->error_code;
+        this->stream_retryable_count_ += 1;
+        return (FT_ERR_SUCCESS);
+    }
+    if (this->find_chunk(result->chunk_x, result->chunk_z) != nullptr)
+    {
+        candidate->state = WORLD_STREAM_CANDIDATE_READY;
+        return (FT_ERR_SUCCESS);
+    }
+    WorldChunk *slot = WorldChunkStore::find_free_chunk_slot(this->chunks,
+        this->chunk_count);
+    if (slot == nullptr)
+    {
+        candidate->state = WORLD_STREAM_CANDIDATE_FAILED_RETRYABLE;
+        candidate->last_error = FT_ERR_NO_MEMORY;
+        candidate->retry_frames = 1;
+        return (FT_ERR_SUCCESS);
+    }
+    if (slot->chunk.move(result->chunk->chunk) != FT_ERR_SUCCESS
+        || chunk_mesh_initialize(slot->mesh) != FT_ERR_SUCCESS
+        || world_move_mesh(slot->mesh, result->chunk->mesh) != FT_ERR_SUCCESS)
+    {
+        slot->destroy();
+        candidate->state = WORLD_STREAM_CANDIDATE_FAILED_RETRYABLE;
+        candidate->last_error = FT_ERR_NO_MEMORY;
+        candidate->retry_frames = 1;
+        return (FT_ERR_SUCCESS);
+    }
+    slot->chunk_x = result->chunk_x;
+    slot->chunk_z = result->chunk_z;
+    slot->world_x = result->chunk_x * GAME_VOXEL_CHUNK_WIDTH;
+    slot->world_z = result->chunk_z * GAME_VOXEL_CHUNK_DEPTH;
+    slot->initialized = true;
+    slot->mesh_revision = 1U;
+    slot->voxel_revision = 1U;
+    slot->pending_mesh_request_id = 0U;
+    slot->mesh_dirty = true;
+    this->loaded_chunk_count += 1;
+    this->register_chunk_index(*slot);
+    candidate->state = WORLD_STREAM_CANDIDATE_READY;
+    candidate->retry_count = 0U;
+    candidate->retry_frames = 0;
+    candidate->last_error = FT_ERR_SUCCESS;
+    candidate->queued_frame = 0U;
+    this->stream_progress_frame_ = this->stream_frame_;
+    this->deferred_edits_.insert(this->deferred_edits_.end(),
+        result->deferred_edits.begin(), result->deferred_edits.end());
+    (void)this->queue_neighbor_remeshes(result->chunk_x, result->chunk_z);
+    return (FT_ERR_SUCCESS);
+}
+
+int32_t World::drain_generation_results() noexcept
+{
+    std::unique_ptr<WorldGenerationPipeline::Result> result;
+    int32_t processed = 0;
+    const std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(2);
+    while (processed < 2
+        && std::chrono::steady_clock::now() < deadline
+        && this->generation_pipeline_.poll(result) == FT_ERR_SUCCESS)
+    {
+        const int32_t error_code = this->commit_generation_result(result);
+        if (error_code != FT_ERR_SUCCESS)
+            return (error_code);
+        result.reset();
+        processed += 1;
+    }
+    return (this->apply_deferred_edits());
+}
+
+int32_t World::stream_chunks_async(int32_t stream_radius, int32_t budget,
+                                   int32_t *generated)
+{
+    (void)generated;
+    int32_t submitted = 0;
+    int32_t scanned = 0;
+    const int32_t candidate_count = static_cast<int32_t>(
+        this->stream_candidates_.size());
+    while (scanned < candidate_count)
+    {
+        StreamCandidate &candidate = this->stream_candidates_[
+            this->stream_candidate_cursor_];
+        this->stream_candidate_cursor_ = (this->stream_candidate_cursor_ + 1U)
+            % this->stream_candidates_.size();
+        scanned += 1;
+        if (candidate.state == WORLD_STREAM_CANDIDATE_READY
+            || candidate.state == WORLD_STREAM_CANDIDATE_GENERATING
+            || candidate.state == WORLD_STREAM_CANDIDATE_MESHING
+            || candidate.state == WORLD_STREAM_CANDIDATE_QUEUED)
+            continue;
+        if (candidate.retry_frames > 0)
+        {
+            candidate.retry_frames -= 1;
+            continue;
+        }
+        if (candidate.relevance_epoch != this->stream_relevance_epoch_
+            || candidate.generation_revision != this->generation_revision_)
+        {
+            candidate.state = WORLD_STREAM_CANDIDATE_ABSENT;
+            candidate.retry_count = 0U;
+            candidate.last_error = FT_ERR_SUCCESS;
+            candidate.relevance_epoch = this->stream_relevance_epoch_;
+            candidate.generation_revision = this->generation_revision_;
+            candidate.queued_frame = 0U;
+            candidate.request_id = 0U;
+        }
+        const int32_t chunk_x = this->center_chunk_x + candidate.offset_x;
+        const int32_t chunk_z = this->center_chunk_z + candidate.offset_z;
+        if (this->find_chunk(chunk_x, chunk_z) != nullptr)
+        {
+            candidate.state = WORLD_STREAM_CANDIDATE_READY;
+            continue;
+        }
+        const uint64_t request_id = this->next_request_id_++;
+        const int32_t error_code = this->generation_pipeline_.submit_generation(
+            request_id, this->world_epoch_, this->stream_relevance_epoch_,
+            this->generation_revision_, chunk_x, chunk_z, this->seed,
+            this->terrain_context.config(), TERRAIN_STAGE_BASE_TERRAIN
+            | TERRAIN_STAGE_CAVES | TERRAIN_STAGE_FLUIDS
+            | TERRAIN_STAGE_DECORATION | TERRAIN_STAGE_STRUCTURES
+            | TERRAIN_STAGE_ORES, WorldGenerationOperation::STREAM);
+        if (error_code == FT_ERR_FULL)
+            break;
+        if (error_code != FT_ERR_SUCCESS)
+        {
+            candidate.state = WORLD_STREAM_CANDIDATE_FAILED_RETRYABLE;
+            candidate.last_error = error_code;
+            candidate.retry_frames = 1;
+            continue;
+        }
+        candidate.state = WORLD_STREAM_CANDIDATE_GENERATING;
+        candidate.queued_frame = this->stream_frame_;
+        candidate.request_id = request_id;
+        submitted += 1;
+        if (budget > 0 && submitted >= budget)
+            break;
+    }
+    int32_t dirty_index = 0;
+    while (dirty_index < this->chunk_count
+        && this->generation_pipeline_.queued_count() < 8U)
+    {
+        if (this->chunks[dirty_index].initialized && this->chunks[dirty_index].mesh_dirty)
+            (void)this->queue_chunk_remesh(this->chunks[dirty_index]);
+        dirty_index += 1;
+    }
+    (void)stream_radius;
+    return (FT_ERR_SUCCESS);
+}
+
 int32_t World::update_around(double camera_x, double camera_z, int32_t generation_budget,
                              int32_t render_distance)
 {
@@ -888,6 +1374,7 @@ int32_t World::update_around(double camera_x, double camera_z, int32_t generatio
     }
     if (center_changed)
     {
+        this->generation_pipeline_.cancel_queued();
         this->stream_relevance_epoch_ += 1U;
         this->stream_candidate_cursor_ = 0U;
         for (StreamCandidate &candidate : this->stream_candidates_)
@@ -899,23 +1386,42 @@ int32_t World::update_around(double camera_x, double camera_z, int32_t generatio
             candidate.relevance_epoch = this->stream_relevance_epoch_;
             candidate.generation_revision = this->generation_revision_;
             candidate.queued_frame = 0U;
+            candidate.request_id = 0U;
         }
         this->stream_retryable_count_ = 0;
     }
+    int32_t drain_error = this->drain_generation_results();
+    if (drain_error != FT_ERR_SUCCESS)
+        return (drain_error);
     stream_radius = WorldCoordinates::render_distance_to_chunk_radius(this->active_render_distance);
     generated = 0;
+    if (generation_budget >= WorldCoordinates::CHUNK_COUNT)
+    {
+        this->generation_pipeline_.cancel_queued();
+        for (StreamCandidate &candidate : this->stream_candidates_)
+        {
+            if (candidate.state != WORLD_STREAM_CANDIDATE_READY)
+            {
+                candidate.state = WORLD_STREAM_CANDIDATE_ABSENT;
+                candidate.request_id = 0U;
+            }
+        }
+        return (this->stream_chunks_sync(stream_radius, generation_budget, &generated));
+    }
     if (generation_budget <= 0)
     {
         if (this->generation_credit_ < 4)
             this->generation_credit_ = this->generation_credit_ + 1;
         if (this->generation_credit_ < 4)
-            return (this->stream_chunks(stream_radius, 0, &generated));
+        {
+            return (this->stream_chunks_async(stream_radius, 0, &generated));
+        }
         this->generation_credit_ = 0;
         generation_budget = 1;
     }
     else
         this->generation_credit_ = 0;
-    return (this->stream_chunks(stream_radius, generation_budget, &generated));
+    return (this->stream_chunks_async(stream_radius, generation_budget, &generated));
 }
 
 const WorldChunk *World::find_chunk(int32_t chunk_x, int32_t chunk_z) const

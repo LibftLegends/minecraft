@@ -20,6 +20,7 @@ class ApplicationOptions
     bool validate_caves_mode;
     bool validate_terrain_configuration_mode;
     bool validate_world_revision_mode;
+    bool validate_async_generation_mode;
     double perf_seconds_limit;
 
     ApplicationOptions();

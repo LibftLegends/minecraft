@@ -10,6 +10,7 @@
 #include "../../src/validators/WorldScaleValidator.hpp"
 #include "../../src/validators/WorldVisibilityValidator.hpp"
 #include "../../src/validators/WorldRevisionValidator.hpp"
+#include "../../src/validators/WorldAsyncGenerationValidator.hpp"
 
 class ApplicationValidator
 {
@@ -27,7 +28,8 @@ class ApplicationValidator
         static int validate_world_scale();
         static int validate_caves();
         static int validate_terrain_configuration();
-        static int validate_world_revision();
+    static int validate_world_revision();
+    static int validate_async_generation();
 };
 
 #endif

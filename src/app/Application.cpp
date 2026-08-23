@@ -115,6 +115,8 @@ int Application::run_validators(const ApplicationOptions &options)
         return ApplicationValidator::validate_terrain_configuration();
     if (options.validate_world_revision_mode)
         return ApplicationValidator::validate_world_revision();
+    if (options.validate_async_generation_mode)
+        return ApplicationValidator::validate_async_generation();
     return -1;
 }
 

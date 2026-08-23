@@ -152,9 +152,7 @@ int32_t WorldRevisionServer::handle_revision_message(const char *message)
     }
     else if (std::strcmp(action, "confirm") == 0)
     {
-        int32_t regenerated;
-        int32_t skipped;
-        result = this->world_->regenerate_selected_chunks(&regenerated, &skipped);
+        result = this->world_->start_revision_regeneration();
     }
     json_free_groups(groups);
     return (result);

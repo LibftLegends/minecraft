@@ -205,6 +205,7 @@ test: tests
 	@./$(TEST_NAME) --validate-caves
 	@./$(TEST_NAME) --validate-terrain-configuration
 	@./$(TEST_NAME) --validate-world-revision
+	@./$(TEST_NAME) --validate-async-generation
 
 both: all debug
 

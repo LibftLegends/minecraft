@@ -12,6 +12,7 @@
 #include "../../src/edits/WorldBlockEditor.hpp"
 #include "../../src/queries/WorldRaycaster.hpp"
 #include "../../src/validators/WorldVisibilityValidator.hpp"
+#include "../../src/world/WorldGenerationPipeline.hpp"
 
 class World
 {
@@ -38,6 +39,7 @@ class World
         uint32_t stage_mask;
         RegenerationMode mode;
         bool pending;
+        bool regenerating;
         size_t selected_count;
         size_t manually_protected_count;
     };
@@ -139,6 +141,7 @@ class World
                                    std::vector<RevisionPreviewEntry> &preview) const;
     int32_t regenerate_selected_chunks(int32_t *regenerated_count,
                                        int32_t *skipped_count);
+    int32_t start_revision_regeneration();
     int32_t apply_revision_request(const RevisionRequest &request,
                                    RevisionRequestResult *result);
     int32_t save_revision_metadata(const char *file_path) const;
@@ -168,6 +171,7 @@ class World
         uint64_t relevance_epoch;
         uint32_t generation_revision;
         uint64_t queued_frame;
+        uint64_t request_id;
     };
 
     std::vector<StreamCandidate> stream_candidates_;
@@ -180,6 +184,9 @@ class World
     uint32_t generation_revision_;
     uint64_t stream_frame_;
     uint64_t stream_progress_frame_;
+    uint64_t world_epoch_;
+    uint64_t next_request_id_;
+    WorldGenerationPipeline generation_pipeline_;
 
     struct RevisionChunk
     {
@@ -193,13 +200,30 @@ class World
     terrain_generation_config revision_config_;
     std::vector<RevisionChunk> revision_selected_;
     std::vector<RevisionChunk> revision_manual_protected_;
+    std::vector<WorldDeferredBlockEdit> deferred_edits_;
+    bool revision_regeneration_active_;
+    uint64_t revision_generation_epoch_;
+    std::size_t revision_job_count_;
+    std::size_t revision_completed_job_count_;
+    int32_t revision_regenerated_count_;
+    int32_t revision_skipped_count_;
+    int32_t revision_generation_error_;
 
     void copy_seed(const char *seed_value);
     void clear_chunk_index();
     void rebuild_chunk_index();
     void register_chunk_index(const WorldChunk &chunk);
     int32_t try_load_chunk_at(int32_t chunk_x, int32_t chunk_z);
-    int32_t stream_chunks(int32_t stream_radius, int32_t budget, int32_t *generated);
+    int32_t stream_chunks_sync(int32_t stream_radius, int32_t budget, int32_t *generated);
+    int32_t stream_chunks_async(int32_t stream_radius, int32_t budget, int32_t *generated);
+    int32_t drain_generation_results() noexcept;
+    int32_t commit_generation_result(
+        std::unique_ptr<WorldGenerationPipeline::Result> &result) noexcept;
+    int32_t queue_chunk_remesh(WorldChunk &chunk);
+    int32_t queue_neighbor_remeshes(int32_t chunk_x, int32_t chunk_z);
+    StreamCandidate *find_stream_candidate(int32_t chunk_x, int32_t chunk_z);
+    int32_t apply_deferred_edits();
+    int32_t finish_revision_regeneration();
     void prepare_stream_candidates(int32_t stream_radius);
     static uint32_t stage_mask_for_mode(RegenerationMode mode);
     static bool revision_contains(const std::vector<RevisionChunk> &list,
