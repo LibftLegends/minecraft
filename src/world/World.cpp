@@ -57,6 +57,7 @@ World::World()
     this->seed[0] = '\0';
     terrain_default_generation_config(this->terrain_config);
     this->terrain_generation_started = false;
+    this->current_tick = 0U;
     this->clear_chunk_index();
 }
 
@@ -1478,6 +1479,22 @@ int32_t World::delete_block_at(int32_t world_x, int32_t world_y, int32_t world_z
 int32_t World::place_block_at(int32_t world_x, int32_t world_y, int32_t world_z, uint32_t block_id)
 {
     return (WorldBlockEditor::place_block_at(*this, world_x, world_y, world_z, block_id));
+}
+
+void World::advance_tick()
+{
+    this->current_tick += 1U;
+    return ;
+}
+
+int32_t World::undo_last_edit()
+{
+    return (this->edit_history.undo(*this));
+}
+
+int32_t World::redo_last_edit()
+{
+    return (this->edit_history.redo(*this));
 }
 
 int32_t World::raycast_solid(double origin_x, double origin_y, double origin_z, double direction_x,

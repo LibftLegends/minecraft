@@ -45,8 +45,15 @@ int32_t DeleteBlockCommand::execute(World &world) const
     int32_t err = wc->chunk.write_block(lx, world_y, lz, GAME_VOXEL_AIR_BLOCK);
     if (err != FT_ERR_SUCCESS)
         return err;
-    wc->voxel_revision += 1U;
-    wc->pending_mesh_request_id = 0U;
+    WorldEditRecord record;
+    record.edit.world_x = world_x;
+    record.edit.world_y = world_y;
+    record.edit.world_z = world_z;
+    record.edit.block_type = GAME_VOXEL_AIR_BLOCK;
+    record.edit.tick = world.current_tick;
+    record.previous_block_id = existing_block_id;
+    (void)wc->chunk.record_dirty_edit(record.edit);
+    world.edit_history.record(record);
     return WorldChunkLoader::remesh_edited_chunk_border(world.chunks, world.chunk_count, cx, cz, lx,
                                                         lz);
 }

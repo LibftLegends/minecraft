@@ -18,6 +18,8 @@ class WorldBlockEditor
     static int32_t delete_block_at(World &world, int32_t world_x, int32_t world_y, int32_t world_z);
     static int32_t place_block_at(World &world, int32_t world_x, int32_t world_y, int32_t world_z,
                                   uint32_t block_id);
+    static int32_t undo(World &world);
+    static int32_t redo(World &world);
 };
 
 #endif

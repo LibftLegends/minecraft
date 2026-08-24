@@ -10,6 +10,7 @@
 #include "../../Libft/Modules/Voxel/terrain_api.hpp"
 #include "../../src/queries/WorldBlockQuery.hpp"
 #include "../../src/edits/WorldBlockEditor.hpp"
+#include "../../src/edits/WorldEditHistory.hpp"
 #include "../../src/queries/WorldRaycaster.hpp"
 #include "../../src/validators/WorldVisibilityValidator.hpp"
 #include "../../src/world/WorldGenerationPipeline.hpp"
@@ -101,6 +102,8 @@ class World
     terrain_generation_config terrain_config;
     terrain_generation_context terrain_context;
     bool terrain_generation_started;
+    uint64_t current_tick;
+    WorldEditHistory edit_history;
 
     World();
     World(const World &other);
@@ -128,24 +131,9 @@ class World
     bool block_id_at(int32_t world_x, int32_t world_y, int32_t world_z, uint32_t *block_id) const;
     int32_t delete_block_at(int32_t world_x, int32_t world_y, int32_t world_z);
     int32_t place_block_at(int32_t world_x, int32_t world_y, int32_t world_z, uint32_t block_id);
-    int32_t begin_world_revision(const terrain_generation_config &config,
-                                 RegenerationMode mode);
-    int32_t cancel_world_revision();
-    WorldRevision world_revision() const;
-    int32_t select_revision_chunk(int32_t chunk_x, int32_t chunk_z, bool selected);
-    int32_t set_chunk_protected(int32_t chunk_x, int32_t chunk_z, bool protected_state);
-    bool is_chunk_protected(int32_t chunk_x, int32_t chunk_z) const;
-    ChunkRevisionState revision_state(int32_t chunk_x, int32_t chunk_z) const;
-    int32_t build_revision_preview(int32_t preview_center_x, int32_t preview_center_z,
-                                   int32_t radius,
-                                   std::vector<RevisionPreviewEntry> &preview) const;
-    int32_t regenerate_selected_chunks(int32_t *regenerated_count,
-                                       int32_t *skipped_count);
-    int32_t start_revision_regeneration();
-    int32_t apply_revision_request(const RevisionRequest &request,
-                                   RevisionRequestResult *result);
-    int32_t save_revision_metadata(const char *file_path) const;
-    int32_t load_revision_metadata(const char *file_path);
+    void advance_tick();
+    int32_t undo_last_edit();
+    int32_t redo_last_edit();
     int32_t raycast_solid(double origin_x, double origin_y, double origin_z, double direction_x,
                           double direction_y, double direction_z, double max_distance,
                           int32_t *block_x, int32_t *block_y, int32_t *block_z) const;

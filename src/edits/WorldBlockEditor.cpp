@@ -35,3 +35,13 @@ int32_t WorldBlockEditor::place_block_at(World &world, int32_t world_x, int32_t 
 
     return (command.execute(world));
 }
+
+int32_t WorldBlockEditor::undo(World &world)
+{
+    return (world.edit_history.undo(world));
+}
+
+int32_t WorldBlockEditor::redo(World &world)
+{
+    return (world.edit_history.redo(world));
+}

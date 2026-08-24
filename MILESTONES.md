@@ -40,20 +40,38 @@ platform/infra/testing) — swap freely if it doesn't fit this project.
 Both of you sit on this together — it's small but everything else depends
 on getting it right once instead of renegotiating it mid-project.
 
-- [ ] Chunk/edit persistence format: what a saved chunk looks like on disk
+- [x] Chunk/edit persistence format: what a saved chunk looks like on disk
       (block array + biome + ore markers + dirty-edit list). This format is
       reused verbatim as the network wire format for chunk dispatch.
-- [ ] Block-edit op format: `{x, y, z, block_type, tick}` — used for save
+      `game_voxel_chunk` (Libft/Modules/Game) now carries `_biome_id` and a
+      bounded dirty-edit list on top of the existing section/palette block
+      array; `serialize()`/`deserialize()` (format version 4) cover all of
+      it in one shot, so the same bytes are the save format and the chunk
+      wire format.
+- [x] Block-edit op format: `{x, y, z, block_type, tick}` — used for save
       file, network broadcast, and undo/redo already in `src/edits/`.
-- [ ] Entity state struct: id, type (player/monster kind), position,
+      `game_block_edit_op` (Libft/Modules/Game/game_block_edit_op.hpp) is
+      the single struct reused by the chunk dirty-edit list, by
+      `ProtocolEditBroadcastMessage`, and by `WorldEditHistory` undo/redo.
+- [x] Entity state struct: id, type (player/monster kind), position,
       velocity, orientation, health/action state — used by both the
       monster AI (Track A) and entity sync (Track B).
-- [ ] Extend `terrain_biome` enum in `Libft/Modules/Voxel/voxel.hpp` with
+      `EntityState` (src/entities/EntityState.hpp) + binary
+      serialize/deserialize; `EntityKind`/`EntityActionState` enums cover
+      player/monster kind and action state.
+- [x] Extend `terrain_biome` enum in `Libft/Modules/Voxel/voxel.hpp` with
       placeholder entries for the new biomes so both tracks can compile
       against final names immediately.
-- [ ] Network message schema: join/leave, chunk request/response, edit
+      Added `TERRAIN_BIOME_CANYON/SWAMP/SEQUOIA_FOREST/SAVANNA/ISLAND` (5-9)
+      as reserved placeholders; biome selection/generation logic is
+      untouched until Track A1 wires each one in.
+- [x] Network message schema: join/leave, chunk request/response, edit
       broadcast, entity update, chat/ping — just the message shapes, not
       the implementation.
+      `src/network/ProtocolMessages.hpp` defines the header framing plus
+      one struct + serialize/deserialize pair per message type (join,
+      leave, chunk request/response, edit broadcast, entity update, chat,
+      ping/pong). No socket loop — that's Track B's B3 milestone.
 
 ---
 

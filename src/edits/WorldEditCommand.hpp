@@ -21,7 +21,6 @@ class WorldEditCommand
 
     virtual int32_t execute(World &world) const = 0;
 
-  protected:
     static WorldChunk *resolve_chunk(World &world, int32_t world_x, int32_t world_y,
                                      int32_t world_z, int32_t &chunk_x, int32_t &chunk_z,
                                      int32_t &local_x, int32_t &local_z);

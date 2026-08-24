@@ -1,7 +1,10 @@
 SRC = \
     main.cpp \
     src/app/Application.cpp \
+    src/app/ApplicationBootstrap.cpp \
+    src/app/ApplicationPhaseController.cpp \
     src/app/GameSession.cpp \
+    src/app/GameSessionDebugInfo.cpp \
     src/app/PerfSession.cpp \
     src/config/ApplicationOptions.cpp \
     src/config/CommandLine.cpp \
@@ -9,9 +12,11 @@ SRC = \
     src/config/LaunchSettingsMenu.cpp \
     src/platform/ApplicationWindow.cpp \
     src/platform/InputReader.cpp \
+    src/platform/PlatformLaunchSupport.cpp \
     src/diagnostics/ApplicationError.cpp \
     src/diagnostics/DebugCrashHandler.cpp \
     src/diagnostics/FramebufferHasher.cpp \
+    src/diagnostics/SystemMemoryInfo.cpp \
     src/camera/CameraInput.cpp \
     src/camera/Camera.cpp \
     src/player/PlayerController.cpp \
@@ -46,6 +51,7 @@ SRC = \
     src/geometry/TriangleTexture.cpp \
     src/assets/TextureAtlas.cpp \
     src/assets/BlockTextureRegistry.cpp \
+    src/assets/BmpImageLoader.cpp \
     src/debug/RenderDebug.cpp \
     src/debug/DebugView.cpp \
     src/debug/DebugOverlayRenderer.cpp \
@@ -62,6 +68,7 @@ SRC = \
     src/coordinates/WorldCoordinates.cpp \
     src/chunks/WorldChunk.cpp \
     src/chunks/WorldChunkStore.cpp \
+    src/chunks/ChunkNeighborMesher.cpp \
     src/chunks/WorldChunkLoader.cpp \
     src/queries/WorldBlockQuery.cpp \
     src/queries/WorldRaycaster.cpp \
@@ -69,6 +76,9 @@ SRC = \
     src/edits/DeleteBlockCommand.cpp \
     src/edits/PlaceBlockCommand.cpp \
     src/edits/WorldBlockEditor.cpp \
+    src/edits/WorldEditHistory.cpp \
+    src/entities/EntityState.cpp \
+    src/network/ProtocolMessages.cpp \
     src/gpur/GpuChunkMesh.cpp \
     src/gpur/GpuTextureAtlas.cpp \
     src/gpur/GpuMvpBuilder.cpp \

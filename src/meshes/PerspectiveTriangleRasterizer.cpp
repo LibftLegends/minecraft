@@ -124,13 +124,14 @@ void PerspectiveTriangleRasterizer::rasterize(ft_render_framebuffer &framebuffer
     for (int32_t y = start_y; y <= end_y; ++y)
     {
         double e0 = e0r, e1 = e1r, e2 = e2r, id = id_r, u = u_r, v = v_r;
-        size_t pi = row_base;
-        for (int32_t x = start_x; x <= end_x; ++x, ++pi)
+        size_t pixel_index = row_base;
+        for (int32_t x = start_x; x <= end_x; ++x, ++pixel_index)
         {
             bool inside = (e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0) ||
                           (e0 <= 0.0 && e1 <= 0.0 && e2 <= 0.0);
             if (inside)
-                write_pixel(&framebuffer.pixels[pi], depth_buffer[pi], id, u, v, texture);
+                write_pixel(&framebuffer.pixels[pixel_index], depth_buffer[pixel_index], id, u, v,
+                           texture);
             e0 += it.sx[0];
             e1 += it.sx[1];
             e2 += it.sx[2];

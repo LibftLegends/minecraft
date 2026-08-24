@@ -29,4 +29,15 @@
 # include <thread>
 # include <vector>
 
+# if defined(_WIN32)
+#  ifndef NOMINMAX
+#   define NOMINMAX
+#  endif
+#  include <windows.h>
+# elif defined(__APPLE__)
+#  include <Carbon/Carbon.h>
+#  include <mach/mach.h>
+#  include <mach/task.h>
+# endif
+
 #endif
