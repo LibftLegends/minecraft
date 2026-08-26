@@ -1,12 +1,14 @@
 #include "../../src/chunks/WorldChunk.hpp"
 
 WorldChunk::WorldChunk() : chunk_x(0), chunk_z(0), world_x(0), world_z(0),
-	mesh_revision(0U), initialized(false)
+	mesh_revision(0U), voxel_revision(0U), pending_mesh_request_id(0U),
+	mesh_dirty(false), initialized(false)
 {
 }
 
 WorldChunk::WorldChunk(const WorldChunk &other) : chunk_x(0), chunk_z(0),
-	world_x(0), world_z(0), mesh_revision(0U), initialized(false)
+	world_x(0), world_z(0), mesh_revision(0U), voxel_revision(0U),
+	pending_mesh_request_id(0U), mesh_dirty(false), initialized(false)
 {
 	(void)other;
 }
@@ -28,6 +30,9 @@ void WorldChunk::reset_coordinates()
 	this->chunk_z = 0;
 	this->world_x = 0;
 	this->world_z = 0;
+	this->voxel_revision = 0U;
+	this->pending_mesh_request_id = 0U;
+	this->mesh_dirty = false;
 }
 
 void WorldChunk::destroy()
@@ -37,4 +42,7 @@ void WorldChunk::destroy()
 	(void)chunk_mesh_destroy(this->mesh);
 	(void)this->chunk.destroy();
 	this->initialized = false;
+	this->voxel_revision = 0U;
+	this->pending_mesh_request_id = 0U;
+	this->mesh_dirty = false;
 }

@@ -38,8 +38,8 @@ static bool world_async_chunks_equal(const game_voxel_chunk &left,
             int32_t local_x = 0;
             while (local_x < GAME_VOXEL_CHUNK_WIDTH)
             {
-                uint32_t left_block;
-                uint32_t right_block;
+                uint32_t left_block = 0U;
+                uint32_t right_block = 0U;
                 if (left.read_block(local_x, local_y, local_z, &left_block)
                         != FT_ERR_SUCCESS
                     || right.read_block(local_x, local_y, local_z, &right_block)

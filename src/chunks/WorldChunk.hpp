@@ -16,6 +16,9 @@ class WorldChunk
 	game_voxel_chunk chunk;
 	chunk_mesh mesh;
 	uint64_t mesh_revision;
+	uint64_t voxel_revision;
+	uint64_t pending_mesh_request_id;
+	bool mesh_dirty;
 	bool initialized;
 
 	WorldChunk();

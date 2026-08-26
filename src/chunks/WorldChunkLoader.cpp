@@ -95,6 +95,9 @@ int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk,
 	}
 	world_chunk->initialized = true;
 	world_chunk->mesh_revision += 1U;
+	world_chunk->voxel_revision += 1U;
+	world_chunk->pending_mesh_request_id = 0U;
+	world_chunk->mesh_dirty = false;
 	return (FT_ERR_SUCCESS);
 }
 
@@ -116,6 +119,9 @@ int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk,
 		return (err);
 	world_chunk->initialized = true;
 	world_chunk->mesh_revision += 1U;
+	world_chunk->voxel_revision += 1U;
+	world_chunk->pending_mesh_request_id = 0U;
+	world_chunk->mesh_dirty = false;
 	return (FT_ERR_SUCCESS);
 }
 
@@ -137,6 +143,9 @@ int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk,
 		return (err);
 	world_chunk->initialized = true;
 	world_chunk->mesh_revision += 1U;
+	world_chunk->voxel_revision += 1U;
+	world_chunk->pending_mesh_request_id = 0U;
+	world_chunk->mesh_dirty = false;
 	return (FT_ERR_SUCCESS);
 }
 
@@ -168,11 +177,16 @@ int32_t WorldChunkLoader::remesh_chunk(WorldChunk *chunks, int32_t chunk_count,
 			chunk_z);
 	if (!wc)
 		return (FT_ERR_SUCCESS);
+	wc->pending_mesh_request_id = 0U;
+	wc->mesh_dirty = true;
 	err = chunk_mesh_clear(wc->mesh);
 	if (err == FT_ERR_SUCCESS)
 		err = chunk_mesh_generate_from_chunk(wc->mesh, wc->chunk);
 	if (err == FT_ERR_SUCCESS)
+	{
 		wc->mesh_revision += 1U;
+		wc->mesh_dirty = false;
+	}
 	return (err);
 }
 
@@ -186,6 +200,8 @@ int32_t WorldChunkLoader::remesh_chunk(WorldChunk *chunks, int32_t chunk_count,
 			chunk_z);
 	if (!wc)
 		return (FT_ERR_SUCCESS);
+	wc->pending_mesh_request_id = 0U;
+	wc->mesh_dirty = true;
 	err = chunk_mesh_clear(wc->mesh);
 	if (err != FT_ERR_SUCCESS)
 		return (err);
@@ -193,13 +209,19 @@ int32_t WorldChunkLoader::remesh_chunk(WorldChunk *chunks, int32_t chunk_count,
 	{
 		err = chunk_mesh_generate_from_chunk(wc->mesh, wc->chunk);
 		if (err == FT_ERR_SUCCESS)
+		{
 			wc->mesh_revision += 1U;
+			wc->mesh_dirty = false;
+		}
 		return (err);
 	}
 	err = ChunkNeighborMesher::generate_with_neighbors(wc->mesh, wc->chunk,
 			chunk_x, chunk_z, chunks, chunk_count);
 	if (err == FT_ERR_SUCCESS)
+	{
 		wc->mesh_revision += 1U;
+		wc->mesh_dirty = false;
+	}
 	return (err);
 }
 

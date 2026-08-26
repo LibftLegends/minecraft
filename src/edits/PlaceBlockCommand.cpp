@@ -50,6 +50,8 @@ int32_t PlaceBlockCommand::execute(World &world) const
     err = wc->chunk.write_block(lx, world_y, lz, block_id);
     if (err != FT_ERR_SUCCESS)
         return err;
+    wc->voxel_revision += 1U;
+    wc->pending_mesh_request_id = 0U;
     WorldEditRecord record;
     record.edit.world_x = world_x;
     record.edit.world_y = world_y;

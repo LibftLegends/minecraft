@@ -146,6 +146,24 @@ class World
     const WorldChunk *find_chunk(int32_t chunk_x, int32_t chunk_z) const;
     WorldChunk *find_chunk_mutable(int32_t chunk_x, int32_t chunk_z);
 
+    int32_t begin_world_revision(const terrain_generation_config &config,
+                                 RegenerationMode mode);
+    int32_t cancel_world_revision();
+    WorldRevision world_revision() const;
+    int32_t select_revision_chunk(int32_t chunk_x, int32_t chunk_z, bool selected);
+    int32_t set_chunk_protected(int32_t chunk_x, int32_t chunk_z, bool protected_state);
+    bool is_chunk_protected(int32_t chunk_x, int32_t chunk_z) const;
+    ChunkRevisionState revision_state(int32_t chunk_x, int32_t chunk_z) const;
+    int32_t build_revision_preview(int32_t preview_center_x, int32_t preview_center_z,
+                                   int32_t radius,
+                                   std::vector<RevisionPreviewEntry> &preview) const;
+    int32_t start_revision_regeneration();
+    int32_t regenerate_selected_chunks(int32_t *regenerated_count, int32_t *skipped_count);
+    int32_t apply_revision_request(const RevisionRequest &request,
+                                   RevisionRequestResult *result);
+    int32_t save_revision_metadata(const char *file_path) const;
+    int32_t load_revision_metadata(const char *file_path);
+
   private:
     struct StreamCandidate
     {
