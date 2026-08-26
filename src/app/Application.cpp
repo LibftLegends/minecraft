@@ -16,47 +16,55 @@ Application &Application::operator=(const Application &other)
 	return (*this);
 }
 
-void Application::run_game_loop(ApplicationWindow &window, MenuController &menu,
-	GameSession &session, VoxelRenderer &renderer,
-	const RenderDistanceStrategy &strategy)
+void Application::run_single_frame(ApplicationWindow &window,
+	MenuController &menu, GameSession &session, VoxelRenderer &renderer,
+	const RenderDistanceStrategy &strategy,
+	ApplicationPhaseController::Phase &phase, int &loading_frames,
+	std::chrono::steady_clock::time_point &prev_time)
 {
-	int		loading_frames;
 	double	dt;
 
 	const std::chrono::duration<double> target_frame_time(1.0 / 120.0);
 	std::chrono::steady_clock::time_point frame_start;
 	std::chrono::steady_clock::time_point frame_deadline;
 	std::chrono::steady_clock::time_point now;
-	std::chrono::steady_clock::time_point prev_time;
+	frame_start = std::chrono::steady_clock::now();
+	now = frame_start;
+	dt = std::min(std::chrono::duration<double>(now - prev_time).count(), 0.1);
+	prev_time = now;
+	window.poll_events();
+	if (window.should_close())
+		return ;
+	if (phase != ApplicationPhaseController::Phase::IN_GAME)
+	{
+		ft_dumb_controls_set_mouse_captured(FT_FALSE);
+		ft_dumb_controls_poll();
+		ft_dumb_controls_set_mouse_captured(FT_TRUE);
+	}
+	phase = ApplicationPhaseController::tick_phase(phase, window, menu, session,
+			renderer, dt, loading_frames, strategy);
+	ApplicationPhaseController::render_frame(phase, window, menu, session,
+		renderer);
+	window.present();
+	frame_deadline = frame_start
+		+ std::chrono::duration_cast<std::chrono::steady_clock::duration>(target_frame_time);
+	std::this_thread::sleep_until(frame_deadline);
+}
+
+void Application::run_game_loop(ApplicationWindow &window, MenuController &menu,
+	GameSession &session, VoxelRenderer &renderer,
+	const RenderDistanceStrategy &strategy)
+{
+	int	loading_frames;
+
 	ApplicationPhaseController::Phase phase;
+	std::chrono::steady_clock::time_point prev_time;
 	phase = ApplicationPhaseController::Phase::MAIN_MENU;
 	loading_frames = 0;
 	prev_time = std::chrono::steady_clock::now();
 	while (!window.should_close() && !menu.wants_exit())
-	{
-		frame_start = std::chrono::steady_clock::now();
-		now = std::chrono::steady_clock::now();
-		dt = std::min(std::chrono::duration<double>(now - prev_time).count(),
-				0.1);
-		prev_time = now;
-		window.poll_events();
-		if (window.should_close())
-			break ;
-		if (phase != ApplicationPhaseController::Phase::IN_GAME)
-		{
-			ft_dumb_controls_set_mouse_captured(FT_FALSE);
-			ft_dumb_controls_poll();
-			ft_dumb_controls_set_mouse_captured(FT_TRUE);
-		}
-		phase = ApplicationPhaseController::tick_phase(phase, window, menu,
-				session, renderer, dt, loading_frames, strategy);
-		ApplicationPhaseController::render_frame(phase, window, menu, session,
-			renderer);
-		window.present();
-		frame_deadline = frame_start
-			+ std::chrono::duration_cast<std::chrono::steady_clock::duration>(target_frame_time);
-		std::this_thread::sleep_until(frame_deadline);
-	}
+		run_single_frame(window, menu, session, renderer, strategy, phase,
+			loading_frames, prev_time);
 }
 
 int Application::run_game(ApplicationOptions & /*options*/,

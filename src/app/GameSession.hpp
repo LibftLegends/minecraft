@@ -72,6 +72,7 @@ class GameSession
 		const RenderDistanceStrategy &strategy);
 	void build_render_debug(VoxelRenderer &renderer);
 	void sync_player_character_location();
+	void reset_session_state();
 };
 
 #endif

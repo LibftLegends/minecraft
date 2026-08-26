@@ -11,59 +11,67 @@ WorldCoordinates::WorldCoordinates()
 }
 WorldCoordinates::WorldCoordinates(const WorldCoordinates &other)
 {
-    (void)other;
+	(void)other;
 }
 WorldCoordinates::~WorldCoordinates()
 {
 }
 WorldCoordinates &WorldCoordinates::operator=(const WorldCoordinates &other)
 {
-    (void)other;
-    return *this;
+	(void)other;
+	return (*this);
 }
 
 int32_t WorldCoordinates::floor_divide(int32_t value, int32_t divisor)
 {
-    if (value >= 0)
-        return value / divisor;
-    return -((-value + divisor - 1) / divisor);
+	if (value >= 0)
+		return (value / divisor);
+	return (-((-value + divisor - 1) / divisor));
 }
 
 int32_t WorldCoordinates::positive_modulo(int32_t value, int32_t divisor)
 {
-    int32_t result = value % divisor;
-    if (result < 0)
-        result += divisor;
-    return result;
+	int32_t	result;
+
+	result = value % divisor;
+	if (result < 0)
+		result += divisor;
+	return (result);
 }
 
-int32_t WorldCoordinates::clamp_int(int32_t value, int32_t minimum, int32_t maximum)
+int32_t WorldCoordinates::clamp_int(int32_t value, int32_t minimum,
+	int32_t maximum)
 {
-    if (value < minimum)
-        return minimum;
-    if (value > maximum)
-        return maximum;
-    return value;
+	if (value < minimum)
+		return (minimum);
+	if (value > maximum)
+		return (maximum);
+	return (value);
 }
 
-int32_t WorldCoordinates::chunk_distance_squared(int32_t chunk_x, int32_t chunk_z,
-                                                 int32_t center_chunk_x, int32_t center_chunk_z)
+int32_t WorldCoordinates::chunk_distance_squared(int32_t chunk_x,
+	int32_t chunk_z, int32_t center_chunk_x, int32_t center_chunk_z)
 {
-    int32_t dx = chunk_x - center_chunk_x;
-    int32_t dz = chunk_z - center_chunk_z;
-    return (dx * dx) + (dz * dz);
+	int32_t	dx;
+	int32_t	dz;
+
+	dx = chunk_x - center_chunk_x;
+	dz = chunk_z - center_chunk_z;
+	return (dx * dx) + (dz * dz);
 }
 
 int32_t WorldCoordinates::render_distance_to_chunk_radius(int32_t render_distance)
 {
-    int32_t clamped = clamp_int(render_distance, MIN_RENDER_DISTANCE,
-                                CACHE_CHUNK_RADIUS * GAME_VOXEL_CHUNK_WIDTH);
-    int32_t chunk_radius = (clamped + (GAME_VOXEL_CHUNK_WIDTH / 2) +
-                            GAME_VOXEL_CHUNK_WIDTH - 1) /
-                           GAME_VOXEL_CHUNK_WIDTH;
-    if (chunk_radius < 1)
-        chunk_radius = 1;
-    if (chunk_radius > CACHE_CHUNK_RADIUS)
-        chunk_radius = CACHE_CHUNK_RADIUS;
-    return chunk_radius;
+	int32_t	clamped;
+	int32_t	chunk_radius;
+
+	clamped = clamp_int(render_distance, MIN_RENDER_DISTANCE, CACHE_CHUNK_RADIUS
+			* GAME_VOXEL_CHUNK_WIDTH);
+	chunk_radius = (clamped + (GAME_VOXEL_CHUNK_WIDTH / 2)
+			+ GAME_VOXEL_CHUNK_WIDTH - 1) / GAME_VOXEL_CHUNK_WIDTH;
+	if (chunk_radius < 1)
+		chunk_radius = 1;
+	if (chunk_radius > CACHE_CHUNK_RADIUS)
+		chunk_radius = CACHE_CHUNK_RADIUS;
+	return (chunk_radius);
 }

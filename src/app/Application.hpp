@@ -26,6 +26,11 @@ class Application
 	static int run(int argc, char **argv);
 
   private:
+	static void run_single_frame(ApplicationWindow &window,
+		MenuController &menu, GameSession &session, VoxelRenderer &renderer,
+		const RenderDistanceStrategy &strategy,
+		ApplicationPhaseController::Phase &phase, int &loading_frames,
+		std::chrono::steady_clock::time_point &prev_time);
 	static void run_game_loop(ApplicationWindow &window, MenuController &menu,
 		GameSession &session, VoxelRenderer &renderer,
 		const RenderDistanceStrategy &strategy);

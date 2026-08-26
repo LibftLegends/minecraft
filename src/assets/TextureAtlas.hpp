@@ -51,6 +51,8 @@ class TextureAtlas
 	static double fraction(double value);
 	static uint32_t sample_clamped(const TriangleTexture &tex, double u,
 		double v);
+	static void compute_tile_geometry(const TextureAtlas &atlas,
+		uint32_t block_id, uint8_t face, TriangleTexture &tex);
 };
 
 #endif

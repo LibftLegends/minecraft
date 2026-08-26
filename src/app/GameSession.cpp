@@ -28,6 +28,21 @@ GameSession &GameSession::operator=(const GameSession &other)
 	return (*this);
 }
 
+void GameSession::reset_session_state()
+{
+	active_render_distance_ = Settings::instance().render_distance();
+	boost_enabled_ = false;
+	selected_block_id_ = TERRAIN_GENERATOR_DIRT_BLOCK;
+	fps_accumulator_ = 0.0;
+	fps_frame_count_ = 0U;
+	rd_accumulator_ = 0.0;
+	display_fps_ = 0.0;
+	frame_ms_ = 0.0;
+	performance_frame_ms_ = 16.67;
+	error_code_ = FT_ERR_SUCCESS;
+	active_ = true;
+}
+
 int GameSession::start(const std::string &seed, ApplicationWindow &window,
 	VoxelRenderer &renderer)
 {
@@ -45,17 +60,7 @@ int GameSession::start(const std::string &seed, ApplicationWindow &window,
 	camera_.initialize();
 	PlayerController::spawn_player_on_ground(&camera_, world_);
 	sync_player_character_location();
-	active_render_distance_ = Settings::instance().render_distance();
-	boost_enabled_ = false;
-	selected_block_id_ = TERRAIN_GENERATOR_DIRT_BLOCK;
-	fps_accumulator_ = 0.0;
-	fps_frame_count_ = 0U;
-	rd_accumulator_ = 0.0;
-	display_fps_ = 0.0;
-	frame_ms_ = 0.0;
-	performance_frame_ms_ = 16.67;
-	error_code_ = FT_ERR_SUCCESS;
-	active_ = true;
+	reset_session_state();
 	if (window.is_gpu_mode() && window.get_gpu_window()
 		&& renderer.get_gpu_renderer() == nullptr)
 	{

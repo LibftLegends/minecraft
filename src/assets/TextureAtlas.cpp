@@ -73,16 +73,30 @@ double TextureAtlas::fraction(double value)
 	return (value - std::floor(value));
 }
 
+void TextureAtlas::compute_tile_geometry(const TextureAtlas &atlas,
+	uint32_t block_id, uint8_t face, TriangleTexture &tex)
+{
+	int32_t	mx;
+	int32_t	my;
+	int32_t	tile_x;
+	int32_t	tile_y;
+
+	atlas_tile_for_block(block_id, face, &tile_x, &tile_y);
+	mx = std::max(2, atlas.get_tile_width() / 32);
+	my = std::max(2, atlas.get_tile_height() / 32);
+	tex.base_x = tile_x * atlas.get_tile_width() + mx;
+	tex.base_y = tile_y * atlas.get_tile_height() + my;
+	tex.sample_width = std::max(1, atlas.get_tile_width() - mx * 2);
+	tex.sample_height = std::max(1, atlas.get_tile_height() - my * 2);
+	tex.loaded = true;
+}
+
 TriangleTexture TextureAtlas::prepare_triangle_texture(uint32_t block_id,
 	uint8_t face)
 {
 	static TriangleTexture	cache[TEXTURE_CACHE_BLOCKS][TEXTURE_CACHE_FACES];
 	static bool				cache_ready[TEXTURE_CACHE_BLOCKS][TEXTURE_CACHE_FACES];
 	TriangleTexture			tex;
-	int32_t					mx;
-	int32_t					my;
-	int32_t					tile_x;
-	int32_t					tile_y;
 
 	const TextureAtlas &atlas = instance();
 	if (block_id < static_cast<uint32_t>(TEXTURE_CACHE_BLOCKS)
@@ -99,14 +113,7 @@ TriangleTexture TextureAtlas::prepare_triangle_texture(uint32_t block_id,
 	tex.loaded = false;
 	if (!atlas.is_loaded())
 		return (tex);
-	atlas_tile_for_block(block_id, face, &tile_x, &tile_y);
-	mx = std::max(2, atlas.get_tile_width() / 32);
-	my = std::max(2, atlas.get_tile_height() / 32);
-	tex.base_x = tile_x * atlas.get_tile_width() + mx;
-	tex.base_y = tile_y * atlas.get_tile_height() + my;
-	tex.sample_width = std::max(1, atlas.get_tile_width() - mx * 2);
-	tex.sample_height = std::max(1, atlas.get_tile_height() - my * 2);
-	tex.loaded = true;
+	compute_tile_geometry(atlas, block_id, face, tex);
 	if (block_id < static_cast<uint32_t>(TEXTURE_CACHE_BLOCKS)
 		&& face < static_cast<uint8_t>(TEXTURE_CACHE_FACES))
 	{
