@@ -194,13 +194,13 @@ int32_t protocol_entity_update_serialize(
     const ProtocolEntityUpdateMessage &message,
     ft_byte_buffer &buffer) noexcept
 {
-    return (entity_state_serialize(message.entity, buffer));
+    return (message.entity.serialize(buffer));
 }
 
 int32_t protocol_entity_update_deserialize(
     ProtocolEntityUpdateMessage &message, ft_byte_buffer &buffer) noexcept
 {
-    return (entity_state_deserialize(message.entity, buffer));
+    return (message.entity.deserialize(buffer));
 }
 
 int32_t protocol_chat_serialize(const ProtocolChatMessage &message,

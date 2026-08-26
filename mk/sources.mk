@@ -89,6 +89,8 @@ SRC = \
     src/gpur/GpuHudRenderer.cpp \
     src/gpur/GpuWorldRenderer.cpp \
     src/gpur/GpuRenderer.cpp \
+    src/font/BitmapFont.cpp \
+    src/font/FreeTypeFontBackend.cpp \
     src/font/FontRenderer.cpp \
     src/settings/Settings.cpp \
     src/menu/MenuCanvas.cpp \
