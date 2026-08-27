@@ -63,7 +63,27 @@ SRC = \
     src/meshes/PerspectiveTriangleRasterizer.cpp \
     src/meshes/ChunkMeshRenderer.cpp \
     src/world/World.cpp \
+    src/world/WorldStreamingFacade.cpp \
+    src/world/WorldRevisionFacade.cpp \
     src/world/WorldGenerationPipeline.cpp \
+    src/world/WorldChunkGenerationWorker.cpp \
+    src/world/WorldChunkSnapshotReader.cpp \
+    src/world/WorldChunkSnapshotCapture.cpp \
+    src/world/WorldGenerationRequestBuilder.cpp \
+    src/world/WorldGenerationWorkerLoop.cpp \
+    src/world/WorldChunkStreamer.cpp \
+    src/world/WorldChunkCandidateScanner.cpp \
+    src/world/WorldChunkAsyncSubmitter.cpp \
+    src/world/WorldChunkStreamDiagnosticsBuilder.cpp \
+    src/world/WorldGenerationResultCommitter.cpp \
+    src/world/WorldRegenerationResultApplier.cpp \
+    src/world/WorldDeferredEditApplier.cpp \
+    src/world/WorldRevisionManager.cpp \
+    src/world/WorldRevisionRegenerator.cpp \
+    src/world/WorldRevisionRequestApplier.cpp \
+    src/world/WorldRegenerationProgress.cpp \
+    src/world/WorldRevisionMetadataStore.cpp \
+    src/world/WorldRevisionChunkSet.cpp \
     src/world/WorldRevisionServer.cpp \
     src/coordinates/WorldCoordinates.cpp \
     src/chunks/WorldChunk.cpp \

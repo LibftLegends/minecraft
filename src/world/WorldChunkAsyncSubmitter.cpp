@@ -1,0 +1,123 @@
+#include "../../src/world/WorldChunkAsyncSubmitter.hpp"
+
+WorldChunkAsyncSubmitter::WorldChunkAsyncSubmitter()
+{
+}
+
+WorldChunkAsyncSubmitter::WorldChunkAsyncSubmitter(const WorldChunkAsyncSubmitter &other)
+{
+	(void)other;
+}
+
+WorldChunkAsyncSubmitter::~WorldChunkAsyncSubmitter()
+{
+}
+
+WorldChunkAsyncSubmitter &WorldChunkAsyncSubmitter::operator=(const WorldChunkAsyncSubmitter &other)
+{
+	(void)other;
+	return (*this);
+}
+
+bool WorldChunkAsyncSubmitter::submit_async_candidate(WorldChunkStreamer &streamer,
+	WorldChunkStreamer::StreamCandidate &candidate, int32_t chunk_x,
+	int32_t chunk_z, int32_t *submitted, int32_t budget) noexcept
+{
+	uint64_t request_id;
+	int32_t error_code;
+
+	request_id = streamer.next_request_id_++;
+	error_code = streamer.generation_pipeline_.submit_generation(request_id,
+			streamer.world_epoch_, streamer.stream_relevance_epoch_,
+			streamer.generation_revision_, chunk_x, chunk_z,
+			streamer.world_.seed, streamer.world_.terrain_context.config(),
+			TERRAIN_STAGE_BASE_TERRAIN | TERRAIN_STAGE_CAVES | TERRAIN_STAGE_FLUIDS | TERRAIN_STAGE_DECORATION | TERRAIN_STAGE_STRUCTURES | TERRAIN_STAGE_ORES,
+			WorldGenerationPipeline::WorldGenerationOperation::STREAM);
+	if (error_code == FT_ERR_FULL)
+		return (true);
+	if (error_code != FT_ERR_SUCCESS)
+	{
+		candidate.state = WorldChunkStreamer::CANDIDATE_FAILED_RETRYABLE;
+		candidate.last_error = error_code;
+		candidate.retry_frames = 1;
+		return (false);
+	}
+	candidate.state = WorldChunkStreamer::CANDIDATE_GENERATING;
+	candidate.queued_frame = streamer.stream_frame_;
+	candidate.request_id = request_id;
+	*submitted += 1;
+	if (budget > 0 && *submitted >= budget)
+		return (true);
+	return (false);
+}
+
+bool WorldChunkAsyncSubmitter::process_async_candidate(WorldChunkStreamer &streamer,
+	WorldChunkStreamer::StreamCandidate &candidate, int32_t *submitted,
+	int32_t budget) noexcept
+{
+	int32_t chunk_x;
+	int32_t chunk_z;
+
+	if (candidate.state == WorldChunkStreamer::CANDIDATE_READY
+		|| candidate.state == WorldChunkStreamer::CANDIDATE_GENERATING
+		|| candidate.state == WorldChunkStreamer::CANDIDATE_MESHING
+		|| candidate.state == WorldChunkStreamer::CANDIDATE_QUEUED)
+		return (false);
+	if (candidate.retry_frames > 0)
+	{
+		candidate.retry_frames -= 1;
+		return (false);
+	}
+	WorldChunkCandidateScanner::refresh_stale_candidate(streamer, candidate);
+	chunk_x = streamer.world_.center_chunk_x + candidate.offset_x;
+	chunk_z = streamer.world_.center_chunk_z + candidate.offset_z;
+	if (streamer.world_.find_chunk(chunk_x, chunk_z) != nullptr)
+	{
+		candidate.state = WorldChunkStreamer::CANDIDATE_READY;
+		return (false);
+	}
+	return (WorldChunkAsyncSubmitter::submit_async_candidate(streamer,
+			candidate, chunk_x, chunk_z, submitted, budget));
+}
+
+void WorldChunkAsyncSubmitter::submit_dirty_remeshes(WorldChunkStreamer &streamer) noexcept
+{
+	int32_t dirty_index;
+
+	dirty_index = 0;
+	while (dirty_index < streamer.world_.chunk_count
+		&& streamer.generation_pipeline_.queued_count() < 8U)
+	{
+		if (streamer.world_.chunks[dirty_index].initialized
+			&& streamer.world_.chunks[dirty_index].mesh_dirty)
+			(void)streamer.queue_chunk_remesh(streamer.world_.chunks[dirty_index]);
+		dirty_index += 1;
+	}
+}
+
+int32_t WorldChunkAsyncSubmitter::stream_chunks_async(WorldChunkStreamer &streamer,
+	int32_t stream_radius, int32_t budget, int32_t *generated) noexcept
+{
+	int32_t submitted;
+	int32_t scanned;
+	int32_t candidate_count;
+
+	(void)generated;
+	(void)stream_radius;
+	submitted = 0;
+	scanned = 0;
+	candidate_count = static_cast<int32_t>(streamer.stream_candidates_.size());
+	while (scanned < candidate_count)
+	{
+		WorldChunkStreamer::StreamCandidate &candidate = streamer.stream_candidates_[streamer.stream_candidate_cursor_];
+
+		streamer.stream_candidate_cursor_ = (streamer.stream_candidate_cursor_
+				+ 1U) % streamer.stream_candidates_.size();
+		scanned += 1;
+		if (WorldChunkAsyncSubmitter::process_async_candidate(streamer,
+				candidate, &submitted, budget))
+			break ;
+	}
+	WorldChunkAsyncSubmitter::submit_dirty_remeshes(streamer);
+	return (FT_ERR_SUCCESS);
+}
