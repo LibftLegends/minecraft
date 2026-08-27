@@ -5,15 +5,15 @@ MenuScene::MenuScene()
 }
 MenuScene::MenuScene(const MenuScene &other)
 {
-    (void)other;
+	(void)other;
 }
 MenuScene::~MenuScene()
 {
 }
 MenuScene &MenuScene::operator=(const MenuScene &other)
 {
-    (void)other;
-    return *this;
+	(void)other;
+	return (*this);
 }
 
 void MenuScene::on_enter()

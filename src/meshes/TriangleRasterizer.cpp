@@ -6,7 +6,7 @@ TriangleRasterizer::TriangleRasterizer()
 
 TriangleRasterizer::TriangleRasterizer(const TriangleRasterizer &other)
 {
-    *this = other;
+	*this = other;
 }
 
 TriangleRasterizer::~TriangleRasterizer()
@@ -15,6 +15,6 @@ TriangleRasterizer::~TriangleRasterizer()
 
 TriangleRasterizer &TriangleRasterizer::operator=(const TriangleRasterizer &other)
 {
-    (void)other;
-    return (*this);
+	(void)other;
+	return (*this);
 }

@@ -6,7 +6,7 @@ RenderStrategyFactory::RenderStrategyFactory()
 
 RenderStrategyFactory::RenderStrategyFactory(const RenderStrategyFactory &other)
 {
-    *this = other;
+	*this = other;
 }
 
 RenderStrategyFactory::~RenderStrategyFactory()
@@ -15,16 +15,16 @@ RenderStrategyFactory::~RenderStrategyFactory()
 
 RenderStrategyFactory &RenderStrategyFactory::operator=(const RenderStrategyFactory &other)
 {
-    (void)other;
-    return (*this);
+	(void)other;
+	return (*this);
 }
 
 const RenderDistanceStrategy &RenderStrategyFactory::select(bool headless_mode)
 {
-    static AdaptiveRenderStrategy adaptive;
-    static FixedRenderStrategy fixed;
+	static AdaptiveRenderStrategy	adaptive;
+	static FixedRenderStrategy		fixed;
 
-    if (headless_mode)
-        return (fixed);
-    return (adaptive);
+	if (headless_mode)
+		return (fixed);
+	return (adaptive);
 }

@@ -4,7 +4,6 @@
 # ifndef GAME_USE_VOXEL_REGION_BACKEND
 #  define GAME_USE_VOXEL_REGION_BACKEND
 # endif
-# include "../../Libft/Modules/Game/game_block_edit_op.hpp"
 # include "../ft_vox.hpp"
 
 class	World;

@@ -6,7 +6,7 @@ RenderDistanceStrategy::RenderDistanceStrategy()
 
 RenderDistanceStrategy::RenderDistanceStrategy(const RenderDistanceStrategy &other)
 {
-    (void)other;
+	(void)other;
 }
 
 RenderDistanceStrategy::~RenderDistanceStrategy()
@@ -15,6 +15,6 @@ RenderDistanceStrategy::~RenderDistanceStrategy()
 
 RenderDistanceStrategy &RenderDistanceStrategy::operator=(const RenderDistanceStrategy &other)
 {
-    (void)other;
-    return (*this);
+	(void)other;
+	return (*this);
 }

@@ -78,11 +78,21 @@ SRC = \
     src/edits/WorldBlockEditor.cpp \
     src/edits/WorldEditHistory.cpp \
     src/entities/EntityState.cpp \
-    src/network/ProtocolMessages.cpp \
+    src/network/ProtocolMessageHeader.cpp \
+    src/network/ProtocolJoinMessage.cpp \
+    src/network/ProtocolLeaveMessage.cpp \
+    src/network/ProtocolChunkRequestMessage.cpp \
+    src/network/ProtocolChunkResponseMessage.cpp \
+    src/network/ProtocolEditBroadcastMessage.cpp \
+    src/network/ProtocolEntityUpdateMessage.cpp \
+    src/network/ProtocolChatMessage.cpp \
+    src/network/ProtocolPingMessage.cpp \
+    src/network/ProtocolPongMessage.cpp \
     src/gpur/GpuChunkMesh.cpp \
     src/gpur/GpuTextureAtlas.cpp \
     src/gpur/GpuMvpBuilder.cpp \
     src/gpur/GlslLoader.cpp \
+    src/gpur/GpuWaterBatch.cpp \
     src/gpur/GpuGeometryBatch.cpp \
     src/gpur/GpuOverlayRenderer.cpp \
     src/gpur/GpuSkyRenderer.cpp \
