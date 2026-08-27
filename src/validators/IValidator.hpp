@@ -3,9 +3,13 @@
 
 class IValidator
 {
-    public:
-        virtual ~IValidator() {}
-        virtual int validate() const = 0;
+  public:
+	IValidator();
+	IValidator(const IValidator &other);
+	virtual ~IValidator();
+	IValidator &operator=(const IValidator &other);
+
+	virtual int validate() const = 0;
 };
 
 #endif

@@ -1,16 +1,25 @@
 #ifndef WORLD_ASYNC_GENERATION_VALIDATOR_HPP
-#define WORLD_ASYNC_GENERATION_VALIDATOR_HPP
+# define WORLD_ASYNC_GENERATION_VALIDATOR_HPP
 
-class WorldAsyncGenerationValidator
+# include "../../src/validators/IValidator.hpp"
+# include "../../src/world/World.hpp"
+
+class WorldAsyncGenerationValidator : public IValidator
 {
-  public:
-    WorldAsyncGenerationValidator();
-    WorldAsyncGenerationValidator(const WorldAsyncGenerationValidator &other);
-    ~WorldAsyncGenerationValidator();
-    WorldAsyncGenerationValidator &operator=(
-        const WorldAsyncGenerationValidator &other);
+  private:
+	static bool chunks_equal(const game_voxel_chunk &left,
+		const game_voxel_chunk &right) noexcept;
+	static const WorldChunk *stream_until_ready(World &world,
+		int32_t *frame) noexcept;
+	static void report_failure(const World &world, int32_t frame) noexcept;
 
-    int validate() const;
+  public:
+	WorldAsyncGenerationValidator();
+	WorldAsyncGenerationValidator(const WorldAsyncGenerationValidator &other);
+	~WorldAsyncGenerationValidator();
+	WorldAsyncGenerationValidator &operator=(const WorldAsyncGenerationValidator &other);
+
+	int validate() const override;
 };
 
 #endif

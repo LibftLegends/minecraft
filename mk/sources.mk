@@ -26,9 +26,11 @@ SRC = \
     src/physics/PlayerCollision.cpp \
     src/spawn/PlayerSpawner.cpp \
     src/interaction/BlockInteractor.cpp \
+    src/validators/IValidator.cpp \
     src/validators/ApplicationValidator.cpp \
     src/validators/CameraSpeedValidator.cpp \
     src/validators/CollisionValidator.cpp \
+    src/validators/CollisionTerrainScenarios.cpp \
     src/validators/BlockEditValidator.cpp \
     src/validators/WorldVisibilityValidator.cpp \
     src/validators/TerrainDeterminismValidator.cpp \
