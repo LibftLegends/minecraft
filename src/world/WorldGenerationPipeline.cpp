@@ -216,70 +216,34 @@ int32_t WorldGenerationPipeline::capture_snapshot(const WorldChunk &target,
     {
         return (FT_ERR_NO_MEMORY);
     }
-    int32_t local_z = 0;
-    while (local_z < GAME_VOXEL_CHUNK_DEPTH)
-    {
-        int32_t local_y = 0;
-        while (local_y < GAME_VOXEL_CHUNK_HEIGHT)
-        {
-            int32_t local_x = 0;
-            while (local_x < GAME_VOXEL_CHUNK_WIDTH)
-            {
-                uint32_t block_id;
-                if (target.chunk.read_block(local_x, local_y, local_z, &block_id)
-                    != FT_ERR_SUCCESS)
-                    return (FT_ERR_INVALID_OPERATION);
-                const std::size_t index = (static_cast<std::size_t>(local_z)
-                    * static_cast<std::size_t>(GAME_VOXEL_CHUNK_HEIGHT)
-                    + static_cast<std::size_t>(local_y))
-                    * static_cast<std::size_t>(GAME_VOXEL_CHUNK_WIDTH)
-                    + static_cast<std::size_t>(local_x);
-                snapshot.blocks[index] = block_id;
-                local_x += 1;
-            }
-            local_y += 1;
-        }
-        local_z += 1;
-    }
+    if (target.chunk.copy_blocks(snapshot.blocks.data(),
+            static_cast<uint32_t>(snapshot.blocks.size())) != FT_ERR_SUCCESS)
+        return (FT_ERR_INVALID_OPERATION);
     auto capture_border = [](const WorldChunk *source, std::vector<uint32_t> &border,
                              int32_t border_local_x, int32_t border_local_z) -> int32_t
     {
+        uint32_t border_coordinate;
+
         if (source == nullptr || !source->initialized)
             return (FT_ERR_SUCCESS);
-        int32_t y = 0;
-        while (y < GAME_VOXEL_CHUNK_HEIGHT)
+        if (border_local_x < 0 || border_local_x >= GAME_VOXEL_CHUNK_WIDTH)
         {
-            int32_t axis = 0;
-            while (axis < GAME_VOXEL_CHUNK_WIDTH)
-            {
-                int32_t read_x;
-                int32_t read_z;
-                if (border_local_x < 0)
-                    read_x = GAME_VOXEL_CHUNK_WIDTH - 1;
-                else if (border_local_x >= GAME_VOXEL_CHUNK_WIDTH)
-                    read_x = 0;
-                else
-                    read_x = axis;
-                if (border_local_z < 0)
-                    read_z = GAME_VOXEL_CHUNK_DEPTH - 1;
-                else if (border_local_z >= GAME_VOXEL_CHUNK_DEPTH)
-                    read_z = 0;
-                else
-                    read_z = axis;
-                uint32_t block_id;
-                if (source->chunk.read_block(read_x, y, read_z, &block_id)
-                    != FT_ERR_SUCCESS)
-                    return (FT_ERR_INVALID_OPERATION);
-                if (border_local_x < 0 || border_local_x >= GAME_VOXEL_CHUNK_WIDTH)
-                    border[static_cast<std::size_t>(y) * GAME_VOXEL_CHUNK_DEPTH
-                        + static_cast<std::size_t>(axis)] = block_id;
-                else
-                    border[static_cast<std::size_t>(y) * GAME_VOXEL_CHUNK_WIDTH
-                        + static_cast<std::size_t>(axis)] = block_id;
-                axis += 1;
-            }
-            y += 1;
+            border_coordinate = 0U;
+            if (border_local_x < 0)
+                border_coordinate = GAME_VOXEL_CHUNK_WIDTH - 1U;
+            if (source->chunk.copy_x_border(border.data(),
+                    static_cast<uint32_t>(border.size()), border_coordinate)
+                != FT_ERR_SUCCESS)
+                return (FT_ERR_INVALID_OPERATION);
+            return (FT_ERR_SUCCESS);
         }
+        border_coordinate = 0U;
+        if (border_local_z < 0)
+            border_coordinate = GAME_VOXEL_CHUNK_DEPTH - 1U;
+        if (source->chunk.copy_z_border(border.data(),
+                static_cast<uint32_t>(border.size()), border_coordinate)
+            != FT_ERR_SUCCESS)
+            return (FT_ERR_INVALID_OPERATION);
         return (FT_ERR_SUCCESS);
     };
     if (capture_border(west, snapshot.west_border, -1, 0) != FT_ERR_SUCCESS
