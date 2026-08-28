@@ -65,10 +65,11 @@ void GpuRenderer::destroy()
 
 void GpuRenderer::resize(int width, int height)
 {
+    if (_width == width && _height == height)
+        return;
     _width = width;
     _height = height;
     _world.resize(width, height);
-    glViewport(0, 0, width, height);
 }
 
 void GpuRenderer::render(const Camera &camera, const World &world)

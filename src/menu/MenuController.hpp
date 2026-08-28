@@ -73,6 +73,10 @@ class MenuController
     bool wants_exit_;
     bool dismissed_in_game_;
     bool wants_main_menu_;
+    bool canvas_dirty_;
+    bool overlay_dirty_;
+    bool has_last_input_;
+    MenuCanvas::MenuInput last_input_;
     std::string start_seed_;
 
     MenuScene *current_scene();

@@ -7,6 +7,16 @@
 
 namespace
 {
+bool menu_input_changed(const MenuCanvas::MenuInput &left,
+                        const MenuCanvas::MenuInput &right)
+{
+    return left.mouse_x != right.mouse_x || left.mouse_y != right.mouse_y
+        || left.mouse_clicked != right.mouse_clicked
+        || left.key_up != right.key_up || left.key_down != right.key_down
+        || left.key_enter != right.key_enter
+        || left.key_escape != right.key_escape;
+}
+
 void blit_canvas_to_framebuffer(const MenuCanvas &canvas, ft_render_framebuffer &framebuffer)
 {
     const uint32_t *src = canvas.pixels();
@@ -43,7 +53,8 @@ MenuController::MenuController()
     : canvas_(), phase_(Phase::MAIN_MENU), main_scene_(new MainMenuScene()),
       settings_scene_(new SettingsScene()), credits_scene_(new CreditsScene()),
       loading_scene_(new LoadingScene()), in_game_scene_(new InGameSettingsScene()),
-      wants_start_(false), wants_exit_(false), dismissed_in_game_(false), wants_main_menu_(false)
+      wants_start_(false), wants_exit_(false), dismissed_in_game_(false), wants_main_menu_(false),
+      canvas_dirty_(true), overlay_dirty_(true), has_last_input_(false), last_input_()
 {
 }
 
@@ -51,7 +62,8 @@ MenuController::MenuController(const MenuController &other)
     : canvas_(), phase_(Phase::MAIN_MENU), main_scene_(new MainMenuScene()),
       settings_scene_(new SettingsScene()), credits_scene_(new CreditsScene()),
       loading_scene_(new LoadingScene()), in_game_scene_(new InGameSettingsScene()),
-      wants_start_(false), wants_exit_(false), dismissed_in_game_(false), wants_main_menu_(false)
+      wants_start_(false), wants_exit_(false), dismissed_in_game_(false), wants_main_menu_(false),
+      canvas_dirty_(true), overlay_dirty_(true), has_last_input_(false), last_input_()
 {
     (void)other;
 }
@@ -90,6 +102,8 @@ void MenuController::show_main_menu()
         prev->on_exit();
     phase_ = Phase::MAIN_MENU;
     main_scene_->on_enter();
+    canvas_dirty_ = true;
+    overlay_dirty_ = true;
     clear_flags();
 }
 
@@ -97,29 +111,46 @@ void MenuController::show_settings()
 {
     phase_ = Phase::SETTINGS;
     settings_scene_->on_enter();
+    canvas_dirty_ = true;
+    overlay_dirty_ = true;
 }
 
 void MenuController::show_credits()
 {
     phase_ = Phase::CREDITS;
     credits_scene_->on_enter();
+    canvas_dirty_ = true;
+    overlay_dirty_ = true;
 }
 
 void MenuController::show_loading()
 {
     phase_ = Phase::LOADING;
     loading_scene_->on_enter();
+    canvas_dirty_ = true;
+    overlay_dirty_ = true;
 }
 
 void MenuController::show_in_game_settings()
 {
     phase_ = Phase::IN_GAME_SETTINGS;
     in_game_scene_->on_enter();
+    canvas_dirty_ = true;
+    overlay_dirty_ = true;
     clear_flags();
 }
 
 void MenuController::update(const MenuCanvas::MenuInput &in)
 {
+    if (!has_last_input_ || menu_input_changed(last_input_, in))
+    {
+        canvas_dirty_ = true;
+        overlay_dirty_ = true;
+    }
+    if (phase_ == Phase::LOADING)
+        canvas_dirty_ = true;
+    last_input_ = in;
+    has_last_input_ = true;
     MenuScene *s = current_scene();
     if (s)
         s->update(in, *this);
@@ -129,12 +160,16 @@ void MenuController::render(GpuRenderer *gpu)
 {
     if (!gpu)
         return;
-    gpu->clear_screen();
-    canvas_.clear(MenuCanvas::Colors::BG);
-    MenuScene *s = current_scene();
-    if (s)
-        s->render(canvas_);
-    gpu->upload_menu(canvas_.pixels(), canvas_.width(), canvas_.height());
+    if (canvas_dirty_)
+    {
+        gpu->clear_screen();
+        canvas_.clear(MenuCanvas::Colors::BG);
+        MenuScene *s = current_scene();
+        if (s)
+            s->render(canvas_);
+        gpu->upload_menu(canvas_.pixels(), canvas_.width(), canvas_.height());
+        canvas_dirty_ = false;
+    }
     gpu->draw_menu(1.0f);
 }
 
@@ -143,30 +178,44 @@ void MenuController::render_overlay(GpuRenderer *gpu)
     if (!gpu)
         return;
     gpu->draw_tint(0.0f, 0.0f, 0.0f, 0.55f);
-    canvas_.clear(0U);
-    MenuScene *s = current_scene();
-    if (s)
-        s->render(canvas_);
-    gpu->upload_menu(canvas_.pixels(), canvas_.width(), canvas_.height());
+    if (overlay_dirty_)
+    {
+        canvas_.clear(0U);
+        MenuScene *s = current_scene();
+        if (s)
+            s->render(canvas_);
+        gpu->upload_menu(canvas_.pixels(), canvas_.width(), canvas_.height());
+        overlay_dirty_ = false;
+    }
     gpu->draw_menu(0.95f);
+    canvas_dirty_ = true;
 }
 
 void MenuController::render(ft_render_framebuffer &framebuffer)
 {
-    canvas_.clear(MenuCanvas::Colors::BG);
-    MenuScene *s = current_scene();
-    if (s)
-        s->render(canvas_);
+    if (canvas_dirty_)
+    {
+        canvas_.clear(MenuCanvas::Colors::BG);
+        MenuScene *s = current_scene();
+        if (s)
+            s->render(canvas_);
+        canvas_dirty_ = false;
+    }
     blit_canvas_to_framebuffer(canvas_, framebuffer);
 }
 
 void MenuController::render_overlay(ft_render_framebuffer &framebuffer)
 {
-    canvas_.clear(0U);
-    MenuScene *s = current_scene();
-    if (s)
-        s->render(canvas_);
+    if (overlay_dirty_)
+    {
+        canvas_.clear(0U);
+        MenuScene *s = current_scene();
+        if (s)
+            s->render(canvas_);
+        overlay_dirty_ = false;
+    }
     blit_canvas_to_framebuffer(canvas_, framebuffer);
+    canvas_dirty_ = true;
 }
 
 void MenuController::clear_flags()

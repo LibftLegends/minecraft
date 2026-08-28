@@ -71,46 +71,24 @@ void MeshCuller::chunk_corner_in_view(const Camera &camera, const WorldChunk &wc
 bool MeshCuller::chunk_aabb_is_visible(const Camera &camera, const WorldChunk &world_chunk,
                                        const RenderCache &cache)
 {
-    const double xs[2] = {0.0, static_cast<double>(GAME_VOXEL_CHUNK_WIDTH)};
-    const double ys[2] = {0.0, static_cast<double>(GAME_VOXEL_CHUNK_HEIGHT)};
-    const double zs[2] = {0.0, static_cast<double>(GAME_VOXEL_CHUNK_DEPTH)};
-    const double horizontal_tangent = cache.fov_tangent * cache.aspect_ratio;
-    bool outside_near = true;
-    bool outside_far = true;
-    bool outside_left = true;
-    bool outside_right = true;
-    bool outside_bottom = true;
-    bool outside_top = true;
-
-    for (int xi = 0; xi < 2; ++xi)
+    for (int i = 0; i < RenderCache::FRUSTUM_PLANE_COUNT; ++i)
     {
-        for (int yi = 0; yi < 2; ++yi)
-        {
-            for (int zi = 0; zi < 2; ++zi)
-            {
-                double view_x;
-                double pitched_y;
-                double pitched_z;
-
-                chunk_corner_in_view(camera, world_chunk, cache, xs[xi], ys[yi], zs[zi], view_x,
-                                     pitched_y, pitched_z);
-                if (pitched_z >= 0.0)
-                    outside_near = false;
-                if (pitched_z <= cache.render_distance)
-                    outside_far = false;
-                if (view_x >= -pitched_z * horizontal_tangent)
-                    outside_left = false;
-                if (view_x <= pitched_z * horizontal_tangent)
-                    outside_right = false;
-                if (pitched_y >= -pitched_z * cache.fov_tangent)
-                    outside_bottom = false;
-                if (pitched_y <= pitched_z * cache.fov_tangent)
-                    outside_top = false;
-            }
-        }
+        const RenderCache::FrustumPlane &plane = cache.frustum_planes[i];
+        const double positive_x = plane.x >= 0.0
+            ? static_cast<double>(world_chunk.world_x + GAME_VOXEL_CHUNK_WIDTH)
+            : static_cast<double>(world_chunk.world_x);
+        const double positive_y = plane.y >= 0.0
+            ? static_cast<double>(GAME_VOXEL_CHUNK_HEIGHT) : 0.0;
+        const double positive_z = plane.z >= 0.0
+            ? static_cast<double>(world_chunk.world_z + GAME_VOXEL_CHUNK_DEPTH)
+            : static_cast<double>(world_chunk.world_z);
+        const double furthest_point = plane.x * positive_x
+            + plane.y * positive_y + plane.z * positive_z + plane.offset;
+        if (furthest_point < 0.0)
+            return false;
     }
-    return !(outside_near || outside_far || outside_left || outside_right || outside_bottom ||
-             outside_top);
+    (void)camera;
+    return true;
 }
 
 bool MeshCuller::chunk_is_visible(const Camera &camera, const WorldChunk &world_chunk,

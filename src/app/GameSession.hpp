@@ -14,6 +14,7 @@
 #include "../../src/policy/RenderDistanceStrategy.hpp"
 #include "../../src/settings/Settings.hpp"
 #include "../../Libft/Modules/Game/game_character.hpp"
+#include <vector>
 
 class GameSession
 {
@@ -60,6 +61,14 @@ class GameSession
     bool boost_enabled_;
     bool active_;
     bool revision_preview_visible_;
+    uint64_t render_debug_frame_;
+    uint32_t cached_ram_mb_;
+    uint32_t cached_vram_mb_;
+    int32_t revision_preview_center_x_;
+    int32_t revision_preview_center_z_;
+    uint32_t revision_preview_identifier_;
+    bool revision_preview_cache_valid_;
+    std::vector<World::RevisionPreviewEntry> revision_preview_cache_;
     int32_t error_code_;
     char seed_[32];
 

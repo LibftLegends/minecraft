@@ -13,6 +13,7 @@
 #include "../../src/queries/WorldRaycaster.hpp"
 #include "../../src/validators/WorldVisibilityValidator.hpp"
 #include "../../src/world/WorldGenerationPipeline.hpp"
+#include <chrono>
 
 class World
 {
@@ -222,7 +223,8 @@ class World
     int32_t queue_chunk_remesh(WorldChunk &chunk);
     int32_t queue_neighbor_remeshes(int32_t chunk_x, int32_t chunk_z);
     StreamCandidate *find_stream_candidate(int32_t chunk_x, int32_t chunk_z);
-    int32_t apply_deferred_edits();
+    int32_t apply_deferred_edits(
+        const std::chrono::steady_clock::time_point &deadline);
     int32_t finish_revision_regeneration();
     void prepare_stream_candidates(int32_t stream_radius);
     static uint32_t stage_mask_for_mode(RegenerationMode mode);

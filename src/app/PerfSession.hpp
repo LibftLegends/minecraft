@@ -14,6 +14,7 @@
 #include "../../src/diagnostics/FramebufferHasher.hpp"
 #include "../../src/policy/RenderDistanceStrategy.hpp"
 #include "../../src/diagnostics/ApplicationError.hpp"
+#include <vector>
 
 class PerfSession
 {
@@ -31,6 +32,7 @@ class PerfSession
         int32_t error_code;
         uint32_t sel_block;
         bool boost;
+        std::vector<double> frame_samples_ms;
     };
 
     PerfSession();
@@ -58,7 +60,8 @@ class PerfSession
     static void run_loop(const ApplicationOptions &options, const RenderDistanceStrategy &strategy,
                          ApplicationWindow &window, Camera &camera, World &world,
                          VoxelRenderer &renderer, LoopState &s);
-    static void print_results(uint64_t frames, double elapsed, uint64_t perf_hash);
+    static void print_results(uint64_t frames, double elapsed, uint64_t perf_hash,
+                              const std::vector<double> &frame_samples_ms);
 };
 
 #endif

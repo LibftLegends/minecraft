@@ -1067,8 +1067,11 @@ int32_t World::queue_neighbor_remeshes(int32_t chunk_x, int32_t chunk_z)
     return (FT_ERR_SUCCESS);
 }
 
-int32_t World::apply_deferred_edits()
+int32_t World::apply_deferred_edits(
+    const std::chrono::steady_clock::time_point &deadline)
 {
+    if (this->deferred_edits_.empty())
+        return (FT_ERR_SUCCESS);
     std::sort(this->deferred_edits_.begin(), this->deferred_edits_.end(),
         [](const WorldDeferredBlockEdit &left, const WorldDeferredBlockEdit &right)
         {
@@ -1083,8 +1086,17 @@ int32_t World::apply_deferred_edits()
             return (left.sequence < right.sequence);
         });
     std::vector<WorldDeferredBlockEdit> pending;
-    for (const WorldDeferredBlockEdit &edit : this->deferred_edits_)
+    pending.reserve(this->deferred_edits_.size());
+    std::size_t index = 0U;
+    while (index < this->deferred_edits_.size())
     {
+        if (std::chrono::steady_clock::now() >= deadline)
+        {
+            pending.insert(pending.end(), this->deferred_edits_.begin() + index,
+                this->deferred_edits_.end());
+            break;
+        }
+        const WorldDeferredBlockEdit &edit = this->deferred_edits_[index];
         const int32_t chunk_x = WorldCoordinates::floor_divide(
             edit.world_x, GAME_VOXEL_CHUNK_WIDTH);
         const int32_t chunk_z = WorldCoordinates::floor_divide(
@@ -1093,6 +1105,7 @@ int32_t World::apply_deferred_edits()
         if (chunk == nullptr || !chunk->initialized)
         {
             pending.push_back(edit);
+            index += 1U;
             continue;
         }
         const int32_t local_x = WorldCoordinates::positive_modulo(
@@ -1105,6 +1118,7 @@ int32_t World::apply_deferred_edits()
         chunk->voxel_revision += 1U;
         chunk->mesh_dirty = true;
         (void)this->queue_chunk_remesh(*chunk);
+        index += 1U;
     }
     this->deferred_edits_.swap(pending);
     return (FT_ERR_SUCCESS);
@@ -1267,7 +1281,7 @@ int32_t World::drain_generation_results() noexcept
         result.reset();
         processed += 1;
     }
-    return (this->apply_deferred_edits());
+    return (this->apply_deferred_edits(deadline));
 }
 
 int32_t World::stream_chunks_async(int32_t stream_radius, int32_t budget,
