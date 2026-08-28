@@ -116,7 +116,7 @@ else ifeq ($(UNAME_S),Darwin)
         LDFLAGS += -flto -Wl,-dead_strip
     endif
 else
-    LDFLAGS = -lX11 -lXext -lXi -lGL
+    LDFLAGS = -lX11 -lXext -lXi -lGL -lz
     ifneq ($(OPT_LEVEL),0)
         LDFLAGS += -flto -s -Wl,--gc-sections
     endif

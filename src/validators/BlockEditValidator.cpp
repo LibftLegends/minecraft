@@ -5,6 +5,7 @@ BlockEditValidator::BlockEditValidator()
 }
 
 BlockEditValidator::BlockEditValidator(const BlockEditValidator &other)
+	: IValidator(other)
 {
 	*this = other;
 }

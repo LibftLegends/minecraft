@@ -5,6 +5,7 @@ WorldRevisionValidator::WorldRevisionValidator()
 }
 
 WorldRevisionValidator::WorldRevisionValidator(const WorldRevisionValidator &other)
+	: IValidator(other)
 {
 	(void)other;
 }

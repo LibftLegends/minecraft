@@ -49,7 +49,6 @@ int ApplicationBootstrap::setup_launch_config(ApplicationOptions &options,
 {
 	const char				*cfg = "ft_vox_config.json";
 	ft_dumb_keyboard_layout	detected;
-	const char				*msg;
 
 	if (!options.perf_test_mode && !options.perf_headless_mode)
 	{
@@ -58,10 +57,8 @@ int ApplicationBootstrap::setup_launch_config(ApplicationOptions &options,
 			if (LaunchSettingsMenu::run(launch_settings) != 0)
 				return (1);
 			if (launch_settings.save(cfg) != 0)
-			{
-				msg = "Application: unable to save settings to %s\n";
-				std::fprintf(stderr, msg, cfg);
-			}
+				std::fprintf(stderr,
+					"Application: unable to save settings to %s\n", cfg);
 			PlatformLaunchSupport::wait_for_escape_release();
 			PlatformLaunchSupport::clear_pending_quit_messages();
 		}

@@ -5,6 +5,7 @@ TerrainConfigValidator::TerrainConfigValidator()
 }
 
 TerrainConfigValidator::TerrainConfigValidator(const TerrainConfigValidator &other)
+	: IValidator(other)
 {
 	(void)other;
 }

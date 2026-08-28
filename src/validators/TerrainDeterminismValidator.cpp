@@ -5,6 +5,7 @@ TerrainDeterminismValidator::TerrainDeterminismValidator()
 }
 
 TerrainDeterminismValidator::TerrainDeterminismValidator(const TerrainDeterminismValidator &other)
+	: IValidator(other)
 {
 	*this = other;
 }

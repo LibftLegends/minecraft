@@ -5,6 +5,7 @@ WorldVisibilityValidator::WorldVisibilityValidator()
 }
 
 WorldVisibilityValidator::WorldVisibilityValidator(const WorldVisibilityValidator &other)
+	: IValidator(other)
 {
 	*this = other;
 }

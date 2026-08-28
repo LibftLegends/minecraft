@@ -5,6 +5,7 @@ TerrainCaveValidator::TerrainCaveValidator()
 }
 
 TerrainCaveValidator::TerrainCaveValidator(const TerrainCaveValidator &other)
+	: IValidator(other)
 {
 	*this = other;
 }

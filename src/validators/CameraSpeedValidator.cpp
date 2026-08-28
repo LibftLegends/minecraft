@@ -5,6 +5,7 @@ CameraSpeedValidator::CameraSpeedValidator()
 }
 
 CameraSpeedValidator::CameraSpeedValidator(const CameraSpeedValidator &other)
+	: IValidator(other)
 {
 	*this = other;
 }

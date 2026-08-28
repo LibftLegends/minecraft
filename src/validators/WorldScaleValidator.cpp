@@ -5,6 +5,7 @@ WorldScaleValidator::WorldScaleValidator()
 }
 
 WorldScaleValidator::WorldScaleValidator(const WorldScaleValidator &other)
+	: IValidator(other)
 {
 	*this = other;
 }

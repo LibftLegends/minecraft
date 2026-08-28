@@ -5,6 +5,7 @@ CollisionValidator::CollisionValidator()
 }
 
 CollisionValidator::CollisionValidator(const CollisionValidator &other)
+	: IValidator(other)
 {
 	*this = other;
 }

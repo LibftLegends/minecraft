@@ -5,6 +5,7 @@ WorldAsyncGenerationValidator::WorldAsyncGenerationValidator()
 }
 
 WorldAsyncGenerationValidator::WorldAsyncGenerationValidator(const WorldAsyncGenerationValidator &other)
+	: IValidator(other)
 {
 	(void)other;
 }
