@@ -803,8 +803,12 @@ int32_t World::save_terrain_config(const char *file_path) const
 
 void World::destroy()
 {
-    this->world_epoch_ += 1U;
+    {
+        std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
+        this->world_epoch_ += 1U;
+    }
     (void)this->generation_pipeline_.destroy();
+    std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
     int32_t index;
 
     index = 0;
@@ -1369,18 +1373,26 @@ int32_t World::update_around(double camera_x, double camera_z, int32_t generatio
     int32_t stream_radius;
     int32_t generated;
 
-    this->stream_frame_++;
-    this->center_chunk_x = WorldCoordinates::floor_divide(
-        static_cast<int32_t>(std::floor(camera_x)), GAME_VOXEL_CHUNK_WIDTH);
-    this->center_chunk_z = WorldCoordinates::floor_divide(
-        static_cast<int32_t>(std::floor(camera_z)), GAME_VOXEL_CHUNK_DEPTH);
-    this->active_render_distance =
-        WorldCoordinates::clamp_int(render_distance, WorldCoordinates::MIN_RENDER_DISTANCE,
-                                    WorldCoordinates::CACHE_CHUNK_RADIUS * GAME_VOXEL_CHUNK_WIDTH);
-    const bool center_changed = this->chunk_index_center_x != this->center_chunk_x ||
-        this->chunk_index_center_z != this->center_chunk_z;
+    {
+        std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
+        this->stream_frame_++;
+        this->center_chunk_x = WorldCoordinates::floor_divide(
+            static_cast<int32_t>(std::floor(camera_x)), GAME_VOXEL_CHUNK_WIDTH);
+        this->center_chunk_z = WorldCoordinates::floor_divide(
+            static_cast<int32_t>(std::floor(camera_z)), GAME_VOXEL_CHUNK_DEPTH);
+        this->active_render_distance =
+            WorldCoordinates::clamp_int(render_distance, WorldCoordinates::MIN_RENDER_DISTANCE,
+                                        WorldCoordinates::CACHE_CHUNK_RADIUS * GAME_VOXEL_CHUNK_WIDTH);
+    }
+    bool center_changed;
+    {
+        std::shared_lock<std::shared_mutex> read_lock(this->world_data_mutex_);
+        center_changed = this->chunk_index_center_x != this->center_chunk_x ||
+            this->chunk_index_center_z != this->center_chunk_z;
+    }
     if (this->chunk_index_valid == false || center_changed)
     {
+        std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
         WorldChunkStore::evict_far_chunks(this->chunks, this->chunk_count,
                                           &this->loaded_chunk_count, this->center_chunk_x,
                                           this->center_chunk_z);
@@ -1404,7 +1416,11 @@ int32_t World::update_around(double camera_x, double camera_z, int32_t generatio
         }
         this->stream_retryable_count_ = 0;
     }
-    int32_t drain_error = this->drain_generation_results();
+    int32_t drain_error;
+    {
+        std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
+        drain_error = this->drain_generation_results();
+    }
     if (drain_error != FT_ERR_SUCCESS)
         return (drain_error);
     stream_radius = WorldCoordinates::render_distance_to_chunk_radius(this->active_render_distance);
@@ -1420,6 +1436,7 @@ int32_t World::update_around(double camera_x, double camera_z, int32_t generatio
                 candidate.request_id = 0U;
             }
         }
+        std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
         return (this->stream_chunks_sync(stream_radius, generation_budget, &generated));
     }
     if (generation_budget <= 0)
@@ -1428,6 +1445,7 @@ int32_t World::update_around(double camera_x, double camera_z, int32_t generatio
             this->generation_credit_ = this->generation_credit_ + 1;
         if (this->generation_credit_ < 4)
         {
+            std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
             return (this->stream_chunks_async(stream_radius, 0, &generated));
         }
         this->generation_credit_ = 0;
@@ -1435,6 +1453,7 @@ int32_t World::update_around(double camera_x, double camera_z, int32_t generatio
     }
     else
         this->generation_credit_ = 0;
+    std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
     return (this->stream_chunks_async(stream_radius, generation_budget, &generated));
 }
 
@@ -1471,26 +1490,31 @@ bool World::validate_visible_distance(double camera_x, double camera_z, double y
 
 bool World::surface_top_at(int32_t world_x, int32_t world_z, double *surface_top) const
 {
+    std::shared_lock<std::shared_mutex> read_lock(this->world_data_mutex_);
     return (WorldBlockQuery::surface_top_at(*this, world_x, world_z, surface_top));
 }
 
 bool World::solid_block_at(int32_t world_x, int32_t world_y, int32_t world_z) const
 {
+    std::shared_lock<std::shared_mutex> read_lock(this->world_data_mutex_);
     return (WorldBlockQuery::solid_block_at(*this, world_x, world_y, world_z));
 }
 
 bool World::block_id_at(int32_t world_x, int32_t world_y, int32_t world_z, uint32_t *block_id) const
 {
+    std::shared_lock<std::shared_mutex> read_lock(this->world_data_mutex_);
     return (WorldBlockQuery::block_id_at(*this, world_x, world_y, world_z, block_id));
 }
 
 int32_t World::delete_block_at(int32_t world_x, int32_t world_y, int32_t world_z)
 {
+    std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
     return (WorldBlockEditor::delete_block_at(*this, world_x, world_y, world_z));
 }
 
 int32_t World::place_block_at(int32_t world_x, int32_t world_y, int32_t world_z, uint32_t block_id)
 {
+    std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
     return (WorldBlockEditor::place_block_at(*this, world_x, world_y, world_z, block_id));
 }
 
@@ -1498,6 +1522,7 @@ int32_t World::raycast_solid(double origin_x, double origin_y, double origin_z, 
                              double direction_y, double direction_z, double max_distance,
                              int32_t *block_x, int32_t *block_y, int32_t *block_z) const
 {
+    std::shared_lock<std::shared_mutex> read_lock(this->world_data_mutex_);
     return (WorldRaycaster::raycast_solid(*this, origin_x, origin_y, origin_z, direction_x,
                                           direction_y, direction_z, max_distance, block_x, block_y,
                                           block_z));
@@ -1510,6 +1535,7 @@ int32_t World::raycast_edit_target(double origin_x, double origin_y, double orig
                                    int32_t *place_block_y, int32_t *place_block_z,
                                    uint32_t *hit_block_id) const
 {
+    std::shared_lock<std::shared_mutex> read_lock(this->world_data_mutex_);
     return (WorldRaycaster::raycast_edit_target(*this, origin_x, origin_y, origin_z, direction_x,
                                                 direction_y, direction_z, max_distance, hit_block_x,
                                                 hit_block_y, hit_block_z, place_block_x,

@@ -14,6 +14,7 @@
 #include "../../src/validators/WorldVisibilityValidator.hpp"
 #include "../../src/world/WorldGenerationPipeline.hpp"
 #include <chrono>
+#include <shared_mutex>
 
 class World
 {
@@ -209,6 +210,7 @@ class World
     int32_t revision_regenerated_count_;
     int32_t revision_skipped_count_;
     int32_t revision_generation_error_;
+    mutable std::shared_mutex world_data_mutex_;
 
     void copy_seed(const char *seed_value);
     void clear_chunk_index();
