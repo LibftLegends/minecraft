@@ -7,16 +7,26 @@
 class RenderCache
 {
   public:
-	double yaw_cos;
-	double yaw_sin;
-	double pitch_cos;
-	double pitch_sin;
-	double fov_tangent;
-	double aspect_ratio;
-	double focal_length;
-	double half_width;
-	double half_height;
-	double render_distance;
+    struct FrustumPlane
+    {
+        double x;
+        double y;
+        double z;
+        double offset;
+    };
+
+    static const int FRUSTUM_PLANE_COUNT = 6;
+    double yaw_cos;
+    double yaw_sin;
+    double pitch_cos;
+    double pitch_sin;
+    double fov_tangent;
+    double aspect_ratio;
+    double focal_length;
+    double half_width;
+    double half_height;
+    double render_distance;
+    FrustumPlane frustum_planes[FRUSTUM_PLANE_COUNT];
 
 	RenderCache();
 	RenderCache(const RenderCache &other);

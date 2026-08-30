@@ -138,27 +138,38 @@ bool PerfSession::tick_frame(const ApplicationOptions &options,
 	return (true);
 }
 
-void PerfSession::print_results(uint64_t frames, double elapsed,
-	uint64_t perf_hash)
+void PerfSession::print_results(uint64_t frames, double elapsed, uint64_t perf_hash,
+                                const std::vector<double> &frame_samples_ms)
 {
-	if (elapsed > 0.0)
-	{
-		std::printf("perf-test: frames=%llu elapsed=%.3f sec fps=%.2f "
-					"frame_ms=%.3f hash=%016llx\n",
-					static_cast<unsigned long long>(frames),
-					elapsed,
-					static_cast<double>(frames) / elapsed,
-					elapsed * 1000.0
-						/ static_cast<double>(frames == 0 ? 1 : frames),
-					static_cast<unsigned long long>(perf_hash));
-	}
-	else
-	{
-		std::printf("perf-test: frames=%llu elapsed=0.000 sec fps=0.00 "
-					"frame_ms=0.000 hash=%016llx\n",
-					static_cast<unsigned long long>(frames),
-					static_cast<unsigned long long>(perf_hash));
-	}
+    double p95_ms = 0.0;
+    double p99_ms = 0.0;
+    if (!frame_samples_ms.empty())
+    {
+        std::vector<double> sorted_samples = frame_samples_ms;
+        std::sort(sorted_samples.begin(), sorted_samples.end());
+        const size_t p95_index = (sorted_samples.size() * 95U) / 100U;
+        const size_t p99_index = (sorted_samples.size() * 99U) / 100U;
+        p95_ms = sorted_samples[std::min(p95_index, sorted_samples.size() - 1U)];
+        p99_ms = sorted_samples[std::min(p99_index, sorted_samples.size() - 1U)];
+    }
+    if (elapsed > 0.0)
+    {
+        std::printf("perf-test: frames=%llu elapsed=%.3f sec fps=%.2f "
+                    "frame_ms=%.3f p95_ms=%.3f p99_ms=%.3f hash=%016llx\n",
+                    static_cast<unsigned long long>(frames), elapsed,
+                    static_cast<double>(frames) / elapsed,
+                    elapsed * 1000.0 / static_cast<double>(frames == 0 ? 1 : frames),
+                    p95_ms, p99_ms,
+                    static_cast<unsigned long long>(perf_hash));
+    }
+    else
+    {
+        std::printf("perf-test: frames=%llu elapsed=0.000 sec fps=0.00 "
+                    "frame_ms=0.000 p95_ms=%.3f p99_ms=%.3f hash=%016llx\n",
+                    static_cast<unsigned long long>(frames),
+                    p95_ms, p99_ms,
+                    static_cast<unsigned long long>(perf_hash));
+    }
 }
 
 void PerfSession::run_loop(const ApplicationOptions &options,
@@ -168,35 +179,35 @@ void PerfSession::run_loop(const ApplicationOptions &options,
 	double	dt;
 	double	elapsed;
 
-	std::chrono::steady_clock::time_point prev_time;
-	std::chrono::steady_clock::time_point perf_start;
-	std::chrono::steady_clock::time_point now;
-	prev_time = std::chrono::steady_clock::now();
-	perf_start = prev_time;
-	while (options.perf_headless_mode || !window.should_close())
-	{
-		now = std::chrono::steady_clock::now();
-		dt = std::min(std::chrono::duration<double>(now - prev_time).count(),
-				0.1);
-		prev_time = now;
-		if (!tick_frame(options, strategy, window, camera, world, renderer, dt,
-				s))
-			break ;
-		if (options.perf_test_mode)
-		{
-			elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now()
-					- perf_start).count();
-			if (elapsed >= options.perf_seconds_limit)
-				break ;
-		}
-	}
-	if (options.perf_test_mode)
-	{
-		elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now()
-				- perf_start).count();
-		s.perf_hash = FramebufferHasher::hash_framebuffer(window.framebuffer());
-		print_results(s.frames, elapsed, s.perf_hash);
-	}
+    while (options.perf_headless_mode || !window.should_close())
+    {
+        const auto frame_start = std::chrono::steady_clock::now();
+        auto now = std::chrono::steady_clock::now();
+        double dt = std::min(std::chrono::duration<double>(now - prev_time).count(), 0.1);
+        prev_time = now;
+
+        if (!tick_frame(options, strategy, window, camera, world, renderer, dt, s))
+            break;
+        s.frame_samples_ms.push_back(std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - frame_start).count());
+
+        if (options.perf_test_mode)
+        {
+            double elapsed =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - perf_start)
+                    .count();
+            if (elapsed >= options.perf_seconds_limit)
+                break;
+        }
+    }
+
+    if (options.perf_test_mode)
+    {
+        double elapsed =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - perf_start).count();
+        s.perf_hash = FramebufferHasher::hash_framebuffer(window.framebuffer());
+        print_results(s.frames, elapsed, s.perf_hash, s.frame_samples_ms);
+    }
 }
 
 int PerfSession::run(const ApplicationOptions &options,

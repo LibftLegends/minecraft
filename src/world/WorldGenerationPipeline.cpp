@@ -174,8 +174,67 @@ int32_t WorldGenerationPipeline::capture_snapshot(const WorldChunk &target,
 	const WorldChunk *west, const WorldChunk *east, const WorldChunk *north,
 	const WorldChunk *south, WorldChunkSnapshot &snapshot) const noexcept
 {
-	return (WorldChunkSnapshotCapture::capture(target, west, east, north, south,
-			snapshot));
+    snapshot.chunk_x = target.chunk_x;
+    snapshot.chunk_z = target.chunk_z;
+    snapshot.blocks.clear();
+    snapshot.west_border.clear();
+    snapshot.east_border.clear();
+    snapshot.north_border.clear();
+    snapshot.south_border.clear();
+    try
+    {
+        snapshot.blocks.resize(static_cast<std::size_t>(GAME_VOXEL_CHUNK_WIDTH)
+            * static_cast<std::size_t>(GAME_VOXEL_CHUNK_DEPTH)
+            * static_cast<std::size_t>(GAME_VOXEL_CHUNK_HEIGHT));
+        snapshot.west_border.resize(static_cast<std::size_t>(GAME_VOXEL_CHUNK_HEIGHT)
+            * static_cast<std::size_t>(GAME_VOXEL_CHUNK_DEPTH), GAME_VOXEL_AIR_BLOCK);
+        snapshot.east_border = snapshot.west_border;
+        snapshot.north_border.resize(static_cast<std::size_t>(GAME_VOXEL_CHUNK_HEIGHT)
+            * static_cast<std::size_t>(GAME_VOXEL_CHUNK_WIDTH), GAME_VOXEL_AIR_BLOCK);
+        snapshot.south_border = snapshot.north_border;
+    }
+    catch (...)
+    {
+        return (FT_ERR_NO_MEMORY);
+    }
+    if (target.chunk.copy_blocks(snapshot.blocks.data(),
+            static_cast<uint32_t>(snapshot.blocks.size())) != FT_ERR_SUCCESS)
+        return (FT_ERR_INVALID_OPERATION);
+    auto capture_border = [](const WorldChunk *source, std::vector<uint32_t> &border,
+                             int32_t border_local_x, int32_t border_local_z) -> int32_t
+    {
+        uint32_t border_coordinate;
+
+        if (source == nullptr || !source->initialized)
+            return (FT_ERR_SUCCESS);
+        if (border_local_x < 0 || border_local_x >= GAME_VOXEL_CHUNK_WIDTH)
+        {
+            border_coordinate = 0U;
+            if (border_local_x < 0)
+                border_coordinate = GAME_VOXEL_CHUNK_WIDTH - 1U;
+            if (source->chunk.copy_x_border(border.data(),
+                    static_cast<uint32_t>(border.size()), border_coordinate)
+                != FT_ERR_SUCCESS)
+                return (FT_ERR_INVALID_OPERATION);
+            return (FT_ERR_SUCCESS);
+        }
+        border_coordinate = 0U;
+        if (border_local_z < 0)
+            border_coordinate = GAME_VOXEL_CHUNK_DEPTH - 1U;
+        if (source->chunk.copy_z_border(border.data(),
+                static_cast<uint32_t>(border.size()), border_coordinate)
+            != FT_ERR_SUCCESS)
+            return (FT_ERR_INVALID_OPERATION);
+        return (FT_ERR_SUCCESS);
+    };
+    if (capture_border(west, snapshot.west_border, -1, 0) != FT_ERR_SUCCESS
+        || capture_border(east, snapshot.east_border, GAME_VOXEL_CHUNK_WIDTH, 0)
+            != FT_ERR_SUCCESS
+        || capture_border(north, snapshot.north_border, 0, -1) != FT_ERR_SUCCESS
+        || capture_border(south, snapshot.south_border, 0, GAME_VOXEL_CHUNK_DEPTH)
+            != FT_ERR_SUCCESS)
+        return (FT_ERR_INVALID_OPERATION);
+    return (FT_ERR_SUCCESS);
 }
 
 void WorldGenerationPipeline::cancel_queued() noexcept

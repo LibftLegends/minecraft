@@ -25,11 +25,6 @@ class WorldRaycaster
 		int32_t *place_y, int32_t *place_z, uint32_t *hit_id);
 
   private:
-	static constexpr double STEP_DISTANCE = 0.0625;
-
-	static void compute_cell(double ox, double oy, double oz, double dx,
-		double dy, double dz, double dist, int32_t &tx, int32_t &ty,
-		int32_t &tz);
 };
 
 # include "../../src/world/World.hpp"

@@ -69,11 +69,15 @@ class MenuController
 	ft_uniqueptr<LoadingScene> loading_scene_;
 	ft_uniqueptr<InGameSettingsScene> in_game_scene_;
 
-	bool wants_start_;
-	bool wants_exit_;
-	bool dismissed_in_game_;
-	bool wants_main_menu_;
-	std::string start_seed_;
+    bool wants_start_;
+    bool wants_exit_;
+    bool dismissed_in_game_;
+    bool wants_main_menu_;
+    bool canvas_dirty_;
+    bool overlay_dirty_;
+    bool has_last_input_;
+    MenuCanvas::MenuInput last_input_;
+    std::string start_seed_;
 
 	MenuScene *current_scene();
 	static std::string make_seed();

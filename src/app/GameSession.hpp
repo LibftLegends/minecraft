@@ -1,20 +1,20 @@
 #ifndef GAME_SESSION_HPP
 # define GAME_SESSION_HPP
 
-# include "../../Libft/Modules/Game/game_character.hpp"
-# include "../../src/app/GameSessionDebugInfo.hpp"
-# include "../../src/camera/Camera.hpp"
-# include "../../src/debug/RenderDebug.hpp"
-# include "../../src/interaction/BlockInteractor.hpp"
-# include "../../src/physics/PlayerCollision.hpp"
-# include "../../src/platform/ApplicationWindow.hpp"
-# include "../../src/platform/InputReader.hpp"
-# include "../../src/player/PlayerController.hpp"
-# include "../../src/policy/RenderDistanceStrategy.hpp"
-# include "../../src/render/VoxelRenderer.hpp"
-# include "../../src/settings/Settings.hpp"
-# include "../../src/world/World.hpp"
-# include "../ft_vox.hpp"
+#include "../ft_vox.hpp"
+#include "../../src/camera/Camera.hpp"
+#include "../../src/world/World.hpp"
+#include "../../src/debug/RenderDebug.hpp"
+#include "../../src/platform/InputReader.hpp"
+#include "../../src/platform/ApplicationWindow.hpp"
+#include "../../src/render/VoxelRenderer.hpp"
+#include "../../src/player/PlayerController.hpp"
+#include "../../src/physics/PlayerCollision.hpp"
+#include "../../src/interaction/BlockInteractor.hpp"
+#include "../../src/policy/RenderDistanceStrategy.hpp"
+#include "../../src/settings/Settings.hpp"
+#include "../../Libft/Modules/Game/game_character.hpp"
+#include <vector>
 
 class GameSession
 {
@@ -52,18 +52,27 @@ class GameSession
 	World world_;
 	RenderDebug render_debug_;
 
-	int32_t active_render_distance_;
-	double fps_accumulator_;
-	double rd_accumulator_;
-	double display_fps_;
-	double frame_ms_;
-	double performance_frame_ms_;
-	uint64_t fps_frame_count_;
-	uint32_t selected_block_id_;
-	bool boost_enabled_;
-	bool active_;
-	int32_t error_code_;
-	char seed_[32];
+    int32_t active_render_distance_;
+    double fps_accumulator_;
+    double rd_accumulator_;
+    double display_fps_;
+    double frame_ms_;
+    double performance_frame_ms_;
+    uint64_t fps_frame_count_;
+    uint32_t selected_block_id_;
+    bool boost_enabled_;
+    bool active_;
+    bool revision_preview_visible_;
+    uint64_t render_debug_frame_;
+    uint32_t cached_ram_mb_;
+    uint32_t cached_vram_mb_;
+    int32_t revision_preview_center_x_;
+    int32_t revision_preview_center_z_;
+    uint32_t revision_preview_identifier_;
+    bool revision_preview_cache_valid_;
+    std::vector<World::RevisionPreviewEntry> revision_preview_cache_;
+    int32_t error_code_;
+    char seed_[32];
 
 	Action handle_navigation(ApplicationWindow &window);
 	Action tick_world(double delta_seconds,

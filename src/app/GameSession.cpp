@@ -1,17 +1,36 @@
 #include "../../src/app/GameSession.hpp"
 
-GameSession::GameSession() : camera_(), player_character_(), world_(),
-	render_debug_(),
-	active_render_distance_(WorldCoordinates::REQUIRED_VISIBLE_DISTANCE),
-	fps_accumulator_(0.0), rd_accumulator_(0.0), display_fps_(0.0),
-	frame_ms_(0.0), performance_frame_ms_(16.67), fps_frame_count_(0U),
-	selected_block_id_(TERRAIN_GENERATOR_DIRT_BLOCK), boost_enabled_(false),
-	active_(false), error_code_(FT_ERR_SUCCESS)
+#if defined(__APPLE__)
+# include <mach/mach.h>
+# include <mach/task.h>
+#endif
+
+const char *GameSession::BIOME_NAMES[5] = {"PLAINS", "HILLS", "DESERT", "SNOW", "MOUNTAINS"};
+
+GameSession::GameSession()
+    : camera_(), player_character_(), world_(), render_debug_(),
+      active_render_distance_(WorldCoordinates::REQUIRED_VISIBLE_DISTANCE), fps_accumulator_(0.0),
+      rd_accumulator_(0.0), display_fps_(0.0), frame_ms_(0.0), performance_frame_ms_(16.67),
+      fps_frame_count_(0U),
+      selected_block_id_(TERRAIN_GENERATOR_DIRT_BLOCK), boost_enabled_(false), active_(false),
+      revision_preview_visible_(false), render_debug_frame_(0U), cached_ram_mb_(0U),
+      cached_vram_mb_(0U), revision_preview_center_x_(0), revision_preview_center_z_(0),
+      revision_preview_identifier_(0U), revision_preview_cache_valid_(false),
+      revision_preview_cache_(), error_code_(FT_ERR_SUCCESS)
 {
 	seed_[0] = '\0';
 }
 
-GameSession::GameSession(const GameSession &other) : GameSession()
+GameSession::GameSession(const GameSession &other)
+    : camera_(), player_character_(), world_(), render_debug_(),
+      active_render_distance_(WorldCoordinates::REQUIRED_VISIBLE_DISTANCE), fps_accumulator_(0.0),
+      rd_accumulator_(0.0), display_fps_(0.0), frame_ms_(0.0), performance_frame_ms_(16.67),
+      fps_frame_count_(0U),
+      selected_block_id_(TERRAIN_GENERATOR_DIRT_BLOCK), boost_enabled_(false), active_(false),
+      revision_preview_visible_(false), render_debug_frame_(0U), cached_ram_mb_(0U),
+      cached_vram_mb_(0U), revision_preview_center_x_(0), revision_preview_center_z_(0),
+      revision_preview_identifier_(0U), revision_preview_cache_valid_(false),
+      revision_preview_cache_(), error_code_(FT_ERR_SUCCESS)
 {
 	(void)other;
 }
@@ -46,34 +65,49 @@ void GameSession::reset_session_state()
 int GameSession::start(const std::string &seed, ApplicationWindow &window,
 	VoxelRenderer &renderer)
 {
-	error_code_ = world_.initialize(seed.c_str());
-	if (error_code_ != FT_ERR_SUCCESS)
-		return (error_code_);
-	error_code_ = player_character_.initialize();
-	if (error_code_ != FT_ERR_SUCCESS)
-	{
-		world_.destroy();
-		return (error_code_);
-	}
-	std::strncpy(seed_, seed.c_str(), sizeof(seed_) - 1);
-	seed_[sizeof(seed_) - 1] = '\0';
-	camera_.initialize();
-	PlayerController::spawn_player_on_ground(&camera_, world_);
-	sync_player_character_location();
-	reset_session_state();
-	if (window.is_gpu_mode() && window.get_gpu_window()
-		&& renderer.get_gpu_renderer() == nullptr)
-	{
-		error_code_ = renderer.initialize_gpu(window.get_gpu_window()->get_width(),
-				window.get_gpu_window()->get_height());
-		if (error_code_ != FT_ERR_SUCCESS)
-		{
-			stop();
-			return (error_code_);
-		}
-	}
-	renderer.preload_assets();
-	return (FT_ERR_SUCCESS);
+    error_code_ = world_.initialize(seed.c_str());
+    if (error_code_ != FT_ERR_SUCCESS)
+        return error_code_;
+    error_code_ = player_character_.initialize();
+    if (error_code_ != FT_ERR_SUCCESS)
+    {
+        world_.destroy();
+        return error_code_;
+    }
+    std::strncpy(seed_, seed.c_str(), sizeof(seed_) - 1);
+    seed_[sizeof(seed_) - 1] = '\0';
+    camera_.initialize();
+    PlayerController::spawn_player_on_ground(&camera_, world_);
+    sync_player_character_location();
+    active_render_distance_ = Settings::instance().render_distance();
+    boost_enabled_ = false;
+    revision_preview_visible_ = false;
+    render_debug_frame_ = 0U;
+    cached_ram_mb_ = 0U;
+    cached_vram_mb_ = 0U;
+    revision_preview_cache_valid_ = false;
+    revision_preview_cache_.clear();
+    selected_block_id_ = TERRAIN_GENERATOR_DIRT_BLOCK;
+    fps_accumulator_ = 0.0;
+    fps_frame_count_ = 0U;
+    rd_accumulator_ = 0.0;
+    display_fps_ = 0.0;
+    frame_ms_ = 0.0;
+    performance_frame_ms_ = 16.67;
+    error_code_ = FT_ERR_SUCCESS;
+    active_ = true;
+    if (window.is_gpu_mode() && window.get_gpu_window() && renderer.get_gpu_renderer() == nullptr)
+    {
+        error_code_ = renderer.initialize_gpu(window.get_gpu_window()->get_width(),
+                                              window.get_gpu_window()->get_height());
+        if (error_code_ != FT_ERR_SUCCESS)
+        {
+            stop();
+            return error_code_;
+        }
+    }
+    renderer.preload_assets();
+    return FT_ERR_SUCCESS;
 }
 
 void GameSession::set_terrain_generation_config(const terrain_generation_config &config)
@@ -223,9 +257,85 @@ GameSession::Action GameSession::update(double delta_seconds,
 
 void GameSession::build_render_debug(VoxelRenderer &renderer)
 {
-	GameSessionDebugInfo::build(render_debug_, camera_, world_,
-		player_character_, renderer, display_fps_, frame_ms_,
-		selected_block_id_, seed_);
+    render_debug_frame_ += 1U;
+    render_debug_.fps = display_fps_;
+    render_debug_.frame_ms = frame_ms_;
+    render_debug_.visible_chunks = 0;
+    render_debug_.loaded_chunks = world_.loaded_chunk_count;
+    render_debug_.render_distance = world_.active_render_distance;
+    render_debug_.selected_block_id = selected_block_id_;
+    render_debug_.camera_x = camera_.x;
+    render_debug_.camera_y = camera_.y;
+    render_debug_.camera_z = camera_.z;
+    render_debug_.camera_speed = camera_.speed;
+    render_debug_.boost_speed = camera_.speed * 20.0;
+    if (render_debug_frame_ == 1U || render_debug_frame_ % 30U == 0U)
+    {
+        cached_ram_mb_ = system_ram_mb();
+        cached_vram_mb_ = renderer.get_gpu_renderer()
+            ? renderer.get_gpu_renderer()->gpu_mb_approx() : 0U;
+    }
+    render_debug_.ram_mb = cached_ram_mb_;
+    render_debug_.vram_approx_mb = cached_vram_mb_;
+    std::strncpy(render_debug_.seed, seed_, sizeof(render_debug_.seed) - 1);
+    render_debug_.seed[sizeof(render_debug_.seed) - 1] = '\0';
+
+    uint32_t biome_index = terrain_get_biome_index(
+        world_.terrain_generation_settings(), player_character_.get_x(),
+        player_character_.get_z(), seed_);
+    const char *bname = (biome_index < 5U) ? BIOME_NAMES[biome_index] : nullptr;
+    if (bname != nullptr)
+        std::strncpy(render_debug_.biome_name, bname,
+            sizeof(render_debug_.biome_name) - 1);
+    else
+        std::snprintf(render_debug_.biome_name, sizeof(render_debug_.biome_name),
+            "CUSTOM_%u", biome_index);
+    render_debug_.biome_name[sizeof(render_debug_.biome_name) - 1] = '\0';
+    render_debug_.revision_preview_visible = revision_preview_visible_;
+    if (!revision_preview_visible_)
+        return;
+    render_debug_.revision_pending = world_.world_revision().pending;
+    const int32_t center_x = WorldCoordinates::floor_divide(
+        static_cast<int32_t>(std::floor(camera_.x)), GAME_VOXEL_CHUNK_WIDTH);
+    const int32_t center_z = WorldCoordinates::floor_divide(
+        static_cast<int32_t>(std::floor(camera_.z)), GAME_VOXEL_CHUNK_DEPTH);
+    const World::WorldRevision revision = world_.world_revision();
+    if (!revision_preview_cache_valid_
+        || center_x != revision_preview_center_x_
+        || center_z != revision_preview_center_z_
+        || revision.identifier != revision_preview_identifier_
+        || render_debug_frame_ % 15U == 0U)
+    {
+        revision_preview_cache_.clear();
+        if (world_.build_revision_preview(center_x, center_z, 6,
+                revision_preview_cache_) != FT_ERR_SUCCESS)
+            return;
+        revision_preview_center_x_ = center_x;
+        revision_preview_center_z_ = center_z;
+        revision_preview_identifier_ = revision.identifier;
+        revision_preview_cache_valid_ = true;
+    }
+    render_debug_.revision_map_radius = 6;
+    render_debug_.revision_protected_count = 0U;
+    render_debug_.revision_selected_count = 0U;
+    render_debug_.revision_transition_count = 0U;
+    render_debug_.revision_unchanged_count = 0U;
+    for (const World::RevisionPreviewEntry &entry : revision_preview_cache_)
+    {
+        const int32_t local_x = entry.chunk_x - center_x + 6;
+        const int32_t local_z = entry.chunk_z - center_z + 6;
+        const int32_t map_index = local_z * 13 + local_x;
+        render_debug_.revision_map[map_index] =
+            static_cast<uint8_t>(entry.state);
+        if (entry.state == World::REVISION_PROTECTED)
+            render_debug_.revision_protected_count += 1U;
+        else if (entry.state == World::REVISION_SELECTED)
+            render_debug_.revision_selected_count += 1U;
+        else if (entry.state == World::REVISION_TRANSITION)
+            render_debug_.revision_transition_count += 1U;
+        else
+            render_debug_.revision_unchanged_count += 1U;
+    }
 }
 
 void GameSession::sync_player_character_location()
@@ -238,12 +348,17 @@ void GameSession::sync_player_character_location()
 void GameSession::render(ApplicationWindow &window, VoxelRenderer &renderer,
 	bool with_overlay)
 {
-	const RenderDebug	*dbg;
-
-	if (!active_)
-		return ;
-	build_render_debug(renderer);
-	dbg = (with_overlay
-			&& Settings::instance().fps_overlay()) ? &render_debug_ : nullptr;
-	renderer.render_world(window.framebuffer(), camera_, world_, dbg);
+    if (!active_)
+        return;
+    const bool debug_enabled = with_overlay
+        && (Settings::instance().fps_overlay() || revision_preview_visible_);
+    if (!debug_enabled)
+    {
+        renderer.render_world(window.framebuffer(), camera_, world_,
+            static_cast<const RenderDebug *>(nullptr));
+        return;
+    }
+    build_render_debug(renderer);
+    const RenderDebug *dbg = &render_debug_;
+    renderer.render_world(window.framebuffer(), camera_, world_, dbg);
 }
