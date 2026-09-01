@@ -36,25 +36,25 @@ void WorldRevisionManager::reset() noexcept
 uint32_t WorldRevisionManager::stage_mask_for_mode(int32_t mode) noexcept
 {
 	if (mode == World::REGEN_DECORATION_REFRESH)
-		return (TERRAIN_STAGE_DECORATION | TERRAIN_STAGE_STRUCTURES);
+		return (VOXEL_STAGE_DECORATION | VOXEL_STAGE_STRUCTURES);
 	if (mode == World::REGEN_UNDERGROUND_REFRESH)
-		return (TERRAIN_STAGE_CAVES | TERRAIN_STAGE_ORES);
-	if (mode == World::REGEN_TERRAIN_RESHAPING)
-		return (TERRAIN_STAGE_BASE_TERRAIN | TERRAIN_STAGE_FLUIDS | TERRAIN_STAGE_DECORATION | TERRAIN_STAGE_STRUCTURES);
-	return (TERRAIN_STAGE_BASE_TERRAIN | TERRAIN_STAGE_CAVES | TERRAIN_STAGE_FLUIDS | TERRAIN_STAGE_DECORATION | TERRAIN_STAGE_STRUCTURES | TERRAIN_STAGE_ORES);
+		return (VOXEL_STAGE_CAVES | VOXEL_STAGE_ORES);
+	if (mode == World::REGEN_VOXEL_RESHAPING)
+		return (VOXEL_STAGE_BASE_TERRAIN | VOXEL_STAGE_FLUIDS | VOXEL_STAGE_DECORATION | VOXEL_STAGE_STRUCTURES);
+	return (VOXEL_STAGE_BASE_TERRAIN | VOXEL_STAGE_CAVES | VOXEL_STAGE_FLUIDS | VOXEL_STAGE_DECORATION | VOXEL_STAGE_STRUCTURES | VOXEL_STAGE_ORES);
 }
 
-int32_t WorldRevisionManager::begin(const terrain_generation_config &config,
+int32_t WorldRevisionManager::begin(const voxel_generation_config &config,
 	int32_t mode) noexcept
 {
-	if (!this->world_.terrain_generation_started || this->pending_
+	if (!this->world_.voxel_generation_started || this->pending_
 		|| this->progress_.active())
 		return (FT_ERR_INVALID_OPERATION);
 	if (mode < World::REGEN_DECORATION_REFRESH || mode > World::REGEN_FULL)
 		return (FT_ERR_INVALID_ARGUMENT);
 	if (this->config_.initialize(config) != FT_ERR_SUCCESS)
 		return (FT_ERR_INVALID_ARGUMENT);
-	if (terrain_generation_config_is_valid(this->config_) == FT_FALSE)
+	if (voxel_generation_config_is_valid(this->config_) == FT_FALSE)
 		return (FT_ERR_INVALID_ARGUMENT);
 	this->pending_ = true;
 	this->mode_ = mode;
@@ -230,7 +230,7 @@ int32_t WorldRevisionManager::regenerate_selected_chunks(int32_t *regenerated_co
 			this->world_, regenerated_count, skipped_count));
 }
 
-int32_t WorldRevisionManager::apply_request(const terrain_generation_config &config,
+int32_t WorldRevisionManager::apply_request(const voxel_generation_config &config,
 	int32_t mode, uint32_t stage_mask,
 	const std::vector<RevisionChunk> &selected_chunks,
 	const std::vector<RevisionChunk> &protected_chunks,

@@ -33,7 +33,7 @@ int32_t WorldRevisionValidator::initialize_world_with_edit(World &world) noexcep
 		return (1);
 	}
 	if (world.find_chunk_mutable(0, 0)->chunk.write_block(0, 0, 0,
-			TERRAIN_GENERATOR_STONE_BLOCK) != FT_ERR_SUCCESS)
+			VOXEL_GENERATOR_STONE_BLOCK) != FT_ERR_SUCCESS)
 	{
 		world.destroy();
 		return (1);
@@ -44,12 +44,12 @@ int32_t WorldRevisionValidator::initialize_world_with_edit(World &world) noexcep
 WorldRevisionValidator::SelectionResults WorldRevisionValidator::apply_selection_actions(World &world,
 	std::vector<World::RevisionPreviewEntry> &preview) noexcept
 {
-	terrain_generation_config config;
+	voxel_generation_config config;
 	SelectionResults results;
 
-	terrain_default_generation_config(config);
+	voxel_default_generation_config(config);
 	results.begin_result = world.begin_world_revision(config,
-			World::REGEN_TERRAIN_RESHAPING);
+			World::REGEN_VOXEL_RESHAPING);
 	results.edit_select_result = world.select_revision_chunk(0, 0, true);
 	results.protect_result = world.set_chunk_protected(4, 0, true);
 	results.select_loaded_result = world.select_revision_chunk(1, 0, true);
@@ -147,13 +147,13 @@ int32_t WorldRevisionValidator::apply_request_test(World &world) noexcept
 	World::RevisionRequest request;
 	World::RevisionRequestResult request_result;
 
-	terrain_default_generation_config(request.config);
+	voxel_default_generation_config(request.config);
 	request.mode = World::REGEN_DECORATION_REFRESH;
-	request.stage_mask = TERRAIN_STAGE_DECORATION;
+	request.stage_mask = VOXEL_STAGE_DECORATION;
 	request.selected_chunks.push_back({1, 0});
 	if (world.apply_revision_request(request, &request_result) != FT_ERR_SUCCESS
 		|| request_result.regenerated_count < 1
-		|| request_result.stage_mask != TERRAIN_STAGE_DECORATION)
+		|| request_result.stage_mask != VOXEL_STAGE_DECORATION)
 		return (1);
 	return (FT_ERR_SUCCESS);
 }

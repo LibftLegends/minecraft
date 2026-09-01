@@ -30,8 +30,8 @@ bool WorldChunkAsyncSubmitter::submit_async_candidate(WorldChunkStreamer &stream
 	error_code = streamer.generation_pipeline_.submit_generation(request_id,
 			streamer.world_epoch_, streamer.stream_relevance_epoch_,
 			streamer.generation_revision_, chunk_x, chunk_z,
-			streamer.world_.seed, streamer.world_.terrain_context.config(),
-			TERRAIN_STAGE_BASE_TERRAIN | TERRAIN_STAGE_CAVES | TERRAIN_STAGE_FLUIDS | TERRAIN_STAGE_DECORATION | TERRAIN_STAGE_STRUCTURES | TERRAIN_STAGE_ORES,
+			streamer.world_.seed, streamer.world_.voxel_context.config(),
+			VOXEL_STAGE_BASE_TERRAIN | VOXEL_STAGE_CAVES | VOXEL_STAGE_FLUIDS | VOXEL_STAGE_DECORATION | VOXEL_STAGE_STRUCTURES | VOXEL_STAGE_ORES,
 			WorldGenerationPipeline::WorldGenerationOperation::STREAM);
 	if (error_code == FT_ERR_FULL)
 		return (true);

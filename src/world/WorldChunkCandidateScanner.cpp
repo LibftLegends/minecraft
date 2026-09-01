@@ -106,7 +106,7 @@ int32_t WorldChunkCandidateScanner::try_load_chunk_at(WorldChunkStreamer &stream
 	error_code = WorldChunkLoader::initialize_chunk(slot, chunk_x, chunk_z,
 			streamer.world_.seed, streamer.world_.chunks,
 			streamer.world_.chunk_count,
-			streamer.world_.terrain_context.config());
+			streamer.world_.voxel_context.config());
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
 	streamer.world_.loaded_chunk_count = streamer.world_.loaded_chunk_count + 1;

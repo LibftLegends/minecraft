@@ -17,6 +17,7 @@ SRC = \
     src/diagnostics/DebugCrashHandler.cpp \
     src/diagnostics/FramebufferHasher.cpp \
     src/diagnostics/SystemMemoryInfo.cpp \
+    src/diagnostics/RuntimeAnalytics.cpp \
     src/camera/CameraInput.cpp \
     src/camera/Camera.cpp \
     src/player/PlayerController.cpp \

@@ -100,17 +100,17 @@ int32_t WorldRevisionRegenerator::start(WorldRevisionManager &manager,
 	return (FT_ERR_SUCCESS);
 }
 
-int32_t WorldRevisionRegenerator::commit_terrain_config(WorldRevisionManager &manager,
+int32_t WorldRevisionRegenerator::commit_voxel_config(WorldRevisionManager &manager,
 	World &world) noexcept
 {
 	int32_t error_code;
 
-	error_code = world.terrain_config.initialize(manager.config_);
+	error_code = world.voxel_config.initialize(manager.config_);
 	if (error_code == FT_ERR_SUCCESS)
 	{
-		(void)world.terrain_context.destroy();
-		error_code = terrain_generation_context_initialize(world.terrain_context,
-				world.terrain_config);
+		(void)world.voxel_context.destroy();
+		error_code = voxel_generation_context_initialize(world.voxel_context,
+				world.voxel_config);
 	}
 	return (error_code);
 }
@@ -131,7 +131,7 @@ int32_t WorldRevisionRegenerator::finish(WorldRevisionManager &manager,
 		manager.selected_.clear();
 		return (generation_error);
 	}
-	error_code = WorldRevisionRegenerator::commit_terrain_config(manager,
+	error_code = WorldRevisionRegenerator::commit_voxel_config(manager,
 			world);
 	if (error_code != FT_ERR_SUCCESS)
 	{

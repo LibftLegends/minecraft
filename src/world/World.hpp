@@ -5,9 +5,10 @@
 #include "../../src/chunks/WorldChunk.hpp"
 #include "../../src/chunks/WorldChunkLoader.hpp"
 #include "../../src/chunks/WorldChunkStore.hpp"
+#include "../../src/edits/WorldEditHistory.hpp"
 #include "../../src/coordinates/WorldCoordinates.hpp"
 #include "../../Libft/Modules/Errno/errno.hpp"
-#include "../../Libft/Modules/Voxel/terrain_api.hpp"
+#include "../../Libft/Modules/Voxel/voxel_api.hpp"
 #include "../../src/queries/WorldBlockQuery.hpp"
 #include "../../src/edits/WorldBlockEditor.hpp"
 #include "../../src/queries/WorldRaycaster.hpp"
@@ -16,6 +17,9 @@
 #include <chrono>
 #include <shared_mutex>
 
+class WorldChunkStreamer;
+class WorldRevisionManager;
+
 class World
 {
   public:
@@ -23,7 +27,7 @@ class World
 	{
 		REGEN_DECORATION_REFRESH = 0,
 		REGEN_UNDERGROUND_REFRESH = 1,
-		REGEN_TERRAIN_RESHAPING = 2,
+		REGEN_VOXEL_RESHAPING = 2,
 		REGEN_FULL = 3
 	};
 
@@ -61,7 +65,7 @@ class World
 
 	struct							RevisionRequest
 	{
-		terrain_generation_config	config;
+		voxel_generation_config	config;
 		RegenerationMode			mode;
 		uint32_t					stage_mask;
 		std::vector<RevisionChunkCoordinate> selected_chunks;
@@ -100,9 +104,9 @@ class World
 	int32_t							center_chunk_z;
 	int32_t							active_render_distance;
 	char							seed[128];
-	terrain_generation_config		terrain_config;
-	terrain_generation_context		terrain_context;
-	bool							terrain_generation_started;
+	voxel_generation_config		voxel_config;
+	voxel_generation_context		voxel_context;
+	bool							voxel_generation_started;
 	uint64_t						current_tick;
 	WorldEditHistory				edit_history;
 	ft_uniqueptr<WorldChunkStreamer> chunk_streamer_storage_;
@@ -117,11 +121,11 @@ class World
 
 	int32_t initialize(const char *seed_value);
 	int32_t initialize(const char *seed_value,
-		const char *terrain_config_file_path);
-	void set_terrain_config(const terrain_generation_config &config);
-	const terrain_generation_config &terrain_generation_settings() const;
-	int32_t load_terrain_config(const char *file_path);
-	int32_t save_terrain_config(const char *file_path) const;
+		const char *voxel_config_file_path);
+	void set_voxel_config(const voxel_generation_config &config);
+	const voxel_generation_config &voxel_generation_settings() const;
+	int32_t load_voxel_config(const char *file_path);
+	int32_t save_voxel_config(const char *file_path) const;
 	void destroy();
 	int32_t update_around(double camera_x, double camera_z,
 		int32_t generation_budget);
@@ -158,7 +162,7 @@ class World
 	WorldChunk *find_chunk_mutable(int32_t chunk_x, int32_t chunk_z);
 	void register_chunk_index(const WorldChunk &chunk);
 
-	int32_t begin_world_revision(const terrain_generation_config &config,
+	int32_t begin_world_revision(const voxel_generation_config &config,
 		RegenerationMode mode);
 	int32_t cancel_world_revision();
 	WorldRevision world_revision() const;
@@ -218,10 +222,10 @@ class World
     uint32_t world_revision_id_;
     uint32_t revision_stage_mask_;
     RegenerationMode revision_mode_;
-    terrain_generation_config revision_config_;
+    voxel_generation_config revision_config_;
     std::vector<RevisionChunk> revision_selected_;
     std::vector<RevisionChunk> revision_manual_protected_;
-    std::vector<WorldDeferredBlockEdit> deferred_edits_;
+    std::vector<WorldGenerationPipeline::WorldDeferredBlockEdit> deferred_edits_;
     bool revision_regeneration_active_;
     uint64_t revision_generation_epoch_;
     std::size_t revision_job_count_;
@@ -232,9 +236,9 @@ class World
     mutable std::shared_mutex world_data_mutex_;
 
     void copy_seed(const char *seed_value);
+    int32_t seed_first_chunk_and_stream();
     void clear_chunk_index();
     void rebuild_chunk_index();
-    void register_chunk_index(const WorldChunk &chunk);
     int32_t try_load_chunk_at(int32_t chunk_x, int32_t chunk_z);
     int32_t stream_chunks_sync(int32_t stream_radius, int32_t budget, int32_t *generated);
     int32_t stream_chunks_async(int32_t stream_radius, int32_t budget, int32_t *generated);

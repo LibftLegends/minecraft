@@ -43,7 +43,7 @@ int32_t WorldGenerationRequestBuilder::deferred_writer(int32_t world_x,
 int32_t WorldGenerationRequestBuilder::build(std::unique_ptr<WorldGenerationPipeline::Request> &request,
 	uint64_t request_id, uint64_t cancellation_epoch, uint64_t world_epoch,
 	uint64_t relevance_epoch, uint32_t generation_revision, int32_t chunk_x,
-	int32_t chunk_z, const char *seed, const terrain_generation_config &config,
+	int32_t chunk_z, const char *seed, const voxel_generation_config &config,
 	uint32_t stage_mask,
 	WorldGenerationPipeline::WorldGenerationOperation operation,
 	const WorldGenerationPipeline::WorldChunkSnapshot *source_snapshot) noexcept
@@ -56,7 +56,7 @@ int32_t WorldGenerationRequestBuilder::build(std::unique_ptr<WorldGenerationPipe
 	request->world_epoch = world_epoch;
 	request->relevance_epoch = relevance_epoch;
 	request->generation_revision = generation_revision;
-	request->configuration_signature = terrain_generation_config_signature(config);
+	request->configuration_signature = voxel_generation_config_signature(config);
 	request->stage_mask = stage_mask;
 	request->voxel_revision = 0U;
 	request->chunk_x = chunk_x;

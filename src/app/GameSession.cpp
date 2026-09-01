@@ -1,4 +1,6 @@
 #include "../../src/app/GameSession.hpp"
+#include "../../src/diagnostics/RuntimeAnalytics.hpp"
+#include <cstdio>
 
 #if defined(__APPLE__)
 # include <mach/mach.h>
@@ -12,7 +14,7 @@ GameSession::GameSession()
       active_render_distance_(WorldCoordinates::REQUIRED_VISIBLE_DISTANCE), fps_accumulator_(0.0),
       rd_accumulator_(0.0), display_fps_(0.0), frame_ms_(0.0), performance_frame_ms_(16.67),
       fps_frame_count_(0U),
-      selected_block_id_(TERRAIN_GENERATOR_DIRT_BLOCK), boost_enabled_(false), active_(false),
+      selected_block_id_(VOXEL_GENERATOR_DIRT_BLOCK), boost_enabled_(false), active_(false),
       revision_preview_visible_(false), render_debug_frame_(0U), cached_ram_mb_(0U),
       cached_vram_mb_(0U), revision_preview_center_x_(0), revision_preview_center_z_(0),
       revision_preview_identifier_(0U), revision_preview_cache_valid_(false),
@@ -26,7 +28,7 @@ GameSession::GameSession(const GameSession &other)
       active_render_distance_(WorldCoordinates::REQUIRED_VISIBLE_DISTANCE), fps_accumulator_(0.0),
       rd_accumulator_(0.0), display_fps_(0.0), frame_ms_(0.0), performance_frame_ms_(16.67),
       fps_frame_count_(0U),
-      selected_block_id_(TERRAIN_GENERATOR_DIRT_BLOCK), boost_enabled_(false), active_(false),
+      selected_block_id_(VOXEL_GENERATOR_DIRT_BLOCK), boost_enabled_(false), active_(false),
       revision_preview_visible_(false), render_debug_frame_(0U), cached_ram_mb_(0U),
       cached_vram_mb_(0U), revision_preview_center_x_(0), revision_preview_center_z_(0),
       revision_preview_identifier_(0U), revision_preview_cache_valid_(false),
@@ -51,7 +53,7 @@ void GameSession::reset_session_state()
 {
 	active_render_distance_ = Settings::instance().render_distance();
 	boost_enabled_ = false;
-	selected_block_id_ = TERRAIN_GENERATOR_DIRT_BLOCK;
+	selected_block_id_ = VOXEL_GENERATOR_DIRT_BLOCK;
 	fps_accumulator_ = 0.0;
 	fps_frame_count_ = 0U;
 	rd_accumulator_ = 0.0;
@@ -74,6 +76,14 @@ int GameSession::start(const std::string &seed, ApplicationWindow &window,
         world_.destroy();
         return error_code_;
     }
+    {
+        int32_t analytics_error;
+
+        analytics_error = RuntimeAnalytics::begin_world_session();
+        if (analytics_error != FT_ERR_SUCCESS)
+            std::fprintf(stderr, "Analytics: unable to open world report (%d)\n",
+                analytics_error);
+    }
     std::strncpy(seed_, seed.c_str(), sizeof(seed_) - 1);
     seed_[sizeof(seed_) - 1] = '\0';
     camera_.initialize();
@@ -87,7 +97,7 @@ int GameSession::start(const std::string &seed, ApplicationWindow &window,
     cached_vram_mb_ = 0U;
     revision_preview_cache_valid_ = false;
     revision_preview_cache_.clear();
-    selected_block_id_ = TERRAIN_GENERATOR_DIRT_BLOCK;
+    selected_block_id_ = VOXEL_GENERATOR_DIRT_BLOCK;
     fps_accumulator_ = 0.0;
     fps_frame_count_ = 0U;
     rd_accumulator_ = 0.0;
@@ -110,9 +120,9 @@ int GameSession::start(const std::string &seed, ApplicationWindow &window,
     return FT_ERR_SUCCESS;
 }
 
-void GameSession::set_terrain_generation_config(const terrain_generation_config &config)
+void GameSession::set_voxel_generation_config(const voxel_generation_config &config)
 {
-	this->world_.set_terrain_config(config);
+	this->world_.set_voxel_config(config);
 }
 
 void GameSession::stop()
@@ -120,6 +130,13 @@ void GameSession::stop()
 	if (active_)
 		world_.destroy();
 	player_character_.destroy();
+	if (active_)
+	{
+		int32_t analytics_error = RuntimeAnalytics::end_world_session();
+		if (analytics_error != FT_ERR_SUCCESS)
+			std::fprintf(stderr, "Analytics: world report close failed (%d)\n",
+				analytics_error);
+	}
 	active_ = false;
 }
 
@@ -271,7 +288,7 @@ void GameSession::build_render_debug(VoxelRenderer &renderer)
     render_debug_.boost_speed = camera_.speed * 20.0;
     if (render_debug_frame_ == 1U || render_debug_frame_ % 30U == 0U)
     {
-        cached_ram_mb_ = system_ram_mb();
+        cached_ram_mb_ = SystemMemoryInfo::resident_set_mb();
         cached_vram_mb_ = renderer.get_gpu_renderer()
             ? renderer.get_gpu_renderer()->gpu_mb_approx() : 0U;
     }
@@ -280,8 +297,8 @@ void GameSession::build_render_debug(VoxelRenderer &renderer)
     std::strncpy(render_debug_.seed, seed_, sizeof(render_debug_.seed) - 1);
     render_debug_.seed[sizeof(render_debug_.seed) - 1] = '\0';
 
-    uint32_t biome_index = terrain_get_biome_index(
-        world_.terrain_generation_settings(), player_character_.get_x(),
+    uint32_t biome_index = voxel_get_biome_index(
+        world_.voxel_generation_settings(), player_character_.get_x(),
         player_character_.get_z(), seed_);
     const char *bname = (biome_index < 5U) ? BIOME_NAMES[biome_index] : nullptr;
     if (bname != nullptr)
@@ -348,17 +365,36 @@ void GameSession::sync_player_character_location()
 void GameSession::render(ApplicationWindow &window, VoxelRenderer &renderer,
 	bool with_overlay)
 {
+    int32_t analytics_error = RuntimeAnalytics::begin_scope(
+        RuntimeAnalyticsScope::GAME_SESSION_RENDER);
+    if (analytics_error != FT_ERR_SUCCESS)
+        std::fprintf(stderr, "Analytics: game render scope start failed (%d)\n",
+            analytics_error);
     if (!active_)
+    {
+        analytics_error = RuntimeAnalytics::end_scope();
+        if (analytics_error != FT_ERR_SUCCESS)
+            std::fprintf(stderr, "Analytics: game render scope end failed (%d)\n",
+                analytics_error);
         return;
+    }
     const bool debug_enabled = with_overlay
         && (Settings::instance().fps_overlay() || revision_preview_visible_);
     if (!debug_enabled)
     {
         renderer.render_world(window.framebuffer(), camera_, world_,
             static_cast<const RenderDebug *>(nullptr));
+        analytics_error = RuntimeAnalytics::end_scope();
+        if (analytics_error != FT_ERR_SUCCESS)
+            std::fprintf(stderr, "Analytics: game render scope end failed (%d)\n",
+                analytics_error);
         return;
     }
     build_render_debug(renderer);
     const RenderDebug *dbg = &render_debug_;
     renderer.render_world(window.framebuffer(), camera_, world_, dbg);
+    analytics_error = RuntimeAnalytics::end_scope();
+    if (analytics_error != FT_ERR_SUCCESS)
+        std::fprintf(stderr, "Analytics: game render scope end failed (%d)\n",
+            analytics_error);
 }

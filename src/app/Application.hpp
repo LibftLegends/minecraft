@@ -8,6 +8,7 @@
 # include "../../src/config/ApplicationOptions.hpp"
 # include "../../src/config/LaunchSettings.hpp"
 # include "../../src/diagnostics/DebugCrashHandler.hpp"
+# include "../../src/diagnostics/RuntimeAnalytics.hpp"
 # include "../../src/menu/MenuController.hpp"
 # include "../../src/platform/ApplicationWindow.hpp"
 # include "../../src/policy/RenderDistanceStrategy.hpp"

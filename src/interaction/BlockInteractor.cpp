@@ -65,7 +65,7 @@ void BlockInteractor::try_spread_down(World *world, int32_t x, int32_t y,
 	if (b != GAME_VOXEL_AIR_BLOCK || is_visited(x, y - 1, z, s))
 		return ;
 	if (world->place_block_at(x, y - 1, z,
-			TERRAIN_GENERATOR_WATER_BLOCK) == FT_ERR_SUCCESS)
+			VOXEL_GENERATOR_WATER_BLOCK) == FT_ERR_SUCCESS)
 	{
 		++s.fills;
 		mark(x, y - 1, z, s);
@@ -93,7 +93,7 @@ void BlockInteractor::try_spread_horizontal(World *world, int32_t x, int32_t y,
 		if (b == GAME_VOXEL_AIR_BLOCK)
 		{
 			if (world->place_block_at(nx, y, nz,
-					TERRAIN_GENERATOR_WATER_BLOCK) == FT_ERR_SUCCESS)
+					VOXEL_GENERATOR_WATER_BLOCK) == FT_ERR_SUCCESS)
 			{
 				++s.fills;
 				mark(nx, y, nz, s);
@@ -163,8 +163,8 @@ int32_t BlockInteractor::try_pick_target_block(const World *world,
 			10.0, &hx, &hy, &hz, &px, &py, &pz, &hit_id) != FT_ERR_SUCCESS)
 		return (FT_ERR_SUCCESS);
 	if (hit_id != GAME_VOXEL_AIR_BLOCK
-		&& terrain_block_is_known(hit_id) == FT_TRUE
-		&& terrain_block_is_breakable(hit_id) == FT_TRUE)
+		&& voxel_block_is_known(hit_id) == FT_TRUE
+		&& voxel_block_is_breakable(hit_id) == FT_TRUE)
 		*selected_block_id = hit_id;
 	return (FT_ERR_SUCCESS);
 }
@@ -190,7 +190,7 @@ int32_t BlockInteractor::try_place_selected_block(World *world,
 	if (err == FT_ERR_ALREADY_EXISTS || err == FT_ERR_NOT_FOUND)
 		return (FT_ERR_SUCCESS);
 	if (err == FT_ERR_SUCCESS
-		&& selected_block_id == TERRAIN_GENERATOR_WATER_BLOCK)
+		&& selected_block_id == VOXEL_GENERATOR_WATER_BLOCK)
 		spread_water(world, px, py, pz);
 	return (err);
 }

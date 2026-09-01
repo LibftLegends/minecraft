@@ -1,4 +1,6 @@
 #include "../../src/app/ApplicationPhaseController.hpp"
+#include "../../src/diagnostics/RuntimeAnalytics.hpp"
+#include <cstdio>
 
 ApplicationPhaseController::ApplicationPhaseController()
 {
@@ -175,10 +177,20 @@ void ApplicationPhaseController::render_frame(Phase phase,
 	VoxelRenderer &renderer)
 {
 	GpuRenderer	*gpu;
+	int32_t analytics_error;
 
+	analytics_error = RuntimeAnalytics::begin_scope(
+		RuntimeAnalyticsScope::APPLICATION_RENDER);
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: application render scope start failed (%d)\n",
+			analytics_error);
 	gpu = renderer.get_gpu_renderer();
 	if (window.is_gpu_mode() && gpu != nullptr)
 		render_gpu_frame(phase, window, menu, session, renderer);
 	else
 		render_cpu_frame(phase, window, menu, session, renderer);
+	analytics_error = RuntimeAnalytics::end_scope();
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: application render scope end failed (%d)\n",
+			analytics_error);
 }

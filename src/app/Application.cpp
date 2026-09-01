@@ -1,4 +1,5 @@
 #include "../../src/app/Application.hpp"
+#include <cstdio>
 
 Application::Application()
 {
@@ -24,6 +25,22 @@ void Application::run_single_frame(ApplicationWindow &window,
 {
 	double	dt;
 
+#if defined(LIBFT_ENABLE_ANALYTICS)
+	int32_t analytics_error;
+
+	analytics_error = RuntimeAnalytics::begin_frame();
+	if (analytics_error != FT_ERR_SUCCESS)
+	{
+		analytics_error = RuntimeAnalytics::shutdown();
+		if (analytics_error != FT_ERR_SUCCESS)
+			std::fprintf(stderr, "Analytics: frame start recovery failed (%d)\n",
+				analytics_error);
+	}
+	analytics_error = RuntimeAnalytics::begin_scope(RuntimeAnalyticsScope::INPUT_PHASE);
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: input scope start failed (%d)\n",
+			analytics_error);
+#endif
 	const std::chrono::duration<double> target_frame_time(1.0 / 120.0);
 	std::chrono::steady_clock::time_point frame_start;
 	std::chrono::steady_clock::time_point frame_deadline;
@@ -33,19 +50,45 @@ void Application::run_single_frame(ApplicationWindow &window,
 	dt = std::min(std::chrono::duration<double>(now - prev_time).count(), 0.1);
 	prev_time = now;
 	window.poll_events();
+	analytics_error = RuntimeAnalytics::end_scope();
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: input scope end failed (%d)\n",
+			analytics_error);
 	if (window.should_close())
+	{
+	#if defined(LIBFT_ENABLE_ANALYTICS)
+		analytics_error = RuntimeAnalytics::end_frame();
+		if (analytics_error != FT_ERR_SUCCESS)
+			std::fprintf(stderr, "Analytics: frame end failed (%d)\n",
+				analytics_error);
+	#endif
 		return ;
+	}
 	if (phase != ApplicationPhaseController::Phase::IN_GAME)
 	{
 		ft_dumb_controls_set_mouse_captured(FT_FALSE);
 		ft_dumb_controls_poll();
 		ft_dumb_controls_set_mouse_captured(FT_TRUE);
 	}
+	analytics_error = RuntimeAnalytics::begin_scope(RuntimeAnalyticsScope::WORLD_UPDATE_PHASE);
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: world scope start failed (%d)\n",
+			analytics_error);
 	phase = ApplicationPhaseController::tick_phase(phase, window, menu, session,
 			renderer, dt, loading_frames, strategy);
+	analytics_error = RuntimeAnalytics::end_scope();
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: world scope end failed (%d)\n",
+			analytics_error);
 	ApplicationPhaseController::render_frame(phase, window, menu, session,
 		renderer);
 	window.present();
+#if defined(LIBFT_ENABLE_ANALYTICS)
+	analytics_error = RuntimeAnalytics::end_frame();
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: frame end failed (%d)\n",
+			analytics_error);
+#endif
 	frame_deadline = frame_start
 		+ std::chrono::duration_cast<std::chrono::steady_clock::duration>(target_frame_time);
 	std::this_thread::sleep_until(frame_deadline);
@@ -92,6 +135,8 @@ int Application::run(int argc, char **argv)
 	ApplicationOptions				options;
 	LaunchSettings					launch_settings;
 	int								validator_result;
+	int								result;
+	int32_t							analytics_error;
 	const RenderDistanceStrategy	*strategy;
 	PerfSession						perf;
 
@@ -106,9 +151,17 @@ int Application::run(int argc, char **argv)
 			launch_settings) != 0)
 		return (1);
 	strategy = &RenderStrategyFactory::select(options.perf_headless_mode);
+	analytics_error = RuntimeAnalytics::initialize();
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: unable to initialize (%d)\n",
+			analytics_error);
 	if (options.perf_headless_mode || options.perf_test_mode)
-	{
-		return (perf.run(options, launch_settings, *strategy));
-	}
-	return (run_game(options, launch_settings, *strategy));
+		result = perf.run(options, launch_settings, *strategy);
+	else
+		result = run_game(options, launch_settings, *strategy);
+	analytics_error = RuntimeAnalytics::shutdown();
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: unable to save report (%d)\n",
+			analytics_error);
+	return (result);
 }

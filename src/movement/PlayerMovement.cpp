@@ -32,12 +32,12 @@ bool PlayerMovement::player_in_water(const Camera &camera, const World &world)
 	ez = static_cast<int32_t>(std::floor(camera.z));
 	blk = 0U;
 	if (world.block_id_at(ex, ey, ez, &blk)
-		&& blk == TERRAIN_GENERATOR_WATER_BLOCK)
+		&& blk == VOXEL_GENERATOR_WATER_BLOCK)
 		return (true);
 	fy = static_cast<int32_t>(std::floor(camera.y - 1.5));
 	blk = 0U;
 	return (world.block_id_at(ex, fy, ez, &blk)
-		&& blk == TERRAIN_GENERATOR_WATER_BLOCK);
+		&& blk == VOXEL_GENERATOR_WATER_BLOCK);
 }
 
 PlayerMovement::LocalDirection PlayerMovement::local_direction_from_input(

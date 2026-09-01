@@ -1,6 +1,6 @@
 #include "../../src/world/World.hpp"
 
-int32_t World::begin_world_revision(const terrain_generation_config &config,
+int32_t World::begin_world_revision(const voxel_generation_config &config,
 	RegenerationMode mode)
 {
 	return (this->revision_manager.begin(config, static_cast<int32_t>(mode)));

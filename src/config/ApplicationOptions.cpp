@@ -4,8 +4,8 @@ ApplicationOptions::ApplicationOptions() : perf_test_mode(false),
 	perf_headless_mode(false), perf_move_mode(false), perf_boost_mode(false),
 	validate_camera_speed_mode(false), validate_collision_mode(false),
 	validate_block_edit_mode(false), validate_visible_distance_mode(false),
-	validate_terrain_determinism_mode(false), validate_world_scale_mode(false),
-	validate_caves_mode(false), validate_terrain_configuration_mode(false),
+	validate_voxel_determinism_mode(false), validate_world_scale_mode(false),
+	validate_caves_mode(false), validate_voxel_configuration_mode(false),
 	validate_world_revision_mode(false), validate_async_generation_mode(false),
 	perf_seconds_limit(10.0)
 {
@@ -15,8 +15,8 @@ ApplicationOptions::ApplicationOptions(const ApplicationOptions &other) : perf_t
 	perf_headless_mode(false), perf_move_mode(false), perf_boost_mode(false),
 	validate_camera_speed_mode(false), validate_collision_mode(false),
 	validate_block_edit_mode(false), validate_visible_distance_mode(false),
-	validate_terrain_determinism_mode(false), validate_world_scale_mode(false),
-	validate_caves_mode(false), validate_terrain_configuration_mode(false),
+	validate_voxel_determinism_mode(false), validate_world_scale_mode(false),
+	validate_caves_mode(false), validate_voxel_configuration_mode(false),
 	validate_world_revision_mode(false), validate_async_generation_mode(false),
 	perf_seconds_limit(10.0)
 {
@@ -39,10 +39,10 @@ ApplicationOptions &ApplicationOptions::operator=(const ApplicationOptions &othe
 		validate_collision_mode = other.validate_collision_mode;
 		validate_block_edit_mode = other.validate_block_edit_mode;
 		validate_visible_distance_mode = other.validate_visible_distance_mode;
-		validate_terrain_determinism_mode = other.validate_terrain_determinism_mode;
+		validate_voxel_determinism_mode = other.validate_voxel_determinism_mode;
 		validate_world_scale_mode = other.validate_world_scale_mode;
 		validate_caves_mode = other.validate_caves_mode;
-		validate_terrain_configuration_mode = other.validate_terrain_configuration_mode;
+		validate_voxel_configuration_mode = other.validate_voxel_configuration_mode;
 		validate_world_revision_mode = other.validate_world_revision_mode;
 		validate_async_generation_mode = other.validate_async_generation_mode;
 		perf_seconds_limit = other.perf_seconds_limit;
@@ -68,12 +68,12 @@ int ApplicationOptions::parse(int argc, char **argv)
 			"--validate-block-edit");
 	validate_visible_distance_mode = CommandLine::has_flag(argc, argv,
 			"--validate-visible-distance");
-	validate_terrain_determinism_mode = CommandLine::has_flag(argc, argv,
+	validate_voxel_determinism_mode = CommandLine::has_flag(argc, argv,
 			"--validate-terrain-determinism");
 	validate_world_scale_mode = CommandLine::has_flag(argc, argv,
 			"--validate-world-scale");
 	validate_caves_mode = CommandLine::has_flag(argc, argv, "--validate-caves");
-	validate_terrain_configuration_mode = CommandLine::has_flag(argc, argv,
+	validate_voxel_configuration_mode = CommandLine::has_flag(argc, argv,
 			"--validate-terrain-configuration");
 	validate_world_revision_mode = CommandLine::has_flag(argc, argv,
 			"--validate-world-revision");

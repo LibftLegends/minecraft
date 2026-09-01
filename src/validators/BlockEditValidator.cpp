@@ -64,11 +64,11 @@ int BlockEditValidator::verify_place_block(World &world, int32_t x, int32_t y,
 	uint32_t	block_id;
 	int32_t		error_code;
 
-	error_code = world.place_block_at(x, y, z, TERRAIN_GENERATOR_STONE_BLOCK);
+	error_code = world.place_block_at(x, y, z, VOXEL_GENERATOR_STONE_BLOCK);
 	if (error_code != FT_ERR_SUCCESS)
 		return (ApplicationError::fail("block-edit place", error_code));
 	if (world.block_id_at(x, y, z, &block_id) == false
-		|| block_id != TERRAIN_GENERATOR_STONE_BLOCK)
+		|| block_id != VOXEL_GENERATOR_STONE_BLOCK)
 	{
 		std::fprintf(stderr,
 			"block-edit: placed block not visible in storage\n");

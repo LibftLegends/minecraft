@@ -92,7 +92,7 @@ void GpuChunkMesh::sync(const chunk_mesh &mesh, uint64_t revision)
 	for (size_t index = 0; index < mesh.indices.size(); ++index)
 	{
 		vertex_index = mesh.indices[index];
-		if (mesh.vertices[vertex_index].block_id == TERRAIN_GENERATOR_WATER_BLOCK)
+		if (mesh.vertices[vertex_index].block_id == VOXEL_GENERATOR_WATER_BLOCK)
 			water_indices.push_back(vertex_index);
 		else
 			solid_indices.push_back(vertex_index);

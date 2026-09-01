@@ -37,8 +37,8 @@ PlaceBlockCommand &PlaceBlockCommand::operator=(const PlaceBlockCommand &other)
 int32_t PlaceBlockCommand::execute(World &world) const
 {
 	if (block_id == GAME_VOXEL_AIR_BLOCK
-		|| terrain_block_is_known(block_id) != FT_TRUE
-		|| terrain_block_is_breakable(block_id) != FT_TRUE)
+		|| voxel_block_is_known(block_id) != FT_TRUE
+		|| voxel_block_is_breakable(block_id) != FT_TRUE)
 		return (FT_ERR_INVALID_ARGUMENT);
 	int32_t cx, cz, lx, lz;
 	WorldChunk *wc = resolve_chunk(world, world_x, world_y, world_z, cx, cz, lx,

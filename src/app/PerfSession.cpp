@@ -1,4 +1,6 @@
 #include "../../src/app/PerfSession.hpp"
+#include "../../src/diagnostics/RuntimeAnalytics.hpp"
+#include <cstdio>
 
 PerfSession::PerfSession()
 {
@@ -176,24 +178,53 @@ void PerfSession::run_loop(const ApplicationOptions &options,
 	const RenderDistanceStrategy &strategy, ApplicationWindow &window,
 	Camera &camera, World &world, VoxelRenderer &renderer, LoopState &s)
 {
-	double	dt;
-	double	elapsed;
+	const auto perf_start = std::chrono::steady_clock::now();
+	auto prev_time = perf_start;
+#if defined(LIBFT_ENABLE_ANALYTICS)
+	int32_t analytics_error;
+	int32_t analytics_recovery_error;
+#endif
 
     while (options.perf_headless_mode || !window.should_close())
     {
+#if defined(LIBFT_ENABLE_ANALYTICS)
+		analytics_error = RuntimeAnalytics::begin_frame();
+		if (analytics_error != FT_ERR_SUCCESS)
+		{
+			analytics_recovery_error = RuntimeAnalytics::shutdown();
+			if (analytics_recovery_error != FT_ERR_SUCCESS)
+				std::fprintf(stderr,
+					"Analytics: frame start recovery failed (%d)\n",
+					analytics_recovery_error);
+		}
+#endif
         const auto frame_start = std::chrono::steady_clock::now();
         auto now = std::chrono::steady_clock::now();
         double dt = std::min(std::chrono::duration<double>(now - prev_time).count(), 0.1);
         prev_time = now;
 
         if (!tick_frame(options, strategy, window, camera, world, renderer, dt, s))
+        {
+#if defined(LIBFT_ENABLE_ANALYTICS)
+			analytics_error = RuntimeAnalytics::end_frame();
+			if (analytics_error != FT_ERR_SUCCESS)
+				std::fprintf(stderr, "Analytics: frame end failed (%d)\n",
+					analytics_error);
+#endif
             break;
+        }
         s.frame_samples_ms.push_back(std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - frame_start).count());
+#if defined(LIBFT_ENABLE_ANALYTICS)
+		analytics_error = RuntimeAnalytics::end_frame();
+		if (analytics_error != FT_ERR_SUCCESS)
+			std::fprintf(stderr, "Analytics: frame end failed (%d)\n",
+				analytics_error);
+#endif
 
         if (options.perf_test_mode)
         {
-            double elapsed =
+            const double elapsed =
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - perf_start)
                     .count();
             if (elapsed >= options.perf_seconds_limit)
@@ -203,7 +234,7 @@ void PerfSession::run_loop(const ApplicationOptions &options,
 
     if (options.perf_test_mode)
     {
-        double elapsed =
+        const double elapsed =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - perf_start).count();
         s.perf_hash = FramebufferHasher::hash_framebuffer(window.framebuffer());
         print_results(s.frames, elapsed, s.perf_hash, s.frame_samples_ms);
@@ -227,7 +258,7 @@ int PerfSession::run(const ApplicationOptions &options,
 		return (init_err);
 	s = {};
 	s.active_rd = WorldCoordinates::REQUIRED_VISIBLE_DISTANCE;
-	s.sel_block = TERRAIN_GENERATOR_DIRT_BLOCK;
+	s.sel_block = VOXEL_GENERATOR_DIRT_BLOCK;
 	s.error_code = FT_ERR_SUCCESS;
 	run_loop(options, strategy, window, camera, world, renderer, s);
 	world.destroy();

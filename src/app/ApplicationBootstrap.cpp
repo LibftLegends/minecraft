@@ -29,14 +29,14 @@ int ApplicationBootstrap::run_validators(const ApplicationOptions &options)
 		return (ApplicationValidator::validate_block_edit());
 	if (options.validate_visible_distance_mode)
 		return (ApplicationValidator::validate_visible_distance());
-	if (options.validate_terrain_determinism_mode)
-		return (ApplicationValidator::validate_terrain_determinism());
+	if (options.validate_voxel_determinism_mode)
+		return (ApplicationValidator::validate_voxel_determinism());
 	if (options.validate_world_scale_mode)
 		return (ApplicationValidator::validate_world_scale());
 	if (options.validate_caves_mode)
 		return (ApplicationValidator::validate_caves());
-	if (options.validate_terrain_configuration_mode)
-		return (ApplicationValidator::validate_terrain_configuration());
+	if (options.validate_voxel_configuration_mode)
+		return (ApplicationValidator::validate_voxel_configuration());
 	if (options.validate_world_revision_mode)
 		return (ApplicationValidator::validate_world_revision());
 	if (options.validate_async_generation_mode)

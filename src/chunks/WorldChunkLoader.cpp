@@ -33,7 +33,7 @@ int32_t WorldChunkLoader::setup_chunk_coordinates(WorldChunk *world_chunk,
 }
 
 int32_t WorldChunkLoader::init_chunk_data(WorldChunk *world_chunk,
-	const char *seed, const terrain_generation_config *config)
+	const char *seed, const voxel_generation_config *config)
 {
 	int32_t	err;
 
@@ -47,10 +47,10 @@ int32_t WorldChunkLoader::init_chunk_data(WorldChunk *world_chunk,
 		return (err);
 	}
 	if (config != nullptr)
-		err = terrain_generate_chunk(world_chunk->chunk, world_chunk->world_x,
+		err = voxel_generate_chunk(world_chunk->chunk, world_chunk->world_x,
 				world_chunk->world_z, seed, *config);
 	else
-		err = terrain_generate_chunk(world_chunk->chunk, world_chunk->world_x,
+		err = voxel_generate_chunk(world_chunk->chunk, world_chunk->world_x,
 				world_chunk->world_z, seed);
 	if (err != FT_ERR_SUCCESS)
 	{
@@ -127,7 +127,7 @@ int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk,
 
 int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk,
 	int32_t chunk_x, int32_t chunk_z, const char *seed, WorldChunk *chunks,
-	int32_t chunk_count, const terrain_generation_config &config)
+	int32_t chunk_count, const voxel_generation_config &config)
 {
 	int32_t	err;
 

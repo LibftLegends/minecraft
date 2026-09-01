@@ -39,7 +39,7 @@ int ApplicationValidator::validate_visible_distance()
 	return (WorldVisibilityValidator().validate());
 }
 
-int ApplicationValidator::validate_terrain_determinism()
+int ApplicationValidator::validate_voxel_determinism()
 {
 	return (TerrainDeterminismValidator().validate());
 }
@@ -54,7 +54,7 @@ int ApplicationValidator::validate_caves()
 	return (TerrainCaveValidator().validate());
 }
 
-int ApplicationValidator::validate_terrain_configuration()
+int ApplicationValidator::validate_voxel_configuration()
 {
 	return (TerrainConfigValidator().validate());
 }

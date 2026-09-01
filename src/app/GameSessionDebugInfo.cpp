@@ -52,7 +52,7 @@ void GameSessionDebugInfo::build(RenderDebug &out, const Camera &camera,
 	out.vram_approx_mb = renderer.get_gpu_renderer() ? renderer.get_gpu_renderer()->gpu_mb_approx() : 0U;
 	std::strncpy(out.seed, seed, sizeof(out.seed) - 1);
 	out.seed[sizeof(out.seed) - 1] = '\0';
-	biome_index = terrain_get_biome_index(world.terrain_generation_settings(),
+	biome_index = voxel_get_biome_index(world.voxel_generation_settings(),
 			player_character.get_x(), player_character.get_z(), seed);
 	bname = biome_name_for_index(biome_index);
 	if (bname != nullptr)

@@ -7,6 +7,7 @@ SHELL := /bin/bash
 endif
 
 MAKEFLAGS += -r
+.DEFAULT_GOAL := all
 # BUILD_PLAN_MODE=1 is used by the stale-work planning wrapper.  Recipes emit
 # machine-readable markers in that mode and concise status lines otherwise.
 BUILD_PLAN_MODE ?= 0
@@ -26,6 +27,11 @@ include mk/directories.mk
 include mk/compiler.mk
 include mk/libft.mk
 include mk/objects.mk
+
+ifeq ($(FT_VOX_ANALYTICS),1)
+COMPILE_FLAGS += -DLIBFT_ENABLE_ANALYTICS=1
+LIBFT_COMPILE_FLAGS += -DLIBFT_ENABLE_ANALYTICS=1
+endif
 
 # Include Libft's canonical object/archive graph in the parent graph.  The
 # graph is configured with Libft-relative paths so one GNU Make scheduler can
@@ -94,8 +100,18 @@ else
 SUBMODULE_UPDATE_CMD = sh tools/update_libft.sh
 endif
 
-all:
+all: normal analytics
+
+normal:
 	@sh Libft/mk/run_build_with_progress.sh "$(MAKE)" internal-all
+	@test -f "$(TARGET)" && printf '\033[1;35m[MINECRAFT] Normal voxel ready: %s\033[0m\n' "$(TARGET)"
+
+analytics:
+	@$(MAKE) --no-print-directory FT_VOX_ANALYTICS=1 \
+		LIBFT_ARCHIVE_SUFFIX=_analytics \
+		LIBFT_BUILD_OUTPUT_SUFFIX=_analytics \
+		TARGET=ft_vox_analytics$(EXE_EXT) internal-all
+	@test -f "ft_vox_analytics$(EXE_EXT)" && printf '\033[1;35m[MINECRAFT][Analytics] Ready: %s\033[0m\n' "ft_vox_analytics$(EXE_EXT)"
 
 plan:
 	@sh Libft/mk/print_build_plan.sh "$(MAKE)" internal-all
@@ -139,13 +155,15 @@ internal-debug: $(NAME_DEBUG)
 
 $(TARGET): $(OBJS) $(LIBFT_LINK_LIB) $(FT_VOX_BUILD_CONFIG_INPUTS)
 	@if [ "$(BUILD_PLAN_MODE)" = "1" ]; then printf '%s\n' "__BUILD_PLAN__|link|minecraft|Minecraft|$@"; else printf '\033[1;35m[MINECRAFT] Linking %s\033[0m\n' "$@"; fi
-	@$(CC) $(CFLAGS) $(OBJS) $(LIBFT_LINK_FLAGS) -o $@ $(LDFLAGS)
+	$(file >$@.rsp,$(OBJS) $(LIBFT_LINK_FLAGS))
+	@$(CC) $(CFLAGS) -o $@ @$@.rsp $(LDFLAGS)
 	@printf '\033[1;35m[MINECRAFT] Link ready: %s\033[0m\n' "$@"
 
 $(TEST_NAME): $(TEST_OBJS) $(OBJS_NO_MAIN) $(TARGET) $(LIBFT_FULL_LIB) \
         $(FT_VOX_BUILD_CONFIG_INPUTS)
 	@if [ "$(BUILD_PLAN_MODE)" = "1" ]; then printf '%s\n' "__BUILD_PLAN__|link|minecraft|MinecraftTest|$@"; else printf '\033[1;35m[MINECRAFT][Test] Linking %s\033[0m\n' "$@"; fi
-	@$(CC) $(CFLAGS) $(TEST_OBJS) $(OBJS_NO_MAIN) $(LIBFT_LINK_FLAGS) -o $@ $(LDFLAGS)
+	$(file >$@.rsp,$(TEST_OBJS) $(OBJS_NO_MAIN) $(LIBFT_LINK_FLAGS))
+	@$(CC) $(CFLAGS) -o $@ @$@.rsp $(LDFLAGS)
 	@printf '\033[1;35m[MINECRAFT][Test] Link ready: %s\033[0m\n' "$@"
 
 $(OBJ_DIR)/%.o: %.cpp | $$(dir $$@)
@@ -244,6 +262,6 @@ ci:
 	$(MAKE) ci-lint
 	$(MAKE) ci-coverage
 
-.PHONY: all plan internal-all dirs clean fclean re debug internal-debug both re_both tests internal-tests test lint coverage \
+.PHONY: all normal analytics plan internal-all dirs clean fclean re debug internal-debug both re_both tests internal-tests test lint coverage \
         ci-build ci-test ci-lint ci-coverage ci submodule_init submodule_update \
         ft_vox install_cobc tests_with_cobc

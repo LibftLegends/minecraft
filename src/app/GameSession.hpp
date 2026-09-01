@@ -5,6 +5,7 @@
 #include "../../src/camera/Camera.hpp"
 #include "../../src/world/World.hpp"
 #include "../../src/debug/RenderDebug.hpp"
+#include "../../src/diagnostics/SystemMemoryInfo.hpp"
 #include "../../src/platform/InputReader.hpp"
 #include "../../src/platform/ApplicationWindow.hpp"
 #include "../../src/render/VoxelRenderer.hpp"
@@ -19,6 +20,8 @@
 class GameSession
 {
   public:
+	static const char *BIOME_NAMES[5];
+
 	enum class Action
 	{
 		CONTINUE,
@@ -34,7 +37,7 @@ class GameSession
 
 	int start(const std::string &seed, ApplicationWindow &window,
 		VoxelRenderer &renderer);
-	void set_terrain_generation_config(const terrain_generation_config &config);
+	void set_voxel_generation_config(const voxel_generation_config &config);
 	void stop();
 	bool is_active() const;
 	bool is_ready_to_play() const;

@@ -1,5 +1,5 @@
-#ifndef COLLISION_TERRAIN_SCENARIOS_HPP
-# define COLLISION_TERRAIN_SCENARIOS_HPP
+#ifndef COLLISION_VOXEL_SCENARIOS_HPP
+# define COLLISION_VOXEL_SCENARIOS_HPP
 
 # include "../../src/validators/CollisionValidator.hpp"
 

@@ -1,4 +1,6 @@
 #include "../../src/render/VoxelRenderer.hpp"
+#include "../../src/diagnostics/RuntimeAnalytics.hpp"
+#include <cstdio>
 
 const int VoxelRenderer::OVERLAY_W = 512;
 const int VoxelRenderer::OVERLAY_H = 360;
@@ -44,15 +46,24 @@ void VoxelRenderer::render_world_gpu(const Camera &camera, const World &world,
 	const RenderDebug *debug)
 {
 	uint32_t	eye_block;
+	int32_t analytics_error;
 
+	analytics_error = RuntimeAnalytics::begin_scope(RuntimeAnalyticsScope::VOXEL_RENDER_GPU);
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: GPU render scope start failed (%d)\n",
+			analytics_error);
 	eye_block = 0U;
 	this->gpu.render(camera, world);
 	if (world.block_id_at(static_cast<int32_t>(std::floor(camera.x)),
 			static_cast<int32_t>(std::floor(camera.y)),
 			static_cast<int32_t>(std::floor(camera.z)), &eye_block)
-		&& eye_block == TERRAIN_GENERATOR_WATER_BLOCK)
+		&& eye_block == VOXEL_GENERATOR_WATER_BLOCK)
 		this->gpu.draw_tint(0.05f, 0.35f, 0.75f, 0.35f);
 	render_gpu_overlay(debug);
+	analytics_error = RuntimeAnalytics::end_scope();
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: GPU render scope end failed (%d)\n",
+			analytics_error);
 }
 
 void VoxelRenderer::render_world_software(ft_render_framebuffer &framebuffer,
@@ -61,10 +72,22 @@ void VoxelRenderer::render_world_software(ft_render_framebuffer &framebuffer,
 	ft_render_framebuffer	render_target;
 	RenderCache				render_cache;
 	RenderDebug				local_debug;
+	int32_t analytics_error;
+
+	analytics_error = RuntimeAnalytics::begin_scope(RuntimeAnalyticsScope::VOXEL_RENDER_SOFTWARE);
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: software render scope start failed (%d)\n",
+			analytics_error);
 
 	if (framebuffer.pixels == nullptr || framebuffer.width <= 0
 		|| framebuffer.height <= 0)
+	{
+		analytics_error = RuntimeAnalytics::end_scope();
+		if (analytics_error != FT_ERR_SUCCESS)
+			std::fprintf(stderr, "Analytics: software render scope end failed (%d)\n",
+				analytics_error);
 		return ;
+	}
 	render_target = this->target.prepare(framebuffer);
 	render_cache.configure(camera, render_target.width, render_target.height,
 		world.active_render_distance);
@@ -87,8 +110,12 @@ void VoxelRenderer::render_world_software(ft_render_framebuffer &framebuffer,
 	}
 	this->target.blit_to(framebuffer);
 	if (debug != nullptr)
-		DebugOverlayRenderer::draw_debug_overlay(framebuffer, &local_debug);
+	DebugOverlayRenderer::draw_debug_overlay(framebuffer, &local_debug);
 	DebugOverlayRenderer::draw_crosshair(framebuffer);
+	analytics_error = RuntimeAnalytics::end_scope();
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: software render scope end failed (%d)\n",
+			analytics_error);
 }
 
 void VoxelRenderer::render_world(ft_render_framebuffer &framebuffer,
@@ -114,12 +141,27 @@ void VoxelRenderer::render_world(ft_render_framebuffer &framebuffer,
 void VoxelRenderer::render_world(ft_render_framebuffer &framebuffer,
 	const Camera &camera, const World &world, const RenderDebug *debug)
 {
+	int32_t analytics_error;
+
+	analytics_error = RuntimeAnalytics::begin_scope(
+		RuntimeAnalyticsScope::VOXEL_RENDER_WORLD);
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: world render scope start failed (%d)\n",
+			analytics_error);
 	if (this->gpu.is_ready())
 	{
 		render_world_gpu(camera, world, debug);
+		analytics_error = RuntimeAnalytics::end_scope();
+		if (analytics_error != FT_ERR_SUCCESS)
+			std::fprintf(stderr, "Analytics: world render scope end failed (%d)\n",
+				analytics_error);
 		return ;
 	}
 	render_world_software(framebuffer, camera, world, debug);
+	analytics_error = RuntimeAnalytics::end_scope();
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: world render scope end failed (%d)\n",
+			analytics_error);
 }
 
 void VoxelRenderer::preload_assets()

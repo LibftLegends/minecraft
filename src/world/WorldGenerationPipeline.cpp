@@ -102,7 +102,7 @@ int32_t WorldGenerationPipeline::destroy() noexcept
 int32_t WorldGenerationPipeline::submit_generation(uint64_t request_id,
 	uint64_t world_epoch, uint64_t relevance_epoch,
 	uint32_t generation_revision, int32_t chunk_x, int32_t chunk_z,
-	const char *seed, const terrain_generation_config &config,
+	const char *seed, const voxel_generation_config &config,
 	uint32_t stage_mask, WorldGenerationOperation operation,
 	const WorldChunkSnapshot *source_snapshot) noexcept
 {

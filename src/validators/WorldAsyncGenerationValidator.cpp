@@ -108,7 +108,7 @@ int WorldAsyncGenerationValidator::validate() const
 	generated = WorldAsyncGenerationValidator::stream_until_ready(world,
 			&frame);
 	if (generated == nullptr || expected.initialize() != FT_ERR_SUCCESS
-		|| terrain_generate_chunk(expected, -64, 32,
+		|| voxel_generate_chunk(expected, -64, 32,
 			"async-validator") != FT_ERR_SUCCESS
 		|| !WorldAsyncGenerationValidator::chunks_equal(generated->chunk,
 			expected))

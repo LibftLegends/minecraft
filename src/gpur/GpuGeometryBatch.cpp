@@ -117,7 +117,7 @@ void GpuGeometryBatch::add_chunk(const WorldChunk &wc, uint32_t base)
 	for (size_t j = 0; j < wc.mesh.indices.size(); ++j)
 	{
 		raw = wc.mesh.indices[j];
-		if (wc.mesh.vertices[raw].block_id == TERRAIN_GENERATOR_WATER_BLOCK)
+		if (wc.mesh.vertices[raw].block_id == VOXEL_GENERATOR_WATER_BLOCK)
 			_water_idxs.push_back(base + raw);
 		else
 			_mega_idxs.push_back(base + raw);

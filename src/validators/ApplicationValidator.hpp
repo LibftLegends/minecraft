@@ -24,10 +24,10 @@ class ApplicationValidator
 	static int validate_collision();
 	static int validate_block_edit();
 	static int validate_visible_distance();
-	static int validate_terrain_determinism();
+	static int validate_voxel_determinism();
 	static int validate_world_scale();
 	static int validate_caves();
-	static int validate_terrain_configuration();
+	static int validate_voxel_configuration();
 	static int validate_world_revision();
 	static int validate_async_generation();
 };

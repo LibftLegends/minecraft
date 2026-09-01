@@ -21,7 +21,7 @@ WorldChunkGenerationWorker &WorldChunkGenerationWorker::operator=(const WorldChu
 
 int32_t WorldChunkGenerationWorker::initialize_chunk_for_generation(WorldChunk &chunk,
 	int32_t chunk_x, int32_t chunk_z, const char *seed,
-	terrain_generation_config &config, uint32_t stage_mask,
+	voxel_generation_config &config, uint32_t stage_mask,
 	std::vector<WorldGenerationPipeline::WorldDeferredBlockEdit> &deferred_edits,
 	const WorldGenerationPipeline::WorldChunkSnapshot *source_snapshot) noexcept
 {
@@ -43,7 +43,7 @@ int32_t WorldChunkGenerationWorker::initialize_chunk_for_generation(WorldChunk &
 		(void)chunk.chunk.destroy();
 		return (FT_ERR_NO_MEMORY);
 	}
-	error_code = terrain_generate_chunk_with_stage_mask(chunk.chunk,
+	error_code = voxel_generate_chunk_with_stage_mask(chunk.chunk,
 			chunk.world_x, chunk.world_z, seed, config, stage_mask);
 	if (error_code == FT_ERR_SUCCESS)
 		error_code = chunk_mesh_generate_from_chunk(chunk.mesh, chunk.chunk);

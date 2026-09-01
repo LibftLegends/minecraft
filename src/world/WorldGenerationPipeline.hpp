@@ -1,7 +1,7 @@
 #ifndef WORLD_GENERATION_PIPELINE_HPP
 # define WORLD_GENERATION_PIPELINE_HPP
 
-# include "../../Libft/Modules/Voxel/terrain_api.hpp"
+# include "../../Libft/Modules/Voxel/voxel_api.hpp"
 # include "../../src/chunks/WorldChunk.hpp"
 # include <atomic>
 # include <condition_variable>
@@ -78,7 +78,7 @@ class WorldGenerationPipeline
 		int32_t						chunk_z;
 		WorldGenerationOperation	operation;
 		std::string seed;
-		terrain_generation_config	config;
+		voxel_generation_config	config;
 		std::unique_ptr<WorldChunkSnapshot> snapshot;
 		std::vector<WorldDeferredBlockEdit> deferred_edits;
 	};
@@ -94,7 +94,7 @@ class WorldGenerationPipeline
 	int32_t submit_generation(uint64_t request_id, uint64_t world_epoch,
 		uint64_t relevance_epoch, uint32_t generation_revision, int32_t chunk_x,
 		int32_t chunk_z, const char *seed,
-		const terrain_generation_config &config, uint32_t stage_mask,
+		const voxel_generation_config &config, uint32_t stage_mask,
 		WorldGenerationOperation operation,
 		const WorldChunkSnapshot *source_snapshot = nullptr) noexcept;
 	int32_t submit_remesh(uint64_t request_id, uint64_t world_epoch,

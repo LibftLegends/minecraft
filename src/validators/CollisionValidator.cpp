@@ -50,7 +50,7 @@ int CollisionValidator::test_wall(World &world, Camera &camera, Metrics &m)
 	(void)world.place_block_at(static_cast<int32_t>(std::floor(camera.x + 1.0)),
 		static_cast<int32_t>(std::floor(camera.y - 1.0)),
 		static_cast<int32_t>(std::floor(camera.z)),
-		TERRAIN_GENERATOR_STONE_BLOCK);
+		VOXEL_GENERATOR_STONE_BLOCK);
 	input = InputReader::empty_camera_input();
 	input.move_right = true;
 	PlayerController::update_player_horizontal_motion(&camera, input, world,
