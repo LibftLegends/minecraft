@@ -2,7 +2,7 @@
 #include <chrono>
 
 WorldGenerationPipeline::WorldGenerationPipeline() noexcept : requests_(),
-	results_(), mutex_(), condition_(), pipeline_epoch_(1U),
+	results_(), retired_results_(), mutex_(), results_mutex_(), condition_(), pipeline_epoch_(1U),
 	remesh_in_flight_(0U), active_requests_(0U), stopping_(false), workers_(), maximum_queued_(0U),
 	initialized_(false)
 {
@@ -21,7 +21,7 @@ WorldGenerationPipeline::~WorldGenerationPipeline() noexcept
 uint64_t WorldGenerationPipeline::oldest_completed_result_age_nanoseconds()
 	const noexcept
 {
-	std::lock_guard<std::mutex> lock(this->mutex_);
+	std::lock_guard<std::mutex> lock(this->results_mutex_);
 	uint64_t oldest;
 	uint64_t now;
 
@@ -120,8 +120,17 @@ int32_t WorldGenerationPipeline::destroy() noexcept
 		std::lock_guard<std::mutex> lock(this->mutex_);
 
 		this->requests_.clear();
-		this->results_.clear();
 		this->initialized_ = false;
+	}
+	{
+		std::lock_guard<std::mutex> lock(this->results_mutex_);
+
+		this->results_.clear();
+	}
+	{
+		std::lock_guard<std::mutex> lock(this->mutex_);
+
+		this->retired_results_.clear();
 	}
 	return (FT_ERR_SUCCESS);
 }
@@ -188,13 +197,25 @@ int32_t WorldGenerationPipeline::submit_remesh(uint64_t request_id,
 int32_t WorldGenerationPipeline::poll(std::unique_ptr<Result> &result) noexcept
 {
 	result.reset();
-	std::lock_guard<std::mutex> lock(this->mutex_);
+	std::lock_guard<std::mutex> lock(this->results_mutex_);
 
 	if (this->results_.empty())
 		return (FT_ERR_NOT_FOUND);
 	result = std::move(this->results_.front());
 	this->results_.pop_front();
 	return (FT_ERR_SUCCESS);
+}
+
+void WorldGenerationPipeline::retire_result(
+	std::unique_ptr<Result> result) noexcept
+{
+	if (result == nullptr)
+		return ;
+	{
+		std::lock_guard<std::mutex> lock(this->mutex_);
+		this->retired_results_.push_back(std::move(result));
+	}
+	this->condition_.notify_one();
 }
 
 int32_t WorldGenerationPipeline::capture_snapshot(const WorldChunk &target,
@@ -287,7 +308,7 @@ std::size_t WorldGenerationPipeline::queued_count() const noexcept
 
 std::size_t WorldGenerationPipeline::completed_count() const noexcept
 {
-	std::lock_guard<std::mutex> lock(this->mutex_);
+	std::lock_guard<std::mutex> lock(this->results_mutex_);
 
 	return (this->results_.size());
 }

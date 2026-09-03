@@ -105,6 +105,7 @@ class WorldGenerationPipeline
 		int32_t chunk_z, uint64_t voxel_revision,
 		const WorldChunkSnapshot &snapshot) noexcept;
 	int32_t poll(std::unique_ptr<Result> &result) noexcept;
+	void retire_result(std::unique_ptr<Result> result) noexcept;
 	int32_t capture_snapshot(const WorldChunk &target, const WorldChunk *west,
 		const WorldChunk *east, const WorldChunk *north,
 		const WorldChunk *south, WorldChunkSnapshot &snapshot) const noexcept;
@@ -118,12 +119,14 @@ class WorldGenerationPipeline
 
 	std::deque<std::unique_ptr<Request>> requests_;
 	std::deque<std::unique_ptr<Result>> results_;
+	std::deque<std::unique_ptr<Result>> retired_results_;
 	mutable std::mutex mutex_;
+	mutable std::mutex results_mutex_;
 	std::condition_variable condition_;
 	std::atomic<uint64_t> pipeline_epoch_;
 	std::atomic<std::size_t> remesh_in_flight_;
 	std::atomic<std::size_t> active_requests_;
-	bool							stopping_;
+	std::atomic<bool>				stopping_;
 
   private:
 	std::vector<std::thread> workers_;

@@ -5,6 +5,15 @@
 # include <chrono>
 #endif
 
+namespace
+{
+	/* Keep result ownership transfer and deferred generated edits bounded on
+	 * the gameplay thread. A completed worker result remains queued when the
+	 * budget is exhausted and is committed on a later frame. */
+	static const int32_t WORLD_STREAM_MAX_COMMITS_PER_FRAME = 1;
+	static const uint32_t WORLD_STREAM_DEFERRED_EDIT_BUDGET_MS = 1U;
+}
+
 WorldGenerationResultCommitter::WorldGenerationResultCommitter()
 {
 }
@@ -286,22 +295,47 @@ int32_t WorldGenerationResultCommitter::drain(WorldChunkStreamer &streamer,
 	std::chrono::steady_clock::time_point deadline;
 	int32_t error_code;
 	int32_t analytics_error;
+	int32_t poll_error;
 #if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
 	std::size_t queued_before;
 	std::size_t completed_before;
 	std::size_t queued_after;
 	std::size_t completed_after;
+	uint64_t poll_us;
+	uint64_t cleanup_us;
+	uint64_t last_poll_us;
+	uint64_t last_cleanup_us;
+	uint64_t last_commit_us;
+	uint64_t drain_start_us;
 #endif
 
 	processed = 0;
 #if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
 	queued_before = streamer.generation_pipeline_.queued_count();
 	completed_before = streamer.generation_pipeline_.completed_count();
+	last_poll_us = 0U;
+	last_cleanup_us = 0U;
+	last_commit_us = 0U;
+	drain_start_us = static_cast<uint64_t>(
+		std::chrono::duration_cast<std::chrono::microseconds>(
+			std::chrono::steady_clock::now().time_since_epoch()).count());
 #endif
-	deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2);
-	while (processed < 2 && std::chrono::steady_clock::now() < deadline
-		&& streamer.generation_pipeline_.poll(result) == FT_ERR_SUCCESS)
+	deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1);
+	while (processed < WORLD_STREAM_MAX_COMMITS_PER_FRAME
+		&& (processed == 0 || std::chrono::steady_clock::now() < deadline))
 	{
+#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+		const auto poll_start = std::chrono::steady_clock::now();
+#endif
+		poll_error = streamer.generation_pipeline_.poll(result);
+#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+		poll_us = static_cast<uint64_t>(std::chrono::duration_cast<
+			std::chrono::microseconds>(std::chrono::steady_clock::now()
+				- poll_start).count());
+		last_poll_us = poll_us;
+#endif
+		if (poll_error != FT_ERR_SUCCESS)
+			break ;
 #if defined(LIBFT_ENABLE_ANALYTICS)
 		const uint64_t result_request_id = result->request_id;
 		const int32_t result_chunk_x = result->chunk_x;
@@ -339,6 +373,7 @@ int32_t WorldGenerationResultCommitter::drain(WorldChunkStreamer &streamer,
 				static_cast<unsigned int>(result_operation), result_chunk_x,
 				result_chunk_z, result_deferred_count,
 				static_cast<unsigned long long>(commit_us));
+		last_commit_us = commit_us;
 		if (result_generation_ns + result_mesh_ns >= 8000000U)
 			std::fprintf(stderr,
 				"[Analytics][World] slow worker request=%llu chunk=(%d,%d) "
@@ -350,7 +385,16 @@ int32_t WorldGenerationResultCommitter::drain(WorldChunkStreamer &streamer,
 #endif
 		if (error_code != FT_ERR_SUCCESS)
 			return (error_code);
-		result.reset();
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+		const auto cleanup_start = std::chrono::steady_clock::now();
+	#endif
+		streamer.generation_pipeline_.retire_result(std::move(result));
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+		cleanup_us = static_cast<uint64_t>(std::chrono::duration_cast<
+			std::chrono::microseconds>(std::chrono::steady_clock::now()
+				- cleanup_start).count());
+		last_cleanup_us = cleanup_us;
+	#endif
 		processed += 1;
 	}
 	analytics_error = RuntimeAnalytics::begin_scope(
@@ -363,7 +407,8 @@ int32_t WorldGenerationResultCommitter::drain(WorldChunkStreamer &streamer,
 	const std::size_t deferred_before = streamer.deferred_edits_.size();
 	const auto deferred_start = std::chrono::steady_clock::now();
 #endif
-	error_code = WorldDeferredEditApplier::apply(streamer, world, 64U, 1U);
+	error_code = WorldDeferredEditApplier::apply(streamer, world, 16U,
+		WORLD_STREAM_DEFERRED_EDIT_BUDGET_MS);
 	analytics_error = RuntimeAnalytics::end_scope();
 	if (analytics_error != FT_ERR_SUCCESS)
 		std::fprintf(stderr,
@@ -379,6 +424,19 @@ int32_t WorldGenerationResultCommitter::drain(WorldChunkStreamer &streamer,
 			"duration_us=%llu\n", deferred_before,
 			streamer.deferred_edits_.size(),
 			static_cast<unsigned long long>(deferred_us));
+	const uint64_t drain_us = static_cast<uint64_t>(
+		std::chrono::duration_cast<std::chrono::microseconds>(
+			std::chrono::steady_clock::now().time_since_epoch()).count())
+		- drain_start_us;
+	if (drain_us >= 8000U)
+		std::fprintf(stderr,
+			"[Analytics][World] drain_parts total_us=%llu poll_us=%llu "
+			"commit_us=%llu cleanup_us=%llu deferred_us=%llu processed=%d\n",
+			static_cast<unsigned long long>(drain_us),
+			static_cast<unsigned long long>(last_poll_us),
+			static_cast<unsigned long long>(last_commit_us),
+			static_cast<unsigned long long>(last_cleanup_us),
+			static_cast<unsigned long long>(deferred_us), processed);
 #endif
 #if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
 	queued_after = streamer.generation_pipeline_.queued_count();

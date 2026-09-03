@@ -86,7 +86,10 @@ int32_t WorldChunkAsyncSubmitter::submit_dirty_remeshes(
 	int32_t dirty_index;
 	int32_t scanned_count;
 	int32_t error_code;
-	const int32_t scan_budget = 64;
+	/* Dirty chunks are coalesced by mesh_dirty. Keep the discovery scan small
+	 * so a large loaded world cannot consume a frame while looking for work;
+	 * the cursor preserves eventual progress across frames. */
+	const int32_t scan_budget = 16;
 
 	if (streamer.world_.chunk_count <= 0)
 		return (FT_ERR_SUCCESS);
