@@ -1,8 +1,9 @@
 #include "../../src/world/WorldGenerationPipeline.hpp"
+#include <chrono>
 
 WorldGenerationPipeline::WorldGenerationPipeline() noexcept : requests_(),
 	results_(), mutex_(), condition_(), pipeline_epoch_(1U),
-	remesh_in_flight_(0U), stopping_(false), workers_(), maximum_queued_(0U),
+	remesh_in_flight_(0U), active_requests_(0U), stopping_(false), workers_(), maximum_queued_(0U),
 	initialized_(false)
 {
 }
@@ -15,6 +16,31 @@ WorldGenerationPipeline::WorldGenerationPipeline(const WorldGenerationPipeline &
 WorldGenerationPipeline::~WorldGenerationPipeline() noexcept
 {
 	(void)this->destroy();
+}
+
+uint64_t WorldGenerationPipeline::oldest_completed_result_age_nanoseconds()
+	const noexcept
+{
+	std::lock_guard<std::mutex> lock(this->mutex_);
+	uint64_t oldest;
+	uint64_t now;
+
+	if (this->results_.empty())
+		return (0U);
+	oldest = 0U;
+	for (const std::unique_ptr<Result> &result : this->results_)
+	{
+		if (result == nullptr || result->completed_at_nanoseconds == 0U)
+			continue ;
+		if (oldest == 0U || result->completed_at_nanoseconds < oldest)
+			oldest = result->completed_at_nanoseconds;
+	}
+	if (oldest == 0U)
+		return (0U);
+	now = static_cast<uint64_t>(std::chrono::duration_cast<
+		std::chrono::nanoseconds>(std::chrono::steady_clock::now()
+		.time_since_epoch()).count());
+	return (now >= oldest ? now - oldest : 0U);
 }
 
 WorldGenerationPipeline &WorldGenerationPipeline::operator=(const WorldGenerationPipeline &other) noexcept
@@ -89,6 +115,7 @@ int32_t WorldGenerationPipeline::destroy() noexcept
 			worker.join();
 	this->workers_.clear();
 	this->remesh_in_flight_.store(0U);
+	this->active_requests_.store(0U);
 	{
 		std::lock_guard<std::mutex> lock(this->mutex_);
 
@@ -263,6 +290,11 @@ std::size_t WorldGenerationPipeline::completed_count() const noexcept
 	std::lock_guard<std::mutex> lock(this->mutex_);
 
 	return (this->results_.size());
+}
+
+std::size_t WorldGenerationPipeline::active_count() const noexcept
+{
+	return (this->active_requests_.load());
 }
 
 std::size_t WorldGenerationPipeline::remesh_in_flight_count() const noexcept

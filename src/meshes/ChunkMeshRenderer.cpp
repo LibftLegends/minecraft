@@ -127,6 +127,16 @@ bool ChunkMeshRenderer::draw_mesh(ft_render_framebuffer &framebuffer,
 		return (false);
 	if (!MeshCuller::chunk_is_visible(camera, world_chunk, render_cache))
 		return (false);
+	return (this->draw_mesh_visible(framebuffer, depth_buffer, camera,
+			render_cache, world_chunk));
+}
+
+bool ChunkMeshRenderer::draw_mesh_visible(ft_render_framebuffer &framebuffer,
+	std::vector<double> &depth_buffer, const Camera &camera,
+	const RenderCache &render_cache, const WorldChunk &world_chunk) const
+{
+	if (!world_chunk.initialized)
+		return (false);
 	ClipVertex transformed[3];
 	size_t idx = 0U;
 	while (idx + 2U < world_chunk.mesh.indices.size())
@@ -135,9 +145,13 @@ bool ChunkMeshRenderer::draw_mesh(ft_render_framebuffer &framebuffer,
 		sv[0] = world_chunk.mesh.vertices[world_chunk.mesh.indices[idx]];
 		sv[1] = world_chunk.mesh.vertices[world_chunk.mesh.indices[idx + 1U]];
 		sv[2] = world_chunk.mesh.vertices[world_chunk.mesh.indices[idx + 2U]];
-		if (MeshCuller::triangle_faces_camera(camera, world_chunk, sv))
-			process_triangle(framebuffer, depth_buffer, camera, render_cache,
-				world_chunk, sv, transformed);
+		if (!MeshCuller::triangle_faces_camera(camera, world_chunk, sv))
+		{
+			idx += 3U;
+			continue;
+		}
+		process_triangle(framebuffer, depth_buffer, camera, render_cache,
+			world_chunk, sv, transformed);
 		idx += 3U;
 	}
 	return (true);

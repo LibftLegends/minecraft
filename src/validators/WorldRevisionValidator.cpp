@@ -1,5 +1,8 @@
 #include "../../src/validators/WorldRevisionValidator.hpp"
 
+#include <chrono>
+#include <thread>
+
 WorldRevisionValidator::WorldRevisionValidator()
 {
 }
@@ -32,6 +35,18 @@ int32_t WorldRevisionValidator::initialize_world_with_edit(World &world) noexcep
 		world.destroy();
 		return (1);
 	}
+	if (WorldRevisionValidator::wait_for_loaded_chunk(world, 1, 0)
+		!= FT_ERR_SUCCESS)
+	{
+		world.destroy();
+		return (1);
+	}
+	if (WorldRevisionValidator::quiesce_stream_pipeline(world)
+		!= FT_ERR_SUCCESS)
+	{
+		world.destroy();
+		return (1);
+	}
 	if (world.find_chunk_mutable(0, 0)->chunk.write_block(0, 0, 0,
 			VOXEL_GENERATOR_STONE_BLOCK) != FT_ERR_SUCCESS)
 	{
@@ -39,6 +54,51 @@ int32_t WorldRevisionValidator::initialize_world_with_edit(World &world) noexcep
 		return (1);
 	}
 	return (FT_ERR_SUCCESS);
+}
+
+int32_t WorldRevisionValidator::quiesce_stream_pipeline(World &world) noexcept
+{
+	std::unique_ptr<WorldGenerationPipeline::Result> discarded_result;
+	int32_t iteration;
+
+	world.chunk_streamer.pipeline().cancel_queued();
+	iteration = 0;
+	while (iteration < 500)
+	{
+		while (world.chunk_streamer.pipeline().poll(discarded_result)
+			== FT_ERR_SUCCESS)
+			discarded_result.reset();
+		if (world.chunk_streamer.pipeline().queued_count() == 0U
+			&& world.chunk_streamer.pipeline().completed_count() == 0U
+			&& world.chunk_streamer.pipeline().active_count() == 0U)
+			return (FT_ERR_SUCCESS);
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		iteration += 1;
+	}
+	return (world.chunk_streamer.pipeline().queued_count() == 0U
+		&& world.chunk_streamer.pipeline().completed_count() == 0U
+		&& world.chunk_streamer.pipeline().active_count() == 0U
+		? FT_ERR_SUCCESS : FT_ERR_TIMEOUT);
+}
+
+int32_t WorldRevisionValidator::wait_for_loaded_chunk(World &world,
+	int32_t chunk_x, int32_t chunk_z) noexcept
+{
+	int32_t iteration;
+	int32_t error_code;
+
+	iteration = 0;
+	while (iteration < 200
+		&& world.find_chunk_mutable(chunk_x, chunk_z) == nullptr)
+	{
+		error_code = world.update_around(0.0, 0.0, 4);
+		if (error_code != FT_ERR_SUCCESS)
+			return (error_code);
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		iteration += 1;
+	}
+	return (world.find_chunk_mutable(chunk_x, chunk_z) != nullptr
+		? FT_ERR_SUCCESS : FT_ERR_NOT_FOUND);
 }
 
 WorldRevisionValidator::SelectionResults WorldRevisionValidator::apply_selection_actions(World &world,
@@ -104,7 +164,17 @@ int32_t WorldRevisionValidator::regenerate_and_check(World &world,
 	int32_t *regenerated, int32_t *skipped) noexcept
 {
 	int32_t regenerate_result;
+	World::WorldRevision revision;
 
+	revision = world.world_revision();
+	std::fprintf(stderr,
+					"world-revision: before-regeneration pending=%d selected=%zu"
+					" state_1_0=%d state_4_0=%d chunk_1_0=%s\n",
+					revision.pending ? 1 : 0,
+					revision.selected_count,
+					static_cast<int>(world.revision_state(1, 0)),
+					static_cast<int>(world.revision_state(4, 0)),
+					world.find_chunk_mutable(1, 0) == nullptr ? "missing" : "present");
 	regenerate_result = world.regenerate_selected_chunks(regenerated, skipped);
 	if (regenerate_result != FT_ERR_SUCCESS || *regenerated < 1 || *skipped < 1
 		|| world.world_revision().pending)

@@ -13,13 +13,15 @@ class WorldChunk
 	int32_t chunk_z;
 	int32_t world_x;
 	int32_t world_z;
-	game_voxel_chunk chunk;
-	chunk_mesh mesh;
 	uint64_t mesh_revision;
 	uint64_t voxel_revision;
 	uint64_t pending_mesh_request_id;
 	bool mesh_dirty;
 	bool initialized;
+	/* Keep frequently scanned render/stream metadata contiguous. The voxel
+	 * storage and mesh payloads are cold during slot discovery and culling. */
+	game_voxel_chunk chunk;
+	chunk_mesh mesh;
 
 	WorldChunk();
 	WorldChunk(const WorldChunk &other);
@@ -28,6 +30,7 @@ class WorldChunk
 
 	void reset_coordinates();
 	void destroy();
+	static bool mesh_is_drawable(const chunk_mesh &mesh) noexcept;
 };
 
 #endif

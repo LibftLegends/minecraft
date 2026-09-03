@@ -1,4 +1,6 @@
 #include "../../src/world/WorldChunkStreamer.hpp"
+#include "../../src/diagnostics/RuntimeAnalytics.hpp"
+#include <cstdio>
 
 const uint8_t WorldChunkStreamer::CANDIDATE_ABSENT = 0U;
 const uint8_t WorldChunkStreamer::CANDIDATE_QUEUED = 1U;
@@ -39,19 +41,38 @@ void WorldChunkStreamer::reset() noexcept
 	(void)this->generation_pipeline_.destroy();
 	this->stream_candidates_radius_ = -1;
 	this->stream_candidate_cursor_ = 0U;
+	this->stream_candidate_lookup_.clear();
+	this->dirty_remesh_cursor_ = 0;
 	this->generation_credit_ = 0;
 	this->stream_last_error_ = FT_ERR_SUCCESS;
 	this->stream_retryable_count_ = 0;
 	this->deferred_edits_.clear();
+	this->deferred_edits_sorted_ = false;
+	this->deferred_apply_cursor_ = 0U;
+	this->deferred_sorted_end_ = 0U;
+	this->deferred_pending_edits_.clear();
+	this->deferred_touched_chunks_.clear();
 }
 
 int32_t WorldChunkStreamer::seed_initial_stream(int32_t stream_radius,
 	int32_t budget, int32_t *generated) noexcept
 {
+	int32_t error_code;
+	int32_t initial_async_budget;
+
 	this->stream_frame_ += 1U;
 	WorldChunkCandidateScanner::prepare_stream_candidates(*this, stream_radius);
-	return (WorldChunkCandidateScanner::stream_chunks_sync(*this, stream_radius,
-			budget, generated));
+	error_code = WorldChunkCandidateScanner::stream_chunks_sync(*this,
+		stream_radius, budget, generated);
+	if (error_code != FT_ERR_SUCCESS)
+		return (error_code);
+	/* Queue the initial playable ring immediately. The center chunk and one
+	 * nearest neighbor are prepared synchronously; the remaining adjacent
+	 * chunks are handed to the persistent workers in one burst so loading does
+	 * not wait for several foreground frames before work begins. */
+	initial_async_budget = 4;
+	return (WorldChunkAsyncSubmitter::stream_chunks_async(*this, stream_radius,
+			initial_async_budget, generated));
 }
 
 void WorldChunkStreamer::handle_recenter() noexcept
@@ -106,19 +127,64 @@ int32_t WorldChunkStreamer::update(int32_t generation_budget,
 {
 	int32_t drain_error;
 	int32_t generated;
+	int32_t analytics_error;
 
 	this->stream_frame_++;
 	if (center_changed)
+	{
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+		std::fprintf(stderr,
+			"[WorldGen] recenter center=(%d,%d) previous=(%d,%d)\n",
+			this->world_.center_chunk_x, this->world_.center_chunk_z,
+			this->world_.chunk_index_center_x,
+			this->world_.chunk_index_center_z);
+	#endif
 		this->handle_recenter();
+	}
+	analytics_error = RuntimeAnalytics::begin_scope(
+		RuntimeAnalyticsScope::WORLD_STREAM_DRAIN);
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: stream drain scope start failed (%d)\n",
+			analytics_error);
 	drain_error = WorldGenerationResultCommitter::drain(*this, this->world_);
+	analytics_error = RuntimeAnalytics::end_scope();
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: stream drain scope end failed (%d)\n",
+			analytics_error);
 	if (drain_error != FT_ERR_SUCCESS)
 		return (drain_error);
+	/* Startup deliberately seeds only the minimum playable ring.  Rebuild the
+	 * candidate set after draining old results when the active render distance
+	 * grows, otherwise the persistent async submitter would keep scanning the
+	 * startup-sized list forever. */
+	if (this->stream_candidates_radius_ != stream_radius)
+	{
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+		std::fprintf(stderr,
+			"[WorldGen] stream radius changed old=%d new=%d\n",
+			this->stream_candidates_radius_, stream_radius);
+	#endif
+		WorldChunkCandidateScanner::prepare_stream_candidates(*this,
+			stream_radius);
+	}
 	generated = 0;
 	if (generation_budget >= WorldCoordinates::CHUNK_COUNT)
 		return (this->stream_full_sync(stream_radius, generation_budget,
 				&generated));
-	return (this->dispatch_incremental_stream(stream_radius, generation_budget,
-			&generated));
+	analytics_error = RuntimeAnalytics::begin_scope(
+		RuntimeAnalyticsScope::WORLD_STREAM_DISPATCH);
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: stream dispatch scope start failed (%d)\n",
+			analytics_error);
+	{
+		int32_t result = this->dispatch_incremental_stream(stream_radius,
+			generation_budget, &generated);
+		analytics_error = RuntimeAnalytics::end_scope();
+		if (analytics_error != FT_ERR_SUCCESS)
+			std::fprintf(stderr, "Analytics: stream dispatch scope end failed (%d)\n",
+				analytics_error);
+		return (result);
+	}
 }
 
 int32_t WorldChunkStreamer::stream_last_error() const noexcept
@@ -213,6 +279,27 @@ int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk) noexcept
 	if (error_code == FT_ERR_SUCCESS)
 		chunk.pending_mesh_request_id = request_id;
 	return (error_code);
+}
+
+void WorldChunkStreamer::mark_neighbor_remeshes(int32_t chunk_x,
+	int32_t chunk_z) noexcept
+{
+	const int32_t coordinates[5][2] = {{chunk_x, chunk_z}, {chunk_x - 1,
+		chunk_z}, {chunk_x + 1, chunk_z}, {chunk_x, chunk_z - 1}, {chunk_x,
+		chunk_z + 1}};
+	int32_t index;
+	WorldChunk *chunk;
+
+	index = 0;
+	while (index < 5)
+	{
+		chunk = this->world_.find_chunk_mutable(coordinates[index][0],
+				coordinates[index][1]);
+		if (chunk != nullptr)
+			chunk->mesh_dirty = true;
+		index += 1;
+	}
+	return ;
 }
 
 int32_t WorldChunkStreamer::queue_neighbor_remeshes(int32_t chunk_x,

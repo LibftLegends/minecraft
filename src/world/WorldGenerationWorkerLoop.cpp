@@ -1,4 +1,5 @@
 #include "../../src/world/WorldGenerationWorkerLoop.hpp"
+#include <chrono>
 
 WorldGenerationWorkerLoop::WorldGenerationWorkerLoop()
 {
@@ -55,19 +56,26 @@ void WorldGenerationWorkerLoop::run(WorldGenerationPipeline &pipeline) noexcept
 				return ;
 			request = std::move(pipeline.requests_.front());
 			pipeline.requests_.pop_front();
+			pipeline.active_requests_.fetch_add(1U);
 		}
 		is_remesh = request->operation == WorldGenerationPipeline::WorldGenerationOperation::REMESH;
 		result = WorldGenerationWorkerLoop::process_request(pipeline,
 				std::move(request));
 		if (is_remesh)
 			pipeline.remesh_in_flight_.fetch_sub(1U);
+		pipeline.active_requests_.fetch_sub(1U);
 		if (result == nullptr)
 			continue ;
 		{
 			std::lock_guard<std::mutex> lock(pipeline.mutex_);
 
 			if (!pipeline.stopping_)
+			{
+				result->completed_at_nanoseconds = static_cast<uint64_t>(
+					std::chrono::duration_cast<std::chrono::nanoseconds>(
+						std::chrono::steady_clock::now().time_since_epoch()).count());
 				pipeline.results_.push_back(std::move(result));
+			}
 		}
 	}
 }

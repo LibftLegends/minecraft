@@ -30,6 +30,7 @@ class ApplicationValidator
 	static int validate_voxel_configuration();
 	static int validate_world_revision();
 	static int validate_async_generation();
+	static int validate_all();
 };
 
 #endif

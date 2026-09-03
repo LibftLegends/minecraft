@@ -1,14 +1,26 @@
 #include "../../src/gpur/GpuChunkMesh.hpp"
 
 GpuChunkMesh::GpuChunkMesh() : _solid_vao(0), _water_vao(0), _vbo(0),
-	_solid_ebo(0), _water_ebo(0), _uploaded_revision(0U), _solid_index_count(0),
-	_water_index_count(0), _gpu_bytes(0U)
+	_solid_ebo(0), _water_ebo(0), _uploaded_chunk_x(0), _uploaded_chunk_z(0),
+	_uploaded_voxel_revision(0U), _uploaded_revision(0U),
+	_has_uploaded_geometry(false),
+#if defined(LIBFT_ENABLE_ANALYTICS)
+	_uploaded_min_y(0), _uploaded_max_y(0),
+#endif
+	_solid_index_count(0), _water_index_count(0),
+	_gpu_bytes(0U)
 {
 }
 
 GpuChunkMesh::GpuChunkMesh(const GpuChunkMesh &other) : _solid_vao(0),
 	_water_vao(0), _vbo(0), _solid_ebo(0), _water_ebo(0),
-	_uploaded_revision(0U), _solid_index_count(0), _water_index_count(0),
+	_uploaded_chunk_x(0), _uploaded_chunk_z(0), _uploaded_voxel_revision(0U),
+	_uploaded_revision(0U), _has_uploaded_geometry(false),
+#if defined(LIBFT_ENABLE_ANALYTICS)
+	_uploaded_min_y(0), _uploaded_max_y(0),
+#endif
+	_solid_index_count(0),
+	_water_index_count(0),
 	_gpu_bytes(0U)
 {
 	(void)other;
@@ -35,8 +47,8 @@ void GpuChunkMesh::alloc_buffers()
 }
 
 void GpuChunkMesh::upload_geometry(const chunk_mesh &mesh,
-	const std::vector<uint32_t> &solid_indices,
-	const std::vector<uint32_t> &water_indices)
+	const ft_vector<uint32_t> &solid_indices,
+	const ft_vector<uint32_t> &water_indices)
 {
 	const size_t	vertex_bytes = mesh.vertices.size()
 			* sizeof(chunk_mesh_vertex);
@@ -51,12 +63,12 @@ void GpuChunkMesh::upload_geometry(const chunk_mesh &mesh,
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _solid_ebo);
 	glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(solid_bytes),
 		solid_bytes > 0U
-			? static_cast<const void *>(solid_indices.data()) : nullptr,
+			? static_cast<const void *>(solid_indices.begin()) : nullptr,
 		GL_STATIC_DRAW);
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _water_ebo);
 	glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(water_bytes),
 		water_bytes > 0U
-			? static_cast<const void *>(water_indices.data()) : nullptr,
+			? static_cast<const void *>(water_indices.begin()) : nullptr,
 		GL_STATIC_DRAW);
 	_gpu_bytes = vertex_bytes + solid_bytes + water_bytes;
 }
@@ -78,26 +90,16 @@ void GpuChunkMesh::setup_attributes()
 	glEnableVertexAttribArray(3);
 }
 
-void GpuChunkMesh::sync(const chunk_mesh &mesh, uint64_t revision)
+void GpuChunkMesh::sync(const chunk_mesh &mesh, uint64_t revision,
+	int32_t chunk_x, int32_t chunk_z, uint64_t voxel_revision)
 {
-	uint32_t	vertex_index;
-
-	if (_solid_vao != 0 && revision == _uploaded_revision)
+	if (_solid_vao != 0 && revision == _uploaded_revision
+		&& chunk_x == _uploaded_chunk_x && chunk_z == _uploaded_chunk_z
+		&& voxel_revision == _uploaded_voxel_revision)
 		return ;
 	if (_solid_vao == 0)
 		alloc_buffers();
-	std::vector<uint32_t> solid_indices;
-	std::vector<uint32_t> water_indices;
-	solid_indices.reserve(mesh.indices.size());
-	for (size_t index = 0; index < mesh.indices.size(); ++index)
-	{
-		vertex_index = mesh.indices[index];
-		if (mesh.vertices[vertex_index].block_id == VOXEL_GENERATOR_WATER_BLOCK)
-			water_indices.push_back(vertex_index);
-		else
-			solid_indices.push_back(vertex_index);
-	}
-	upload_geometry(mesh, solid_indices, water_indices);
+	upload_geometry(mesh, mesh.solid_indices, mesh.water_indices);
 	glBindVertexArray(_solid_vao);
 	glBindBuffer(GL_ARRAY_BUFFER, _vbo);
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _solid_ebo);
@@ -107,9 +109,25 @@ void GpuChunkMesh::sync(const chunk_mesh &mesh, uint64_t revision)
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _water_ebo);
 	setup_attributes();
 	glBindVertexArray(0);
+	_uploaded_chunk_x = chunk_x;
+	_uploaded_chunk_z = chunk_z;
+	_uploaded_voxel_revision = voxel_revision;
 	_uploaded_revision = revision;
-	_solid_index_count = static_cast<int32_t>(solid_indices.size());
-	_water_index_count = static_cast<int32_t>(water_indices.size());
+	_has_uploaded_geometry = true;
+#if defined(LIBFT_ENABLE_ANALYTICS)
+	if (mesh.has_occupied_bounds)
+	{
+		_uploaded_min_y = mesh.occupied_bounds.minimum_y;
+		_uploaded_max_y = mesh.occupied_bounds.maximum_y;
+	}
+	else
+	{
+		_uploaded_min_y = 0;
+		_uploaded_max_y = 0;
+	}
+#endif
+	_solid_index_count = static_cast<int32_t>(mesh.solid_indices.size());
+	_water_index_count = static_cast<int32_t>(mesh.water_indices.size());
 }
 
 void GpuChunkMesh::draw_solid() const
@@ -144,9 +162,32 @@ void GpuChunkMesh::destroy()
 		_water_ebo = 0;
 	}
 	_uploaded_revision = 0U;
+	_uploaded_chunk_x = 0;
+	_uploaded_chunk_z = 0;
+	_uploaded_voxel_revision = 0U;
+	_has_uploaded_geometry = false;
+#if defined(LIBFT_ENABLE_ANALYTICS)
+	_uploaded_min_y = 0;
+	_uploaded_max_y = 0;
+#endif
 	_solid_index_count = 0;
 	_water_index_count = 0;
 	_gpu_bytes = 0U;
+}
+
+void GpuChunkMesh::invalidate()
+{
+	_uploaded_chunk_x = 0;
+	_uploaded_chunk_z = 0;
+	_uploaded_voxel_revision = 0U;
+	_uploaded_revision = 0U;
+	_has_uploaded_geometry = false;
+	_solid_index_count = 0;
+	_water_index_count = 0;
+#if defined(LIBFT_ENABLE_ANALYTICS)
+	_uploaded_min_y = 0;
+	_uploaded_max_y = 0;
+#endif
 }
 
 bool GpuChunkMesh::has_geometry() const
@@ -154,7 +195,46 @@ bool GpuChunkMesh::has_geometry() const
 	return (_solid_index_count > 0 || _water_index_count > 0);
 }
 
+bool GpuChunkMesh::has_solid_geometry() const
+{
+	return (_solid_index_count > 0);
+}
+
+bool GpuChunkMesh::has_water_geometry() const
+{
+	return (_water_index_count > 0);
+}
+
+bool GpuChunkMesh::needs_sync(uint64_t revision, int32_t chunk_x,
+	int32_t chunk_z, uint64_t voxel_revision) const
+{
+	return (!_has_uploaded_geometry || _solid_vao == 0
+		|| _uploaded_revision != revision
+		|| _uploaded_chunk_x != chunk_x || _uploaded_chunk_z != chunk_z
+		|| _uploaded_voxel_revision != voxel_revision);
+}
+
 size_t GpuChunkMesh::gpu_bytes() const
 {
 	return (_gpu_bytes);
 }
+
+#if defined(LIBFT_ENABLE_ANALYTICS)
+bool GpuChunkMesh::diagnostics_identity_matches(uint64_t revision,
+	int32_t chunk_x, int32_t chunk_z, uint64_t voxel_revision) const
+{
+	return (_has_uploaded_geometry && _uploaded_revision == revision
+		&& _uploaded_chunk_x == chunk_x && _uploaded_chunk_z == chunk_z
+		&& _uploaded_voxel_revision == voxel_revision);
+}
+
+int32_t GpuChunkMesh::diagnostics_min_y() const
+{
+	return (_uploaded_min_y);
+}
+
+int32_t GpuChunkMesh::diagnostics_max_y() const
+{
+	return (_uploaded_max_y);
+}
+#endif

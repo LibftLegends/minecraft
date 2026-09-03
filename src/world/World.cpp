@@ -16,6 +16,7 @@ World::World() : chunk_streamer_storage_(new WorldChunkStreamer(*this)),
 	voxel_default_generation_config(this->voxel_config);
 	this->voxel_generation_started = false;
 	this->current_tick = 0U;
+	this->geometry_revision = 1U;
 	this->clear_chunk_index();
 }
 World::World(const World &other) : chunk_streamer_storage_(new WorldChunkStreamer(*this)),
@@ -23,6 +24,7 @@ World::World(const World &other) : chunk_streamer_storage_(new WorldChunkStreame
 	chunk_streamer(*chunk_streamer_storage_.get()),
 	revision_manager(*revision_manager_storage_.get())
 {
+	this->geometry_revision = 1U;
 	(void)other;
 }
 
@@ -43,6 +45,13 @@ void World::copy_seed(const char *seed_value)
 		seed_value = "";
 	std::strncpy(this->seed, seed_value, sizeof(this->seed) - 1U);
 	this->seed[sizeof(this->seed) - 1U] = '\0';
+}
+
+void World::mark_geometry_changed() noexcept
+{
+	this->geometry_revision += 1U;
+	if (this->geometry_revision == 0U)
+		this->geometry_revision = 1U;
 }
 
 void World::clear_chunk_index()
@@ -118,11 +127,23 @@ int32_t World::seed_first_chunk_and_stream()
 			this->voxel_context.config());
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
+	/* Keep the initial synchronous load on the same renderer identity scheme
+	 * as asynchronous stream commits. The world revision identifies the
+	 * published geometry, rather than the storage slot's local history. */
+	this->chunks[0].mesh_revision = this->geometry_revision;
 	this->loaded_chunk_count = 1;
 	this->rebuild_chunk_index();
-	initial_radius = WorldCoordinates::render_distance_to_chunk_radius(this->active_render_distance);
+	/* Startup must seed only the playable envelope. The first foreground update
+	 * expands the stream after loading, so initializing the full render-distance
+	 * ring here only floods the worker queue and delays the playable chunks. */
+	initial_radius = WorldCoordinates::render_distance_to_chunk_radius(
+		WorldCoordinates::MIN_RENDER_DISTANCE);
 	initial_generated = 0;
-	return (this->chunk_streamer.seed_initial_stream(initial_radius, 64,
+	/* The center chunk is already synchronously initialized above. Keep the
+	 * rest of the first visible ring on the persistent generation workers so
+	 * World::initialize() can return and the loading screen can report real
+	 * progress instead of appearing frozen during a large synchronous burst. */
+	return (this->chunk_streamer.seed_initial_stream(initial_radius, 1,
 			&initial_generated));
 }
 
@@ -131,11 +152,15 @@ int32_t World::initialize(const char *seed_value,
 {
 	int32_t	error_code;
 
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	std::fprintf(stderr, "World initialize: reset\n");
+	#endif
 	this->destroy();
 	this->chunk_count = WorldCoordinates::CHUNK_COUNT;
 	this->loaded_chunk_count = 0;
 	this->center_chunk_x = 0;
 	this->center_chunk_z = 0;
+	this->mark_geometry_changed();
 	this->active_render_distance = WorldCoordinates::REQUIRED_VISIBLE_DISTANCE;
 	this->clear_chunk_index();
 	this->copy_seed(seed_value);
@@ -149,11 +174,21 @@ int32_t World::initialize(const char *seed_value,
 			this->voxel_config);
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	std::fprintf(stderr, "World initialize: voxel context ready\n");
+	#endif
 	error_code = this->chunk_streamer.initialize_pipeline();
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	std::fprintf(stderr, "World initialize: pipeline ready\n");
+	#endif
 	this->voxel_generation_started = true;
 	error_code = this->seed_first_chunk_and_stream();
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	std::fprintf(stderr, "World initialize: initial stream returned %d\n",
+		error_code);
+	#endif
 	if (error_code != FT_ERR_SUCCESS)
 		this->destroy();
 	return (error_code);
@@ -198,6 +233,7 @@ void World::destroy()
     {
         std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
         this->world_epoch_ += 1U;
+        this->mark_geometry_changed();
     }
     (void)this->generation_pipeline_.destroy();
     std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);

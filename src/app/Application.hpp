@@ -38,6 +38,7 @@ class Application
 	static int run_game(ApplicationOptions &options,
 		LaunchSettings &launch_settings,
 		const RenderDistanceStrategy &strategy);
+	static int run_worldgen_probe();
 };
 
 #endif

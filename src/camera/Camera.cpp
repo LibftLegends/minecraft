@@ -52,7 +52,11 @@ void Camera::initialize()
 {
 	this->x = 0.0;
 	this->y = 78.62;
-	this->z = -8.0;
+	/* World startup seeds the origin chunk before the player is placed. Keep
+	 * the initial spawn query inside that seeded chunk; starting at -8 put the
+	 * player in chunk -1, forcing the first async batch to be invalidated and
+	 * requeued during loading. */
+	this->z = 0.0;
 	this->yaw = 0.0;
 	this->pitch = 0.0;
 	this->speed = 4.0;

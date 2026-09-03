@@ -82,6 +82,12 @@ class World
 
 	struct							StreamDiagnostics
 	{
+		size_t						playable_failed_count;
+		size_t						playable_required_count;
+		size_t						playable_drawable_count;
+		size_t						active_generation_count;
+		size_t					deferred_edit_count;
+		size_t					deferred_edit_cursor;
 		uint64_t					frame;
 		uint64_t					progress_frame;
 		size_t						candidate_count;
@@ -89,6 +95,7 @@ class World
 		size_t						pending_count;
 		size_t						retryable_count;
 		size_t						failed_count;
+		uint64_t					oldest_result_age_nanoseconds;
 		uint64_t					oldest_pending_age;
 		int32_t						last_error;
 	};
@@ -108,6 +115,7 @@ class World
 	voxel_generation_context		voxel_context;
 	bool							voxel_generation_started;
 	uint64_t						current_tick;
+	uint64_t						geometry_revision;
 	WorldEditHistory				edit_history;
 	ft_uniqueptr<WorldChunkStreamer> chunk_streamer_storage_;
 	ft_uniqueptr<WorldRevisionManager> revision_manager_storage_;
@@ -122,6 +130,7 @@ class World
 	int32_t initialize(const char *seed_value);
 	int32_t initialize(const char *seed_value,
 		const char *voxel_config_file_path);
+	void mark_geometry_changed() noexcept;
 	void set_voxel_config(const voxel_generation_config &config);
 	const voxel_generation_config &voxel_generation_settings() const;
 	int32_t load_voxel_config(const char *file_path);

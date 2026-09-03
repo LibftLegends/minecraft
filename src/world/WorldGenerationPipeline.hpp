@@ -55,6 +55,9 @@ class WorldGenerationPipeline
 		uint32_t					configuration_signature;
 		uint32_t					stage_mask;
 		uint64_t					voxel_revision;
+		uint64_t					completed_at_nanoseconds;
+		uint64_t					generation_duration_nanoseconds;
+		uint64_t					mesh_duration_nanoseconds;
 		int32_t						chunk_x;
 		int32_t						chunk_z;
 		WorldGenerationOperation	operation;
@@ -108,7 +111,9 @@ class WorldGenerationPipeline
 	void cancel_queued() noexcept;
 	std::size_t queued_count() const noexcept;
 	std::size_t completed_count() const noexcept;
+	std::size_t active_count() const noexcept;
 	std::size_t remesh_in_flight_count() const noexcept;
+	uint64_t oldest_completed_result_age_nanoseconds() const noexcept;
 	bool is_initialized() const noexcept;
 
 	std::deque<std::unique_ptr<Request>> requests_;
@@ -117,6 +122,7 @@ class WorldGenerationPipeline
 	std::condition_variable condition_;
 	std::atomic<uint64_t> pipeline_epoch_;
 	std::atomic<std::size_t> remesh_in_flight_;
+	std::atomic<std::size_t> active_requests_;
 	bool							stopping_;
 
   private:

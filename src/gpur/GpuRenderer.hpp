@@ -10,8 +10,6 @@
 class GpuRenderer
 {
   public:
-	using MegaVertex = GpuWorldRenderer::MegaVertex;
-
 	GpuRenderer();
 	GpuRenderer(const GpuRenderer &other);
 	~GpuRenderer();

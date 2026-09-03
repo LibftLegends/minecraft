@@ -11,6 +11,10 @@ class ApplicationOptions
 	bool perf_headless_mode;
 	bool perf_move_mode;
 	bool perf_boost_mode;
+	bool analytics_no_exporter;
+	bool analytics_no_instrumentation;
+	bool auto_start;
+	bool worldgen_probe_mode;
 	bool validate_camera_speed_mode;
 	bool validate_collision_mode;
 	bool validate_block_edit_mode;
@@ -21,6 +25,7 @@ class ApplicationOptions
 	bool validate_voxel_configuration_mode;
 	bool validate_world_revision_mode;
 	bool validate_async_generation_mode;
+	bool validate_all_mode;
 	double perf_seconds_limit;
 
 	ApplicationOptions();

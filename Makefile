@@ -73,7 +73,7 @@ LIBFT_PARENT_SELECTED_ARCHIVES := $(LIBFT_GLOBAL_RELEASE_ARCHIVES) \
         $(LIBFT_PARENT_GLOBAL_DEBUG_TARGET)
 
 define LIBFT_PARENT_ARCHIVE_RULE
-$(1): $(2) $(LIBFT_GLOBAL_ARCHIVE_CONFIG_INPUTS)
+$(1): $(2) $(LIBFT_GLOBAL_ARCHIVE_CONFIG_INPUTS) Libft/mk/global_graph.mk
 	@if [ "$$(BUILD_PLAN_MODE)" = "1" ]; then printf '%s\n' "__BUILD_PLAN__|archive|libft|Full_Libft|$(1)"; else printf '\033[1;35m[LIBFT] Archiving %s\033[0m\n' "$(1)"; fi
 	@$(MKDIR) $(dir $$@)
 	@$(RM) $$@.tmp
@@ -113,6 +113,12 @@ analytics:
 		TARGET=ft_vox_analytics$(EXE_EXT) internal-all
 	@test -f "ft_vox_analytics$(EXE_EXT)" && printf '\033[1;35m[MINECRAFT][Analytics] Ready: %s\033[0m\n' "ft_vox_analytics$(EXE_EXT)"
 
+validate-worldgen-probe: normal
+	@./ft_vox$(EXE_EXT) --worldgen-probe
+
+validate-worldgen-probe-analytics: analytics
+	@./ft_vox_analytics$(EXE_EXT) --worldgen-probe --analytics-no-exporter
+
 plan:
 	@sh Libft/mk/print_build_plan.sh "$(MAKE)" internal-all
 
@@ -149,7 +155,7 @@ submodule_update:
 	@$(SUBMODULE_UPDATE_CMD)
 
 debug:
-	@sh Libft/mk/run_build_with_progress.sh "$(MAKE)" internal-debug
+	@DEBUG=1 sh Libft/mk/run_build_with_progress.sh "$(MAKE)" internal-debug
 
 internal-debug: $(NAME_DEBUG)
 
@@ -214,16 +220,10 @@ re:
 	@$(MAKE) all
 
 test: tests
-	@./$(TEST_NAME) --validate-camera-speed
-	@./$(TEST_NAME) --validate-collision
-	@./$(TEST_NAME) --validate-block-edit
-	@./$(TEST_NAME) --validate-visible-distance
-	@./$(TEST_NAME) --validate-terrain-determinism
-	@./$(TEST_NAME) --validate-world-scale
-	@./$(TEST_NAME) --validate-caves
-	@./$(TEST_NAME) --validate-terrain-configuration
-	@./$(TEST_NAME) --validate-world-revision
-	@./$(TEST_NAME) --validate-async-generation
+	@./$(TEST_NAME) --validate-all
+
+validate-all: tests
+	@./$(TEST_NAME) --validate-all
 
 both: all debug
 
@@ -263,5 +263,6 @@ ci:
 	$(MAKE) ci-coverage
 
 .PHONY: all normal analytics plan internal-all dirs clean fclean re debug internal-debug both re_both tests internal-tests test lint coverage \
-        ci-build ci-test ci-lint ci-coverage ci submodule_init submodule_update \
-        ft_vox install_cobc tests_with_cobc
+	ci-build ci-test ci-lint ci-coverage ci submodule_init submodule_update \
+	validate-worldgen-probe validate-worldgen-probe-analytics \
+	ft_vox install_cobc tests_with_cobc

@@ -46,6 +46,7 @@ void WorldChunkCandidateScanner::prepare_stream_candidates(WorldChunkStreamer &s
 		return ;
 	streamer.stream_candidates_.clear();
 	streamer.stream_candidate_cursor_ = 0U;
+	streamer.stream_candidate_lookup_.clear();
 	streamer.stream_candidates_.reserve(static_cast<size_t>((stream_radius * 2
 				+ 1) * (stream_radius * 2 + 1)));
 	radius_sq = stream_radius * stream_radius;
@@ -64,6 +65,26 @@ void WorldChunkCandidateScanner::prepare_stream_candidates(WorldChunkStreamer &s
 	std::sort(streamer.stream_candidates_.begin(),
 		streamer.stream_candidates_.end(),
 		&WorldChunkCandidateScanner::candidate_less);
+	streamer.stream_candidate_lookup_.assign(static_cast<size_t>(
+			(stream_radius * 2 + 1) * (stream_radius * 2 + 1)), -1);
+	{
+		int32_t candidate_index;
+		int32_t lookup_width;
+		int32_t lookup_index;
+
+		candidate_index = 0;
+		lookup_width = stream_radius * 2 + 1;
+		while (candidate_index < static_cast<int32_t>(
+				streamer.stream_candidates_.size()))
+		{
+			lookup_index = (streamer.stream_candidates_[candidate_index].offset_z
+					+ stream_radius) * lookup_width
+				+ streamer.stream_candidates_[candidate_index].offset_x
+					+ stream_radius;
+			streamer.stream_candidate_lookup_[lookup_index] = candidate_index;
+			candidate_index += 1;
+		}
+	}
 	streamer.stream_candidates_radius_ = stream_radius;
 	streamer.stream_retryable_count_ = 0;
 	streamer.stream_relevance_epoch_ += 1U;
@@ -73,13 +94,30 @@ void WorldChunkCandidateScanner::prepare_stream_candidates(WorldChunkStreamer &s
 WorldChunkStreamer::StreamCandidate *WorldChunkCandidateScanner::find_stream_candidate(WorldChunkStreamer &streamer,
 	int32_t chunk_x, int32_t chunk_z) noexcept
 {
-	for (WorldChunkStreamer::StreamCandidate &candidate : streamer.stream_candidates_)
-	{
-		if (streamer.world_.center_chunk_x + candidate.offset_x == chunk_x
-			&& streamer.world_.center_chunk_z + candidate.offset_z == chunk_z)
-			return (&candidate);
-	}
-	return (nullptr);
+	int32_t offset_x;
+	int32_t offset_z;
+	int32_t width;
+	int32_t lookup_index;
+	int32_t candidate_index;
+
+	offset_x = chunk_x - streamer.world_.center_chunk_x;
+	offset_z = chunk_z - streamer.world_.center_chunk_z;
+	if (streamer.stream_candidates_radius_ < 0
+		|| offset_x < -streamer.stream_candidates_radius_
+		|| offset_x > streamer.stream_candidates_radius_
+		|| offset_z < -streamer.stream_candidates_radius_
+		|| offset_z > streamer.stream_candidates_radius_)
+		return (nullptr);
+	width = streamer.stream_candidates_radius_ * 2 + 1;
+	lookup_index = (offset_z + streamer.stream_candidates_radius_) * width
+		+ offset_x + streamer.stream_candidates_radius_;
+	if (lookup_index < 0 || lookup_index >= static_cast<int32_t>(
+			streamer.stream_candidate_lookup_.size()))
+		return (nullptr);
+	candidate_index = streamer.stream_candidate_lookup_[lookup_index];
+	if (candidate_index < 0)
+		return (nullptr);
+	return (&streamer.stream_candidates_[candidate_index]);
 }
 
 void WorldChunkCandidateScanner::remesh_loaded_neighbor(WorldChunkStreamer &streamer,
@@ -110,6 +148,11 @@ int32_t WorldChunkCandidateScanner::try_load_chunk_at(WorldChunkStreamer &stream
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
 	streamer.world_.loaded_chunk_count = streamer.world_.loaded_chunk_count + 1;
+	streamer.world_.mark_geometry_changed();
+	/* Synchronous and asynchronous publication must use the same monotonic
+	 * identity. A slot may be reused for the same coordinates before the
+	 * renderer observes the old contents. */
+	slot->mesh_revision = streamer.world_.geometry_revision;
 	streamer.world_.register_chunk_index(*slot);
 	WorldChunkCandidateScanner::remesh_loaded_neighbor(streamer, chunk_x - 1,
 		chunk_z);

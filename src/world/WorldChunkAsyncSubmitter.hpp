@@ -21,7 +21,7 @@ class WorldChunkAsyncSubmitter
 	static bool process_async_candidate(WorldChunkStreamer &streamer,
 		WorldChunkStreamer::StreamCandidate &candidate, int32_t *submitted,
 		int32_t budget) noexcept;
-	static void submit_dirty_remeshes(WorldChunkStreamer &streamer) noexcept;
+	static int32_t submit_dirty_remeshes(WorldChunkStreamer &streamer) noexcept;
 };
 
 #endif

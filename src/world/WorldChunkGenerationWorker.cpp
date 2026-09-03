@@ -1,4 +1,5 @@
 #include "../../src/world/WorldChunkGenerationWorker.hpp"
+#include <chrono>
 
 WorldChunkGenerationWorker::WorldChunkGenerationWorker()
 {
@@ -23,9 +24,12 @@ int32_t WorldChunkGenerationWorker::initialize_chunk_for_generation(WorldChunk &
 	int32_t chunk_x, int32_t chunk_z, const char *seed,
 	voxel_generation_config &config, uint32_t stage_mask,
 	std::vector<WorldGenerationPipeline::WorldDeferredBlockEdit> &deferred_edits,
-	const WorldGenerationPipeline::WorldChunkSnapshot *source_snapshot) noexcept
+	const WorldGenerationPipeline::WorldChunkSnapshot *source_snapshot,
+	uint64_t *generation_duration_nanoseconds,
+	uint64_t *mesh_duration_nanoseconds) noexcept
 {
 	int32_t error_code;
+	std::chrono::steady_clock::time_point phase_start;
 
 	chunk.chunk_x = chunk_x;
 	chunk.chunk_z = chunk_z;
@@ -43,10 +47,20 @@ int32_t WorldChunkGenerationWorker::initialize_chunk_for_generation(WorldChunk &
 		(void)chunk.chunk.destroy();
 		return (FT_ERR_NO_MEMORY);
 	}
+	phase_start = std::chrono::steady_clock::now();
 	error_code = voxel_generate_chunk_with_stage_mask(chunk.chunk,
 			chunk.world_x, chunk.world_z, seed, config, stage_mask);
+	if (generation_duration_nanoseconds != nullptr)
+		*generation_duration_nanoseconds = static_cast<uint64_t>(
+			std::chrono::duration_cast<std::chrono::nanoseconds>(
+				std::chrono::steady_clock::now() - phase_start).count());
+	phase_start = std::chrono::steady_clock::now();
 	if (error_code == FT_ERR_SUCCESS)
 		error_code = chunk_mesh_generate_from_chunk(chunk.mesh, chunk.chunk);
+	if (mesh_duration_nanoseconds != nullptr)
+		*mesh_duration_nanoseconds = static_cast<uint64_t>(
+			std::chrono::duration_cast<std::chrono::nanoseconds>(
+				std::chrono::steady_clock::now() - phase_start).count());
 	if (error_code != FT_ERR_SUCCESS)
 	{
 		(void)chunk_mesh_destroy(chunk.mesh);
@@ -75,6 +89,8 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 	result->chunk_z = request.chunk_z;
 	result->operation = request.operation;
 	result->error_code = FT_ERR_SUCCESS;
+	result->generation_duration_nanoseconds = 0U;
+	result->mesh_duration_nanoseconds = 0U;
 	result->chunk.reset(new (std::nothrow) WorldChunk());
 	if (result->chunk == nullptr)
 	{
@@ -84,7 +100,8 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 	result->error_code = WorldChunkGenerationWorker::initialize_chunk_for_generation(*result->chunk,
 			request.chunk_x, request.chunk_z, request.seed.c_str(),
 			request.config, request.stage_mask, request.deferred_edits,
-			request.snapshot.get());
+			request.snapshot.get(), &result->generation_duration_nanoseconds,
+			&result->mesh_duration_nanoseconds);
 	if (result->error_code != FT_ERR_SUCCESS)
 	{
 		result->chunk.reset();
@@ -131,6 +148,8 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 	result->chunk_z = request.chunk_z;
 	result->operation = request.operation;
 	result->error_code = FT_ERR_SUCCESS;
+	result->generation_duration_nanoseconds = 0U;
+	result->mesh_duration_nanoseconds = 0U;
 	result->mesh.reset(new (std::nothrow) chunk_mesh());
 	if (result->mesh == nullptr)
 	{

@@ -1,5 +1,9 @@
 #include "../../src/app/ApplicationBootstrap.hpp"
 
+#if defined(LIBFT_ENABLE_ANALYTICS)
+# include <cstdio>
+#endif
+
 ApplicationBootstrap::ApplicationBootstrap()
 {
 }
@@ -21,6 +25,8 @@ ApplicationBootstrap &ApplicationBootstrap::operator=(const ApplicationBootstrap
 
 int ApplicationBootstrap::run_validators(const ApplicationOptions &options)
 {
+	if (options.validate_all_mode)
+		return (ApplicationValidator::validate_all());
 	if (options.validate_camera_speed_mode)
 		return (ApplicationValidator::validate_camera_speed());
 	if (options.validate_collision_mode)
@@ -78,7 +84,13 @@ int ApplicationBootstrap::setup_window(ApplicationWindow &window,
 	VoxelRenderer &renderer, const LaunchSettings &launch_settings)
 {
 	int32_t	error_code;
+#if defined(LIBFT_ENABLE_ANALYTICS)
+	bool	gpu_initialised;
+#endif
 
+	#if defined(LIBFT_ENABLE_ANALYTICS)
+	gpu_initialised = false;
+	#endif
 	if (window.initialize(false, launch_settings.resolution_width(),
 			launch_settings.resolution_height(), launch_settings.fullscreen,
 			true) != 0)
@@ -92,9 +104,19 @@ int ApplicationBootstrap::setup_window(ApplicationWindow &window,
 		{
 			window.destroy();
 			return (ApplicationError::fail("GPU renderer initialization",
-					error_code));
+				 error_code));
 		}
+		#if defined(LIBFT_ENABLE_ANALYTICS)
+		gpu_initialised = true;
+		#endif
 	}
+	#if defined(LIBFT_ENABLE_ANALYTICS)
+	std::fprintf(stderr,
+		"[Analytics] renderer_backend=%s gpu_initialization=%s resolution=%dx%d\n",
+		gpu_initialised ? "gpu" : "software",
+		gpu_initialised ? "succeeded" : "not_requested",
+		launch_settings.resolution_width(), launch_settings.resolution_height());
+	#endif
 	renderer.preload_assets();
 	window.set_cursor_visible(true);
 	return (0);

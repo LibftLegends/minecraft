@@ -19,7 +19,9 @@ class WorldChunkGenerationWorker
 		int32_t chunk_x, int32_t chunk_z, const char *seed,
 		voxel_generation_config &config, uint32_t stage_mask,
 		std::vector<WorldGenerationPipeline::WorldDeferredBlockEdit> &deferred_edits,
-		const WorldGenerationPipeline::WorldChunkSnapshot *source_snapshot) noexcept;
+		const WorldGenerationPipeline::WorldChunkSnapshot *source_snapshot,
+		uint64_t *generation_duration_nanoseconds,
+		uint64_t *mesh_duration_nanoseconds) noexcept;
 	static std::unique_ptr<WorldGenerationPipeline::Result> finish_generation_result(std::unique_ptr<WorldGenerationPipeline::Result> result,
 		WorldGenerationPipeline::Request &request) noexcept;
 };

@@ -49,10 +49,18 @@ void WorldRegenerationResultApplier::apply_chunk(WorldChunkStreamer &streamer,
 	chunk->voxel_revision += 1U;
 	chunk->pending_mesh_request_id = 0U;
 	chunk->mesh_dirty = true;
+	world.mark_geometry_changed();
 	world.revision_manager.record_regeneration_success();
-	(void)streamer.queue_neighbor_remeshes(result.chunk_x, result.chunk_z);
+	streamer.mark_neighbor_remeshes(result.chunk_x, result.chunk_z);
 	streamer.deferred_edits_.insert(streamer.deferred_edits_.end(),
 		result.deferred_edits.begin(), result.deferred_edits.end());
+	if (!result.deferred_edits.empty())
+	{
+		if (streamer.deferred_edits_sorted_)
+			streamer.deferred_sorted_end_ = streamer.deferred_edits_.size()
+				- result.deferred_edits.size();
+		streamer.deferred_edits_sorted_ = false;
+	}
 }
 
 int32_t WorldRegenerationResultApplier::commit(WorldChunkStreamer &streamer,

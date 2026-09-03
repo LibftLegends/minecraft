@@ -1,4 +1,6 @@
 #include "../../src/gpur/GpuWorldRenderer.hpp"
+#include "../../src/diagnostics/RuntimeAnalytics.hpp"
+#include <cstdio>
 
 GpuWorldRenderer::GpuWorldRenderer() : _sky_vao(0), _crosshair_vao(0),
 	_crosshair_vbo(0), _width(0), _height(0), _u_mvp(-1), _u_chunk_offset(-1),
@@ -91,7 +93,7 @@ bool GpuWorldRenderer::initialize(int width, int height, GLuint sky_vao,
 	if (!compile_shaders(shader_dir))
 		return (false);
 	cache_uniforms();
-	if (!_batch.initialize(0))
+	if (!_batch.initialize())
 		return (false);
 	const TextureAtlas &cpu_atlas = TextureAtlas::instance();
 	_atlas.upload(cpu_atlas);
@@ -156,6 +158,13 @@ void GpuWorldRenderer::draw_sky() const
 
 void GpuWorldRenderer::draw_crosshair() const
 {
+	int32_t analytics_error;
+
+	analytics_error = RuntimeAnalytics::begin_scope(
+		RuntimeAnalyticsScope::GPU_DRAW_CROSSHAIR);
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: crosshair scope start failed (%d)\n",
+			analytics_error);
 	glBindVertexArray(_crosshair_vao);
 	const float color[4] = {0.96f, 0.96f, 0.92f, 1.0f};
 	_crosshair_shader.use();
@@ -164,22 +173,87 @@ void GpuWorldRenderer::draw_crosshair() const
 	glDrawArrays(GL_LINES, 0, 4);
 	glEnable(GL_DEPTH_TEST);
 	glBindVertexArray(0);
+	analytics_error = RuntimeAnalytics::end_scope();
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: crosshair scope end failed (%d)\n",
+			analytics_error);
 }
 
 void GpuWorldRenderer::render(const Camera &camera, const World &world)
 {
 	float	mvp[16];
 	float	far_z;
+	int32_t analytics_error;
+#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	static bool startup_render_reported = false;
+#endif
 
+	analytics_error = RuntimeAnalytics::begin_scope(
+		RuntimeAnalyticsScope::GPU_CLEAR_SKY);
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: GPU clear scope start failed (%d)\n",
+			analytics_error);
 	glViewport(0, 0, _width, _height);
 	glClear(GL_DEPTH_BUFFER_BIT);
 	draw_sky();
+	analytics_error = RuntimeAnalytics::end_scope();
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: GPU clear scope end failed (%d)\n",
+			analytics_error);
 	far_z = static_cast<float>(world.active_render_distance) + 64.0f;
 	GpuMvpBuilder::build(mvp, camera, _width, _height, 0.08f, far_z);
+	analytics_error = RuntimeAnalytics::begin_scope(
+		RuntimeAnalyticsScope::GPU_BATCH_COLLECT);
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: GPU collect scope start failed (%d)\n",
+			analytics_error);
+#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	if (!startup_render_reported)
+		std::fprintf(stderr, "[Startup] GPU world: before batch collect\n");
+#endif
 	_batch.collect(camera, world, _width, _height);
+#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	if (!startup_render_reported)
+		std::fprintf(stderr, "[Startup] GPU world: after batch collect\n");
+#endif
+	analytics_error = RuntimeAnalytics::end_scope();
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: GPU collect scope end failed (%d)\n",
+			analytics_error);
+	analytics_error = RuntimeAnalytics::begin_scope(
+		RuntimeAnalyticsScope::GPU_SOLID_FLUSH);
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: GPU solid scope start failed (%d)\n",
+			analytics_error);
 	_world_shader.use();
+#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	if (!startup_render_reported)
+		std::fprintf(stderr, "[Startup] GPU world: before solid flush\n");
+#endif
 	_batch.flush_solid(0, _u_mvp, _u_chunk_offset, mvp, _atlas);
+#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	if (!startup_render_reported)
+		std::fprintf(stderr, "[Startup] GPU world: after solid flush\n");
+#endif
+	analytics_error = RuntimeAnalytics::end_scope();
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: GPU solid scope end failed (%d)\n",
+			analytics_error);
+	analytics_error = RuntimeAnalytics::begin_scope(
+		RuntimeAnalyticsScope::GPU_WATER_FLUSH);
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: GPU water scope start failed (%d)\n",
+			analytics_error);
 	_batch.flush_water(0, _u_mvp, _u_chunk_offset, mvp, _atlas);
+#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	if (!startup_render_reported)
+		std::fprintf(stderr, "[Startup] GPU world: after water flush\n");
+	startup_render_reported = true;
+#endif
+	analytics_error = RuntimeAnalytics::end_scope();
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: GPU water scope end failed (%d)\n",
+			analytics_error);
 	draw_crosshair();
 }
 

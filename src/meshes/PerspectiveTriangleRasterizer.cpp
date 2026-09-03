@@ -114,14 +114,11 @@ void PerspectiveTriangleRasterizer::write_pixel(uint32_t *pixel,
 	double &depth_entry, double inv_depth, double u, double v,
 	const TriangleTexture &texture)
 {
-	double	d;
-
 	if (inv_depth <= 0.0)
 		return ;
-	d = 1.0 / inv_depth;
-	if (d <= 0.0 || d >= depth_entry)
+	if (inv_depth <= depth_entry)
 		return ;
-	depth_entry = d;
+	depth_entry = inv_depth;
 	*pixel = RendererColor::shade_color(TextureAtlas::sample_triangle_texture(texture,
 				u / inv_depth, v / inv_depth), texture.shade);
 }

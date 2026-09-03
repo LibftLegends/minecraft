@@ -1,4 +1,5 @@
 #include "../../src/validators/CollisionValidator.hpp"
+#include <cmath>
 
 CollisionValidator::CollisionValidator()
 {
@@ -64,6 +65,78 @@ int CollisionValidator::test_wall(World &world, Camera &camera, Metrics &m)
 	return (0);
 }
 
+int CollisionValidator::test_raycast_tied_case(World &world, int32_t edge_x,
+	int32_t edge_y, int32_t edge_z, int32_t target_x, int32_t target_y,
+	int32_t target_z, double direction_x, double direction_y,
+	double direction_z, double origin_y, double max_distance)
+{
+	int32_t hit_x;
+	int32_t hit_y;
+	int32_t hit_z;
+	int32_t error_code;
+
+	hit_x = 0;
+	hit_y = 0;
+	hit_z = 0;
+	error_code = world.place_block_at(edge_x, edge_y, edge_z,
+		VOXEL_GENERATOR_STONE_BLOCK);
+	if (error_code != FT_ERR_SUCCESS)
+		return (1);
+	error_code = world.raycast_solid(0.1, origin_y,
+		0.1, direction_x, direction_y, direction_z, max_distance,
+		&hit_x, &hit_y, &hit_z);
+	if (error_code != FT_ERR_INVALID_ARGUMENT)
+	{
+		std::fprintf(stderr,
+			"collision: tied-boundary ray incorrectly hit edge (%d,%d,%d) "
+			"error=%d\n", hit_x, hit_y, hit_z, error_code);
+		if (world.delete_block_at(edge_x, edge_y, edge_z) != FT_ERR_SUCCESS)
+			return (1);
+		return (1);
+	}
+	if (world.delete_block_at(edge_x, edge_y, edge_z) != FT_ERR_SUCCESS)
+		return (1);
+	error_code = world.place_block_at(target_x, target_y, target_z,
+		VOXEL_GENERATOR_STONE_BLOCK);
+	if (error_code != FT_ERR_SUCCESS)
+		return (1);
+	error_code = world.raycast_solid(0.1, origin_y,
+		0.1, direction_x, direction_y, direction_z, max_distance,
+		&hit_x, &hit_y, &hit_z);
+	if (error_code != FT_ERR_SUCCESS || hit_x != target_x
+		|| hit_y != target_y || hit_z != target_z)
+	{
+		std::fprintf(stderr,
+			"collision: tied-boundary ray missed target error=%d "
+			"hit=(%d,%d,%d)\n", error_code, hit_x, hit_y, hit_z);
+		if (world.delete_block_at(target_x, target_y, target_z)
+			!= FT_ERR_SUCCESS)
+			return (1);
+		return (1);
+	}
+	if (world.delete_block_at(target_x, target_y, target_z) != FT_ERR_SUCCESS)
+		return (1);
+	return (0);
+}
+
+int CollisionValidator::test_raycast_tied_boundary(World &world)
+{
+	const double diagonal = 0.7071067811865475;
+	const double corner = 0.5773502691896258;
+
+	if (test_raycast_tied_case(world, 1, 250, 0, 1, 251, 0,
+			diagonal, diagonal, 0.0, 250.1, 2.0) != 0)
+		return (1);
+	if (test_raycast_tied_case(world, 1, 250, 0, 1, 250, 1,
+			diagonal, 0.0, diagonal, 250.1, 2.0) != 0)
+		return (1);
+	if (test_raycast_tied_case(world, 0, 251, 0, 0, 251, 1,
+			0.0, diagonal, diagonal, 250.1, 2.0) != 0)
+		return (1);
+	return (test_raycast_tied_case(world, 1, 250, 0, 1, 251, 1,
+			corner, corner, corner, 250.1, 2.5));
+}
+
 int CollisionValidator::validate() const
 {
 	World world;
@@ -76,6 +149,7 @@ int CollisionValidator::validate() const
 		return (ApplicationError::fail("collision world initialization",
 				error_code));
 	if (test_movement(world, camera, m) != 0 || test_wall(world, camera, m) != 0
+		|| test_raycast_tied_boundary(world) != 0
 		|| CollisionTerrainScenarios::test_step_climb(world, camera, m) != 0
 		|| CollisionTerrainScenarios::test_tunnel(world, camera, m) != 0
 		|| CollisionTerrainScenarios::test_drop(world, camera, m) != 0)

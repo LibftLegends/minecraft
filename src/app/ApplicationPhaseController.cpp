@@ -68,6 +68,10 @@ ApplicationPhaseController::Phase ApplicationPhaseController::tick_menu(Phase ph
 	}
 	if (session.is_ready_to_play() && ++loading_frames >= 30)
 	{
+		session.activate_configured_render_distance();
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+		std::fprintf(stderr, "World loading: playable area ready; entering game\n");
+	#endif
 		window.set_cursor_visible(false);
 		return (Phase::IN_GAME);
 	}

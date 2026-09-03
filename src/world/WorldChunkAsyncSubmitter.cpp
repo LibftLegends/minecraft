@@ -80,19 +80,35 @@ bool WorldChunkAsyncSubmitter::process_async_candidate(WorldChunkStreamer &strea
 			candidate, chunk_x, chunk_z, submitted, budget));
 }
 
-void WorldChunkAsyncSubmitter::submit_dirty_remeshes(WorldChunkStreamer &streamer) noexcept
+int32_t WorldChunkAsyncSubmitter::submit_dirty_remeshes(
+	WorldChunkStreamer &streamer) noexcept
 {
 	int32_t dirty_index;
+	int32_t scanned_count;
+	int32_t error_code;
+	const int32_t scan_budget = 64;
 
-	dirty_index = 0;
-	while (dirty_index < streamer.world_.chunk_count
+	if (streamer.world_.chunk_count <= 0)
+		return (FT_ERR_SUCCESS);
+	dirty_index = streamer.dirty_remesh_cursor_;
+	scanned_count = 0;
+	while (scanned_count < scan_budget
+		&& scanned_count < streamer.world_.chunk_count
 		&& streamer.generation_pipeline_.queued_count() < 8U)
 	{
 		if (streamer.world_.chunks[dirty_index].initialized
 			&& streamer.world_.chunks[dirty_index].mesh_dirty)
-			(void)streamer.queue_chunk_remesh(streamer.world_.chunks[dirty_index]);
-		dirty_index += 1;
+		{
+			error_code = streamer.queue_chunk_remesh(
+				streamer.world_.chunks[dirty_index]);
+			if (error_code != FT_ERR_SUCCESS && error_code != FT_ERR_FULL)
+				return (error_code);
+		}
+		dirty_index = (dirty_index + 1) % streamer.world_.chunk_count;
+		scanned_count += 1;
 	}
+	streamer.dirty_remesh_cursor_ = dirty_index;
+	return (FT_ERR_SUCCESS);
 }
 
 int32_t WorldChunkAsyncSubmitter::stream_chunks_async(WorldChunkStreamer &streamer,
@@ -118,6 +134,5 @@ int32_t WorldChunkAsyncSubmitter::stream_chunks_async(WorldChunkStreamer &stream
 				candidate, &submitted, budget))
 			break ;
 	}
-	WorldChunkAsyncSubmitter::submit_dirty_remeshes(streamer);
-	return (FT_ERR_SUCCESS);
+	return (WorldChunkAsyncSubmitter::submit_dirty_remeshes(streamer));
 }

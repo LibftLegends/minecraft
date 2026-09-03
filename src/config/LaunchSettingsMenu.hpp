@@ -42,7 +42,7 @@ class LaunchSettingsMenu
 		bool &should_exit);
 	static int render_frame(ApplicationWindow &window, GpuRenderer &renderer,
 		Image &img, const LaunchSettings &settings, int32_t selected_row,
-		std::vector<uint32_t> &pixels);
+		std::vector<uint32_t> &pixels, bool redraw);
 	static int run_loop(ApplicationWindow &window, GpuRenderer &renderer,
 		LaunchSettings &settings, int32_t width, int32_t height);
 };

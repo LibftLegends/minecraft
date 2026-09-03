@@ -24,6 +24,9 @@ class ChunkMeshRenderer
 	bool draw_mesh(ft_render_framebuffer &framebuffer,
 		std::vector<double> &depth_buffer, const Camera &camera,
 		const RenderCache &render_cache, const WorldChunk &world_chunk) const;
+	bool draw_mesh_visible(ft_render_framebuffer &framebuffer,
+		std::vector<double> &depth_buffer, const Camera &camera,
+		const RenderCache &render_cache, const WorldChunk &world_chunk) const;
 
   private:
 	PerspectiveTriangleRasterizer default_rasterizer;

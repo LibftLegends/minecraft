@@ -34,6 +34,11 @@ class CollisionValidator : public IValidator
   private:
 	static int test_movement(World &world, Camera &camera, Metrics &m);
 	static int test_wall(World &world, Camera &camera, Metrics &m);
+	static int test_raycast_tied_case(World &world, int32_t edge_x,
+		int32_t edge_y, int32_t edge_z, int32_t target_x, int32_t target_y,
+		int32_t target_z, double direction_x, double direction_y,
+		double direction_z, double origin_y, double max_distance);
+	static int test_raycast_tied_boundary(World &world);
 };
 
 # include "../../src/validators/CollisionTerrainScenarios.hpp"

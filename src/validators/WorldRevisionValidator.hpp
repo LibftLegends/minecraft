@@ -21,6 +21,9 @@ class WorldRevisionValidator : public IValidator
 	};
 
 	static int32_t initialize_world_with_edit(World &world) noexcept;
+	static int32_t wait_for_loaded_chunk(World &world, int32_t chunk_x,
+		int32_t chunk_z) noexcept;
+	static int32_t quiesce_stream_pipeline(World &world) noexcept;
 	static SelectionResults apply_selection_actions(World &world,
 		std::vector<World::RevisionPreviewEntry> &preview) noexcept;
 	static int32_t check_selection_results(const SelectionResults &results,

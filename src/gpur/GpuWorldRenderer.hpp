@@ -16,8 +16,6 @@
 class GpuWorldRenderer
 {
   public:
-	using MegaVertex = GpuGeometryBatch::Vertex;
-
 	GpuWorldRenderer();
 	GpuWorldRenderer(const GpuWorldRenderer &other);
 	~GpuWorldRenderer();

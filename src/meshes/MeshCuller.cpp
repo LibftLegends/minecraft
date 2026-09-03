@@ -1,4 +1,5 @@
 #include "../../src/meshes/MeshCuller.hpp"
+#include <cmath>
 
 MeshCuller::MeshCuller()
 {
@@ -101,7 +102,39 @@ bool MeshCuller::chunk_aabb_is_visible(const Camera &camera,
 bool MeshCuller::chunk_is_visible(const Camera &camera,
 	const WorldChunk &world_chunk, const RenderCache &cache)
 {
-	if (world_chunk.mesh.vertices.empty() == FT_TRUE)
+	double	closest_x;
+	double	closest_z;
+	double	distance_squared;
+	double	fallback_distance;
+
+	if (world_chunk.mesh.has_occupied_bounds == FT_FALSE)
 		return (false);
-	return (chunk_aabb_is_visible(camera, world_chunk, cache));
+	if (chunk_aabb_is_visible(camera, world_chunk, cache))
+		return (true);
+	/* Streaming must not make a newly generated nearby chunk disappear just
+	 * because a frustum plane is numerically conservative at a boundary. The
+	 * horizontal distance test is deliberately less selective, but it is a
+	 * safe fallback: loaded chunks near the player remain drawable and the
+	 * regular AABB test still handles the common path. */
+	closest_x = camera.x;
+	if (closest_x < static_cast<double>(world_chunk.world_x))
+		closest_x = static_cast<double>(world_chunk.world_x);
+	else if (closest_x > static_cast<double>(world_chunk.world_x
+		+ GAME_VOXEL_CHUNK_WIDTH))
+		closest_x = static_cast<double>(world_chunk.world_x
+			+ GAME_VOXEL_CHUNK_WIDTH);
+	closest_z = camera.z;
+	if (closest_z < static_cast<double>(world_chunk.world_z))
+		closest_z = static_cast<double>(world_chunk.world_z);
+	else if (closest_z > static_cast<double>(world_chunk.world_z
+		+ GAME_VOXEL_CHUNK_DEPTH))
+		closest_z = static_cast<double>(world_chunk.world_z
+			+ GAME_VOXEL_CHUNK_DEPTH);
+	distance_squared = (closest_x - camera.x) * (closest_x - camera.x)
+		+ (closest_z - camera.z) * (closest_z - camera.z);
+	fallback_distance = cache.render_distance
+		+ std::sqrt(static_cast<double>(GAME_VOXEL_CHUNK_WIDTH
+			* GAME_VOXEL_CHUNK_WIDTH + GAME_VOXEL_CHUNK_DEPTH
+			* GAME_VOXEL_CHUNK_DEPTH));
+	return (distance_squared <= fallback_distance * fallback_distance);
 }

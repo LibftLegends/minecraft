@@ -76,6 +76,7 @@ int32_t WorldEditHistory::apply(World &world, const Record &entry,
 			block_id_to_write);
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
+	world.mark_geometry_changed();
 	recorded_edit.world_x = entry.edit.world_x;
 	recorded_edit.world_y = entry.edit.world_y;
 	recorded_edit.world_z = entry.edit.world_z;

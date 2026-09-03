@@ -55,6 +55,7 @@ int32_t PlaceBlockCommand::execute(World &world) const
 	if (err != FT_ERR_SUCCESS)
 		return (err);
 	wc->voxel_revision += 1U;
+	world.mark_geometry_changed();
 	wc->pending_mesh_request_id = 0U;
 	WorldEditHistory::Record record;
 	record.edit.world_x = world_x;

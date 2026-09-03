@@ -17,20 +17,12 @@
 class GpuGeometryBatch
 {
   public:
-	struct			Vertex
-	{
-		float x, y, z;
-		uint16_t tu, tv;
-		uint32_t	block_id;
-		uint32_t	face;
-	};
-
 	GpuGeometryBatch();
 	GpuGeometryBatch(const GpuGeometryBatch &other);
 	~GpuGeometryBatch();
 	GpuGeometryBatch &operator=(const GpuGeometryBatch &other);
 
-	bool initialize(GLuint shared_vbo);
+	bool initialize();
 	void destroy();
 
 	void collect(const Camera &camera, const World &world, int width,
@@ -41,34 +33,37 @@ class GpuGeometryBatch
 		GLint u_chunk_offset, const float mvp[16], GpuTextureAtlas &atlas);
 	size_t gpu_bytes() const;
 
-  private:
-	GLuint			_mega_vao;
-	GLuint			_mega_vbo;
-	GLuint			_mega_ebo;
-	size_t			_mega_vbo_cap;
-	size_t			_mega_ebo_cap;
-	std::vector<Vertex> _mega_verts;
-	std::vector<uint32_t> _mega_idxs;
-
+	private:
+	void sync_pending_visible_meshes(const Camera &camera, const World &world,
+		int32_t &uploaded_count, size_t &uploaded_bytes);
 	GpuWaterBatch	_water;
-	std::vector<uint32_t> _water_idxs;
-
-	bool			_owns_vbo;
-	uint64_t		_geometry_signature;
-	bool			_cache_valid;
-	bool			_buffers_dirty;
+	bool			_visibility_cache_valid;
+	uint64_t		_visibility_geometry_signature;
+	double			_visibility_camera_x;
+	double			_visibility_camera_y;
+	double			_visibility_camera_z;
+	double			_visibility_camera_yaw;
+	double			_visibility_camera_pitch;
+	int			_visibility_width;
+	int			_visibility_height;
+	int			_visibility_render_distance;
+	int32_t		_visibility_loaded_chunk_count;
+	int32_t		_visibility_center_chunk_x;
+	int32_t		_visibility_center_chunk_z;
+	bool			_visibility_chunk_index_valid;
 	GpuChunkMesh	_chunk_meshes[WorldCoordinates::CHUNK_COUNT];
 	std::vector<int32_t> _visible_chunk_slots;
+#if defined(LIBFT_ENABLE_ANALYTICS)
+	uint64_t		_analytics_collect_frame;
+	bool			_analytics_collect_diagnostics;
+#endif
+	int32_t _upload_cursor;
+	int32_t _visible_upload_cursor_slot;
+	int32_t _visible_upload_cursor_chunk_x;
+	int32_t _visible_upload_cursor_chunk_z;
 	int32_t			_chunk_world_x[WorldCoordinates::CHUNK_COUNT];
 	int32_t			_chunk_world_z[WorldCoordinates::CHUNK_COUNT];
 
-	void setup_world_vao();
-	void bind_vertex_attribs();
-	void destroy_mega_buffers();
-	void add_chunk(const WorldChunk &wc, uint32_t base);
-	void upload_solid_buffers();
-	void upload_buffers_if_dirty();
-	static uint64_t geometry_signature(const World &world);
 };
 
 #endif

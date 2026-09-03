@@ -2,13 +2,14 @@
 
 WorldChunk::WorldChunk() : chunk_x(0), chunk_z(0), world_x(0), world_z(0),
 	mesh_revision(0U), voxel_revision(0U), pending_mesh_request_id(0U),
-	mesh_dirty(false), initialized(false)
+	mesh_dirty(false), initialized(false), chunk(), mesh()
 {
 }
 
 WorldChunk::WorldChunk(const WorldChunk &other) : chunk_x(0), chunk_z(0),
 	world_x(0), world_z(0), mesh_revision(0U), voxel_revision(0U),
-	pending_mesh_request_id(0U), mesh_dirty(false), initialized(false)
+	pending_mesh_request_id(0U), mesh_dirty(false), initialized(false),
+	chunk(), mesh()
 {
 	(void)other;
 }
@@ -22,6 +23,32 @@ WorldChunk &WorldChunk::operator=(const WorldChunk &other)
 {
 	(void)other;
 	return (*this);
+}
+
+bool WorldChunk::mesh_is_drawable(const chunk_mesh &mesh) noexcept
+{
+	ft_size_t index;
+
+	if (mesh.has_occupied_bounds != FT_TRUE || mesh.vertices.empty()
+		|| (mesh.solid_indices.empty() && mesh.water_indices.empty())
+		|| mesh.indices.size() != mesh.solid_indices.size()
+			+ mesh.water_indices.size())
+		return (false);
+	index = 0U;
+	while (index < mesh.solid_indices.size())
+	{
+		if (mesh.solid_indices[index] >= mesh.vertices.size())
+			return (false);
+		index += 1U;
+	}
+	index = 0U;
+	while (index < mesh.water_indices.size())
+	{
+		if (mesh.water_indices[index] >= mesh.vertices.size())
+			return (false);
+		index += 1U;
+	}
+	return (true);
 }
 
 void WorldChunk::reset_coordinates()

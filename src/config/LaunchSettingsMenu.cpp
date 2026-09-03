@@ -168,11 +168,14 @@ void LaunchSettingsMenu::handle_input(LaunchSettings &settings,
 
 int LaunchSettingsMenu::render_frame(ApplicationWindow &window,
 	GpuRenderer &renderer, Image &img, const LaunchSettings &settings,
-	int32_t selected_row, std::vector<uint32_t> &pixels)
+	int32_t selected_row, std::vector<uint32_t> &pixels, bool redraw)
 {
-	img.pixels = pixels.data();
-	draw_menu(img, settings, selected_row);
-	renderer.upload_overlay(img.pixels, img.width, img.height);
+	if (redraw)
+	{
+		img.pixels = pixels.data();
+		draw_menu(img, settings, selected_row);
+		renderer.upload_overlay(img.pixels, img.width, img.height);
+	}
 	renderer.draw_overlay();
 	if (window.present() != FT_ERR_SUCCESS)
 	{
@@ -188,13 +191,18 @@ int LaunchSettingsMenu::run_loop(ApplicationWindow &window,
 	int32_t height)
 {
 	Image	img;
+	LaunchSettings previous_settings;
 	int32_t	selected_row;
+	int32_t	previous_selected_row;
 	bool	should_exit;
+	bool	redraw;
 
 	std::vector<uint32_t> pixels(static_cast<size_t>(width)
 		* static_cast<size_t>(height));
 	img = {width, height, pixels.data()};
 	selected_row = 0;
+	previous_selected_row = -1;
+	previous_settings = settings;
 	should_exit = false;
 	while (!should_exit && !window.should_close())
 	{
@@ -202,9 +210,15 @@ int LaunchSettingsMenu::run_loop(ApplicationWindow &window,
 		ft_dumb_controls_poll();
 		handle_input(settings, selected_row, should_exit);
 		should_exit = should_exit || window.should_close();
+		redraw = previous_selected_row != selected_row
+			|| previous_settings.fullscreen != settings.fullscreen
+			|| previous_settings.resolution_preset != settings.resolution_preset
+			|| previous_settings.keyboard_layout != settings.keyboard_layout;
 		if (render_frame(window, renderer, img, settings, selected_row,
-				pixels) != 0)
+				pixels, redraw) != 0)
 			return (1);
+		previous_settings = settings;
+		previous_selected_row = selected_row;
 	}
 	renderer.destroy();
 	(void)window.destroy();
