@@ -8,11 +8,12 @@
 
 namespace
 {
-	/* Streaming can finish several chunks between render frames.  A two-mesh
-	 * budget allowed the pending list to grow faster than it drained, which
-	 * made generated chunks appear only after an edit caused that chunk to be
-	 * selected again.  Keep a bounded budget, but make normal catch-up faster. */
-	static const int32_t MAX_MESH_UPLOADS_PER_FRAME = 4;
+	/* Keep GPU integration deliberately incremental.  World generation may
+	 * finish several meshes between render frames, but uploading only one newly
+	 * available mesh per frame prevents a burst of completed work from stealing
+	 * the entire render frame.  Remaining visible meshes stay in the pending
+	 * queue and are revisited on later frames. */
+	static const int32_t MAX_MESH_UPLOADS_PER_FRAME = 1;
 	static const size_t MAX_MESH_UPLOAD_BYTES_PER_FRAME = 8U * 1024U * 1024U;
 
 	static bool visibility_camera_value_matches(double left, double right)
