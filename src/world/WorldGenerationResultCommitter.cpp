@@ -245,11 +245,13 @@ int32_t WorldGenerationResultCommitter::commit_stream_result(WorldChunkStreamer 
 			"[WorldGen] stale result request=%llu chunk=(%d,%d) "
 			"candidate=%s candidate_request=%llu result_epoch=%llu "
 			"candidate_epoch=%llu result_revision=%u candidate_revision=%u\n",
-			result.request_id, result.chunk_x,
+			static_cast<unsigned long long>(result.request_id), result.chunk_x,
 			result.chunk_z, candidate == nullptr ? "missing" : "mismatch",
-			candidate == nullptr ? 0ULL : candidate->request_id,
-			result.relevance_epoch,
-			candidate == nullptr ? 0ULL : candidate->relevance_epoch,
+			candidate == nullptr ? 0ULL
+				: static_cast<unsigned long long>(candidate->request_id),
+			static_cast<unsigned long long>(result.relevance_epoch),
+			candidate == nullptr ? 0ULL
+				: static_cast<unsigned long long>(candidate->relevance_epoch),
 			result.generation_revision,
 			candidate == nullptr ? 0U : candidate->generation_revision);
 #endif
@@ -380,8 +382,8 @@ int32_t WorldGenerationResultCommitter::drain(WorldChunkStreamer &streamer,
 				"generation_us=%llu mesh_us=%llu\n",
 				static_cast<unsigned long long>(result_request_id),
 				result_chunk_x, result_chunk_z,
-				result_generation_ns / 1000U,
-				result_mesh_ns / 1000U);
+				static_cast<unsigned long long>(result_generation_ns / 1000U),
+				static_cast<unsigned long long>(result_mesh_ns / 1000U));
 #endif
 		if (error_code != FT_ERR_SUCCESS)
 			return (error_code);
@@ -450,7 +452,8 @@ int32_t WorldGenerationResultCommitter::drain(WorldChunkStreamer &streamer,
 			static_cast<unsigned long long>(streamer.stream_frame_),
 			queued_before, queued_after, completed_before, completed_after,
 			processed,
-			streamer.generation_pipeline_.oldest_completed_result_age_nanoseconds());
+			static_cast<unsigned long long>(
+				streamer.generation_pipeline_.oldest_completed_result_age_nanoseconds()));
 #endif
 	return (error_code);
 }

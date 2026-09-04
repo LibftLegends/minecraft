@@ -179,12 +179,15 @@ int32_t RuntimeAnalytics::end_frame() noexcept
         active_frame_count = g_session.get_active_frame_count();
         active_trace_count = g_session.get_active_trace_count();
         std::fprintf(stderr,
-            "[Analytics] frame_finalize_ns=%llu dropped_scopes=%llu "
-            "dropped_traces=%llu dropped_frames=%llu queue_buffers=%u "
-            "oldest_queue_age_ns=%llu active_frames=%u active_traces=%u\n",
+            "[Analytics] frame_finalize_ns=" FT_UINT64_DECIMAL_FORMAT
+            " dropped_scopes=" FT_UINT64_DECIMAL_FORMAT
+            " dropped_traces=" FT_UINT64_DECIMAL_FORMAT
+            " dropped_frames=" FT_UINT64_DECIMAL_FORMAT
+            " queue_buffers=%u oldest_queue_age_ns=" FT_UINT64_DECIMAL_FORMAT
+            " active_frames=%u active_traces=%u\n",
             finalize_end - finalize_start, dropped_scopes, dropped_traces,
             dropped_frames, export_queue_depth,
-            static_cast<unsigned long long>(oldest_queue_age),
+            oldest_queue_age,
             active_frame_count, active_trace_count);
     }
     return (error_code);
