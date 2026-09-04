@@ -15,7 +15,8 @@ class ChunkNeighborMesher
 
 	static int32_t generate_with_neighbors(chunk_mesh &mesh,
 		const game_voxel_chunk &chunk, int32_t chunk_x, int32_t chunk_z,
-		WorldChunk *chunks, int32_t chunk_count);
+		WorldChunk *chunks, int32_t chunk_count,
+		const voxel_light_chunk *light = nullptr);
 
   private:
 	struct					NeighborContext

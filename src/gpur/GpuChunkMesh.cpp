@@ -88,6 +88,10 @@ void GpuChunkMesh::setup_attributes()
 	glVertexAttribIPointer(3, 1, GL_UNSIGNED_BYTE, stride,
 		reinterpret_cast<const void *>(offsetof(chunk_mesh_vertex, face)));
 	glEnableVertexAttribArray(3);
+	glVertexAttribIPointer(4, 1, GL_UNSIGNED_BYTE, stride,
+		reinterpret_cast<const void *>(offsetof(chunk_mesh_vertex,
+			packed_light)));
+	glEnableVertexAttribArray(4);
 }
 
 void GpuChunkMesh::sync(const chunk_mesh &mesh, uint64_t revision,

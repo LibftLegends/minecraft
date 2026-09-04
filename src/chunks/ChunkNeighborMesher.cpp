@@ -99,11 +99,11 @@ int32_t ChunkNeighborMesher::lookup_block(void *user_data, int32_t world_x,
 
 int32_t ChunkNeighborMesher::generate_with_neighbors(chunk_mesh &mesh,
 	const game_voxel_chunk &chunk, int32_t chunk_x, int32_t chunk_z,
-	WorldChunk *chunks, int32_t chunk_count)
+	WorldChunk *chunks, int32_t chunk_count, const voxel_light_chunk *light)
 {
 	NeighborContext	ctx;
 
 	ctx = build_context(chunk_x, chunk_z, chunks, chunk_count);
 	return (chunk_mesh_generate_from_chunk_with_neighbors(mesh, chunk, chunk_x,
-			chunk_z, &lookup_block, &ctx));
+		chunk_z, &lookup_block, &ctx, light));
 }

@@ -158,6 +158,7 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 {
 	std::unique_ptr<WorldGenerationPipeline::Result> result(new (std::nothrow) WorldGenerationPipeline::Result());
 	game_voxel_chunk target_chunk;
+	voxel_light_chunk light;
 
 	if (result == nullptr)
 		return (nullptr);
@@ -189,10 +190,15 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 	result->error_code = WorldChunkSnapshotReader::initialize_snapshot_chunk(target_chunk,
 			*request.snapshot);
 	if (result->error_code == FT_ERR_SUCCESS)
+		result->error_code = voxel_light_build_chunk_local(light,
+			request.chunk_x * GAME_VOXEL_CHUNK_WIDTH,
+			request.chunk_z * GAME_VOXEL_CHUNK_DEPTH, lookup_local_light_block,
+			&target_chunk);
+	if (result->error_code == FT_ERR_SUCCESS)
 		result->error_code = chunk_mesh_generate_from_chunk_with_neighbors(*result->mesh,
 				target_chunk, request.chunk_x, request.chunk_z,
 				&WorldChunkSnapshotReader::lookup_snapshot_block,
-				request.snapshot.get());
+				request.snapshot.get(), &light);
 	(void)target_chunk.destroy();
 	if (result->error_code != FT_ERR_SUCCESS)
 		result->mesh.reset();

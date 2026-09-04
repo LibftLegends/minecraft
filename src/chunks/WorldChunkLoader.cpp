@@ -89,9 +89,8 @@ int32_t WorldChunkLoader::build_mesh_with_neighbors(WorldChunk *world_chunk,
 	if (err != FT_ERR_SUCCESS)
 		return (err);
 	err = ChunkNeighborMesher::generate_with_neighbors(world_chunk->mesh,
-			world_chunk->chunk, chunk_x, chunk_z, chunks, chunk_count);
-	if (err == FT_ERR_SUCCESS)
-		err = chunk_mesh_apply_light(world_chunk->mesh, world_chunk->light);
+			world_chunk->chunk, chunk_x, chunk_z, chunks, chunk_count,
+			&world_chunk->light);
 	if (err != FT_ERR_SUCCESS)
 	{
 		(void)chunk_mesh_destroy(world_chunk->mesh);
@@ -248,7 +247,7 @@ int32_t WorldChunkLoader::remesh_chunk(WorldChunk *chunks, int32_t chunk_count,
 		return (err);
 	}
 	err = ChunkNeighborMesher::generate_with_neighbors(wc->mesh, wc->chunk,
-			chunk_x, chunk_z, chunks, chunk_count);
+			chunk_x, chunk_z, chunks, chunk_count, &wc->light);
 	if (err == FT_ERR_SUCCESS)
 	{
 		wc->mesh_revision += 1U;
