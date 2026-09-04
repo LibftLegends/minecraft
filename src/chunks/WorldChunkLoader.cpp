@@ -2,6 +2,54 @@
 
 namespace
 {
+	struct LightLookupContext
+	{
+		WorldChunk *chunks;
+		int32_t chunk_count;
+		WorldChunk *target;
+	};
+
+	int32_t lookup_world_light_block(void *user_data, int32_t world_x,
+		int32_t world_y, int32_t world_z, uint32_t *block_id) noexcept
+	{
+		LightLookupContext *context;
+		int32_t chunk_x;
+		int32_t chunk_z;
+		const WorldChunk *chunk;
+		int32_t local_x;
+		int32_t local_z;
+
+		if (user_data == nullptr || block_id == nullptr)
+			return (FT_ERR_INVALID_ARGUMENT);
+		if (world_y < 0 || world_y >= GAME_VOXEL_CHUNK_HEIGHT)
+		{
+			*block_id = GAME_VOXEL_AIR_BLOCK;
+			return (FT_ERR_SUCCESS);
+		}
+		context = static_cast<LightLookupContext *>(user_data);
+		chunk_x = WorldCoordinates::floor_divide(world_x,
+			GAME_VOXEL_CHUNK_WIDTH);
+		chunk_z = WorldCoordinates::floor_divide(world_z,
+			GAME_VOXEL_CHUNK_DEPTH);
+		chunk = context->target;
+		if (chunk == nullptr || chunk->chunk_x != chunk_x
+			|| chunk->chunk_z != chunk_z)
+			chunk = WorldChunkStore::find_chunk(context->chunks,
+				context->chunk_count, chunk_x, chunk_z);
+		if (chunk == nullptr || chunk->initialized == false)
+		{
+			/* Unknown streamed space is a conservative solid boundary. It must
+			 * never become an accidental opening into the sky. */
+			*block_id = VOXEL_GENERATOR_STONE_BLOCK;
+			return (FT_ERR_SUCCESS);
+		}
+		local_x = WorldCoordinates::positive_modulo(world_x,
+			GAME_VOXEL_CHUNK_WIDTH);
+		local_z = WorldCoordinates::positive_modulo(world_z,
+			GAME_VOXEL_CHUNK_DEPTH);
+		return (chunk->chunk.read_block(local_x, world_y, local_z, block_id));
+	}
+
 	int32_t lookup_local_light_block(void *user_data, int32_t world_x,
 		int32_t world_y, int32_t world_z, uint32_t *block_id) noexcept
 	{
@@ -82,10 +130,13 @@ int32_t WorldChunkLoader::build_mesh_with_neighbors(WorldChunk *world_chunk,
 	int32_t chunk_x, int32_t chunk_z, WorldChunk *chunks, int32_t chunk_count)
 {
 	int32_t	err;
+	LightLookupContext light_context;
 
-	err = voxel_light_build_chunk_local(world_chunk->light,
-		world_chunk->world_x, world_chunk->world_z, lookup_local_light_block,
-		&world_chunk->chunk);
+	light_context.chunks = chunks;
+	light_context.chunk_count = chunk_count;
+	light_context.target = world_chunk;
+	err = voxel_light_build_chunk(world_chunk->light, world_chunk->world_x,
+		world_chunk->world_z, lookup_world_light_block, &light_context);
 	if (err != FT_ERR_SUCCESS)
 		return (err);
 	err = ChunkNeighborMesher::generate_with_neighbors(world_chunk->mesh,
@@ -201,6 +252,7 @@ int32_t WorldChunkLoader::remesh_chunk(WorldChunk *chunks, int32_t chunk_count,
 {
 	WorldChunk	*wc;
 	int32_t		err;
+	LightLookupContext light_context;
 
 	wc = WorldChunkStore::find_chunk_mutable(chunks, chunk_count, chunk_x,
 			chunk_z);
@@ -208,8 +260,11 @@ int32_t WorldChunkLoader::remesh_chunk(WorldChunk *chunks, int32_t chunk_count,
 		return (FT_ERR_SUCCESS);
 	wc->pending_mesh_request_id = 0U;
 	wc->mesh_dirty = true;
-	err = voxel_light_build_chunk_local(wc->light, wc->world_x, wc->world_z,
-		lookup_local_light_block, &wc->chunk);
+	light_context.chunks = chunks;
+	light_context.chunk_count = chunk_count;
+	light_context.target = wc;
+	err = voxel_light_build_chunk(wc->light, wc->world_x, wc->world_z,
+		lookup_world_light_block, &light_context);
 	if (err != FT_ERR_SUCCESS)
 		return (err);
 	err = chunk_mesh_clear(wc->mesh);
@@ -229,6 +284,7 @@ int32_t WorldChunkLoader::remesh_chunk(WorldChunk *chunks, int32_t chunk_count,
 {
 	WorldChunk	*wc;
 	int32_t		err;
+	LightLookupContext light_context;
 
 	wc = WorldChunkStore::find_chunk_mutable(chunks, chunk_count, chunk_x,
 			chunk_z);
@@ -236,8 +292,11 @@ int32_t WorldChunkLoader::remesh_chunk(WorldChunk *chunks, int32_t chunk_count,
 		return (FT_ERR_SUCCESS);
 	wc->pending_mesh_request_id = 0U;
 	wc->mesh_dirty = true;
-	err = voxel_light_build_chunk_local(wc->light, wc->world_x, wc->world_z,
-		lookup_local_light_block, &wc->chunk);
+	light_context.chunks = chunks;
+	light_context.chunk_count = chunk_count;
+	light_context.target = wc;
+	err = voxel_light_build_chunk(wc->light, wc->world_x, wc->world_z,
+		lookup_world_light_block, &light_context);
 	if (err != FT_ERR_SUCCESS)
 		return (err);
 	err = chunk_mesh_clear(wc->mesh);
