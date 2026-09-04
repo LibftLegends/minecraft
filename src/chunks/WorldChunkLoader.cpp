@@ -208,6 +208,10 @@ int32_t WorldChunkLoader::remesh_chunk(WorldChunk *chunks, int32_t chunk_count,
 		return (FT_ERR_SUCCESS);
 	wc->pending_mesh_request_id = 0U;
 	wc->mesh_dirty = true;
+	err = voxel_light_build_chunk_local(wc->light, wc->world_x, wc->world_z,
+		lookup_local_light_block, &wc->chunk);
+	if (err != FT_ERR_SUCCESS)
+		return (err);
 	err = chunk_mesh_clear(wc->mesh);
 	if (err == FT_ERR_SUCCESS)
 		err = chunk_mesh_generate_from_chunk_with_light(wc->mesh, wc->chunk,
@@ -232,6 +236,10 @@ int32_t WorldChunkLoader::remesh_chunk(WorldChunk *chunks, int32_t chunk_count,
 		return (FT_ERR_SUCCESS);
 	wc->pending_mesh_request_id = 0U;
 	wc->mesh_dirty = true;
+	err = voxel_light_build_chunk_local(wc->light, wc->world_x, wc->world_z,
+		lookup_local_light_block, &wc->chunk);
+	if (err != FT_ERR_SUCCESS)
+		return (err);
 	err = chunk_mesh_clear(wc->mesh);
 	if (err != FT_ERR_SUCCESS)
 		return (err);
