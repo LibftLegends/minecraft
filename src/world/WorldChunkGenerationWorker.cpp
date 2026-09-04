@@ -190,7 +190,7 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 	result->error_code = WorldChunkSnapshotReader::initialize_snapshot_chunk(target_chunk,
 			*request.snapshot);
 	if (result->error_code == FT_ERR_SUCCESS)
-		result->error_code = voxel_light_build_chunk_local(light,
+	result->error_code = voxel_light_build_chunk(light,
 			request.chunk_x * GAME_VOXEL_CHUNK_WIDTH,
 			request.chunk_z * GAME_VOXEL_CHUNK_DEPTH, lookup_local_light_block,
 			&target_chunk);

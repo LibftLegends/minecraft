@@ -83,8 +83,8 @@ int32_t WorldEditHistory::apply(World &world, const Record &entry,
 	recorded_edit.block_type = block_id_to_write;
 	recorded_edit.tick = world.current_tick;
 	(void)wc->chunk.record_dirty_edit(recorded_edit);
-	return (WorldChunkLoader::remesh_edited_chunk_border(world.chunks,
-			world.chunk_count, chunk_x, chunk_z, local_x, local_z));
+	world.chunk_streamer.mark_neighbor_remeshes(chunk_x, chunk_z);
+	return (FT_ERR_SUCCESS);
 }
 
 int32_t WorldEditHistory::undo(World &world)

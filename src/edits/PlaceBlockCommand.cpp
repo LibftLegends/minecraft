@@ -66,6 +66,6 @@ int32_t PlaceBlockCommand::execute(World &world) const
 	record.previous_block_id = current_block_id;
 	(void)wc->chunk.record_dirty_edit(record.edit);
 	world.edit_history.record(record);
-	return (WorldChunkLoader::remesh_edited_chunk_border(world.chunks,
-			world.chunk_count, cx, cz, lx, lz));
+	world.chunk_streamer.mark_neighbor_remeshes(cx, cz);
+	return (FT_ERR_SUCCESS);
 }

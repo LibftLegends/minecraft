@@ -284,14 +284,15 @@ int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk) noexcept
 void WorldChunkStreamer::mark_neighbor_remeshes(int32_t chunk_x,
 	int32_t chunk_z) noexcept
 {
-	const int32_t coordinates[5][2] = {{chunk_x, chunk_z}, {chunk_x - 1,
-		chunk_z}, {chunk_x + 1, chunk_z}, {chunk_x, chunk_z - 1}, {chunk_x,
-		chunk_z + 1}};
+	const int32_t coordinates[9][2] = {{chunk_x - 1, chunk_z - 1},
+		{chunk_x, chunk_z - 1}, {chunk_x + 1, chunk_z - 1}, {chunk_x - 1,
+		chunk_z}, {chunk_x, chunk_z}, {chunk_x + 1, chunk_z}, {chunk_x - 1,
+		chunk_z + 1}, {chunk_x, chunk_z + 1}, {chunk_x + 1, chunk_z + 1}};
 	int32_t index;
 	WorldChunk *chunk;
 
 	index = 0;
-	while (index < 5)
+	while (index < 9)
 	{
 		chunk = this->world_.find_chunk_mutable(coordinates[index][0],
 				coordinates[index][1]);

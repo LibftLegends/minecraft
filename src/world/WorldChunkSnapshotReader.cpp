@@ -63,6 +63,8 @@ int32_t WorldChunkSnapshotReader::lookup_snapshot_block(void *user_data,
 	int32_t local_x;
 	int32_t local_z;
 	std::size_t index;
+	const int32_t halo = WorldGenerationPipeline::LIGHT_SNAPSHOT_HALO;
+	const int32_t edge = GAME_VOXEL_CHUNK_WIDTH + halo * 2;
 
 	if (user_data == nullptr || block_id == nullptr)
 		return (FT_ERR_INVALID_ARGUMENT);
@@ -83,6 +85,21 @@ int32_t WorldChunkSnapshotReader::lookup_snapshot_block(void *user_data,
 			* static_cast<std::size_t>(GAME_VOXEL_CHUNK_WIDTH)
 			+ static_cast<std::size_t>(local_x);
 		*block_id = snapshot->blocks[index];
+		return (FT_ERR_SUCCESS);
+	}
+	if (local_x >= -halo && local_x < GAME_VOXEL_CHUNK_WIDTH + halo
+		&& local_z >= -halo && local_z < GAME_VOXEL_CHUNK_DEPTH + halo)
+	{
+		if (snapshot->lighting_blocks.size() < static_cast<std::size_t>(edge)
+			* static_cast<std::size_t>(edge)
+			* static_cast<std::size_t>(GAME_VOXEL_CHUNK_HEIGHT))
+			return (FT_ERR_INVALID_OPERATION);
+		index = (static_cast<std::size_t>(local_z + halo)
+				* static_cast<std::size_t>(edge)
+				+ static_cast<std::size_t>(local_x + halo))
+			* static_cast<std::size_t>(GAME_VOXEL_CHUNK_HEIGHT)
+			+ static_cast<std::size_t>(world_y);
+		*block_id = snapshot->lighting_blocks[index];
 		return (FT_ERR_SUCCESS);
 	}
 	return (WorldChunkSnapshotReader::lookup_border_block(*snapshot, local_x,

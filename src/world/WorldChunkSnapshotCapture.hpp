@@ -22,6 +22,10 @@ class WorldChunkSnapshotCapture
 	static int32_t capture_border_column(const WorldChunk *source,
 		std::vector<uint32_t> &border, int32_t border_local_x,
 		int32_t border_local_z) noexcept;
+	static int32_t capture_lighting_halo(const WorldChunk &target,
+		const WorldChunk *west, const WorldChunk *east,
+		const WorldChunk *north, const WorldChunk *south,
+		WorldGenerationPipeline::WorldChunkSnapshot &snapshot) noexcept;
 };
 
 #endif

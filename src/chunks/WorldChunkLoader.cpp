@@ -322,23 +322,3 @@ int32_t WorldChunkLoader::remesh_chunk(WorldChunk *chunks, int32_t chunk_count,
 	}
 	return (err);
 }
-
-int32_t WorldChunkLoader::remesh_edited_chunk_border(WorldChunk *chunks,
-	int32_t chunk_count, int32_t chunk_x, int32_t chunk_z, int32_t local_x,
-	int32_t local_z)
-{
-	int32_t	err;
-
-	err = remesh_chunk(chunks, chunk_count, chunk_x, chunk_z, true);
-	if (err != FT_ERR_SUCCESS)
-		return (err);
-	if (local_x == 0)
-		err = remesh_chunk(chunks, chunk_count, chunk_x - 1, chunk_z, true);
-	if (err == FT_ERR_SUCCESS && local_x == GAME_VOXEL_CHUNK_WIDTH - 1)
-		err = remesh_chunk(chunks, chunk_count, chunk_x + 1, chunk_z, true);
-	if (err == FT_ERR_SUCCESS && local_z == 0)
-		err = remesh_chunk(chunks, chunk_count, chunk_x, chunk_z - 1, true);
-	if (err == FT_ERR_SUCCESS && local_z == GAME_VOXEL_CHUNK_DEPTH - 1)
-		err = remesh_chunk(chunks, chunk_count, chunk_x, chunk_z + 1, true);
-	return (err);
-}

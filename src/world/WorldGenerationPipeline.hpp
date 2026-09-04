@@ -18,6 +18,7 @@
 class WorldGenerationPipeline
 {
   public:
+	static constexpr int32_t LIGHT_SNAPSHOT_HALO = 15;
 	enum class WorldGenerationOperation : uint8_t
 	{
 		STREAM = 0,
@@ -44,6 +45,7 @@ class WorldGenerationPipeline
 		std::vector<uint32_t> east_border;
 		std::vector<uint32_t> north_border;
 		std::vector<uint32_t> south_border;
+		std::vector<uint32_t> lighting_blocks;
 	};
 
 	struct							Result

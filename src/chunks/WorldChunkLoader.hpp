@@ -33,9 +33,6 @@ class WorldChunkLoader
 		int32_t chunk_x, int32_t chunk_z);
 	static int32_t remesh_chunk(WorldChunk *chunks, int32_t chunk_count,
 		int32_t chunk_x, int32_t chunk_z, bool use_neighbors);
-	static int32_t remesh_edited_chunk_border(WorldChunk *chunks,
-		int32_t chunk_count, int32_t chunk_x, int32_t chunk_z, int32_t local_x,
-		int32_t local_z);
 
   private:
 	static int32_t setup_chunk_coordinates(WorldChunk *world_chunk,
