@@ -321,6 +321,12 @@ int32_t WorldGenerationResultCommitter::drain(WorldChunkStreamer &streamer,
 	drain_start_us = static_cast<uint64_t>(
 		std::chrono::duration_cast<std::chrono::microseconds>(
 			std::chrono::steady_clock::now().time_since_epoch()).count());
+#if !defined(LIBFT_ENABLE_ANALYTICS)
+	(void)last_poll_us;
+	(void)last_cleanup_us;
+	(void)last_commit_us;
+	(void)drain_start_us;
+#endif
 #endif
 	deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1);
 	while (processed < WORLD_STREAM_MAX_COMMITS_PER_FRAME

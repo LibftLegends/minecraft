@@ -3,7 +3,7 @@
 const double Camera::MOUSE_SENSITIVITY = 0.0025;
 const double Camera::TURN_SPEED = 1.8;
 const double Camera::LOOK_SPEED = 1.2;
-const double Camera::PITCH_LIMIT = 1.2;
+const double Camera::PITCH_LIMIT = 1.5533430342749532;
 const double Camera::BOOST_MULTIPLIER = 20.0;
 const double Camera::INV_SQRT_2 = 0.7071067811865475;
 
