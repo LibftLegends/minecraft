@@ -44,6 +44,8 @@ void WorldChunkCandidateScanner::prepare_stream_candidates(WorldChunkStreamer &s
 
 	if (streamer.stream_candidates_radius_ == stream_radius)
 		return ;
+	streamer.stream_relevance_epoch_ += 1U;
+	streamer.generation_revision_ += 1U;
 	streamer.stream_candidates_.clear();
 	streamer.stream_candidate_cursor_ = 0U;
 	streamer.stream_candidate_lookup_.clear();
@@ -87,8 +89,6 @@ void WorldChunkCandidateScanner::prepare_stream_candidates(WorldChunkStreamer &s
 	}
 	streamer.stream_candidates_radius_ = stream_radius;
 	streamer.stream_retryable_count_ = 0;
-	streamer.stream_relevance_epoch_ += 1U;
-	streamer.generation_revision_ += 1U;
 }
 
 WorldChunkStreamer::StreamCandidate *WorldChunkCandidateScanner::find_stream_candidate(WorldChunkStreamer &streamer,
