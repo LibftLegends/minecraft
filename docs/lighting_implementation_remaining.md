@@ -2,6 +2,11 @@
 
 Status: implementation paused at the user's request on 2026-09-04.
 
+Continuation note: this document is now the handoff point for feature work.
+The next implementation commits should resolve the remaining lighting, water
+generation, and block-break scheduling issues described below before adding
+new rendering features.
+
 Branches:
 
 - Minecraft: `agent/analytics-performance`
