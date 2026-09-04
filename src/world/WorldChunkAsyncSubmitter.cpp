@@ -89,7 +89,18 @@ int32_t WorldChunkAsyncSubmitter::submit_dirty_remeshes(
 	/* Dirty chunks are coalesced by mesh_dirty. Keep the discovery scan small
 	 * so a large loaded world cannot consume a frame while looking for work;
 	 * the cursor preserves eventual progress across frames. */
-	const int32_t scan_budget = 16;
+	int32_t scan_budget;
+	int32_t queue_budget;
+	const voxel_light_update_config &light_config =
+		streamer.light_update_config_;
+	scan_budget = static_cast<int32_t>(light_config.target_nodes_per_frame);
+	if (scan_budget < static_cast<int32_t>(light_config.min_nodes_per_frame))
+		scan_budget = static_cast<int32_t>(light_config.min_nodes_per_frame);
+	if (scan_budget > static_cast<int32_t>(light_config.max_nodes_per_frame))
+		scan_budget = static_cast<int32_t>(light_config.max_nodes_per_frame);
+	queue_budget = static_cast<int32_t>(light_config.max_nodes_per_frame);
+	if (queue_budget > 8)
+		queue_budget = 8;
 
 	if (streamer.world_.chunk_count <= 0)
 		return (FT_ERR_SUCCESS);
@@ -97,7 +108,8 @@ int32_t WorldChunkAsyncSubmitter::submit_dirty_remeshes(
 	scanned_count = 0;
 	while (scanned_count < scan_budget
 		&& scanned_count < streamer.world_.chunk_count
-		&& streamer.generation_pipeline_.queued_count() < 8U)
+		&& streamer.generation_pipeline_.queued_count()
+			< static_cast<std::size_t>(queue_budget))
 	{
 		if (streamer.world_.chunks[dirty_index].initialized
 			&& streamer.world_.chunks[dirty_index].mesh_dirty)

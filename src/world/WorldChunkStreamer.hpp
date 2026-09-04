@@ -65,6 +65,7 @@ class WorldChunkStreamer
 	uint64_t				stream_progress_frame_ = 0U;
 	uint64_t				world_epoch_ = 1U;
 	uint64_t				next_request_id_ = 1U;
+	voxel_light_update_config light_update_config_;
 	std::vector<WorldGenerationPipeline::WorldDeferredBlockEdit> deferred_edits_;
 	std::vector<WorldGenerationPipeline::WorldDeferredBlockEdit> deferred_pending_edits_;
 	std::vector<WorldChunk *> deferred_touched_chunks_;
@@ -87,6 +88,9 @@ class WorldChunkStreamer
 		bool center_changed) noexcept;
 	int32_t stream_last_error() const noexcept;
 	int32_t stream_retryable_count() const noexcept;
+	int32_t set_light_update_config(
+		const voxel_light_update_config &config) noexcept;
+	const voxel_light_update_config &light_update_config() const noexcept;
 	Diagnostics diagnostics() const noexcept;
 
 	uint64_t allocate_request_id() noexcept;

@@ -133,6 +133,17 @@ int32_t World::update_around(double camera_x, double camera_z,
 	}
 }
 
+int32_t World::set_light_update_config(
+	const voxel_light_update_config &config) noexcept
+{
+	return (this->chunk_streamer.set_light_update_config(config));
+}
+
+const voxel_light_update_config &World::light_update_config() const noexcept
+{
+	return (this->chunk_streamer.light_update_config());
+}
+
 int32_t World::stream_last_error() const
 {
 	return (this->chunk_streamer.stream_last_error());

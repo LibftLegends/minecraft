@@ -140,6 +140,9 @@ class World
 		int32_t generation_budget);
 	int32_t update_around(double camera_x, double camera_z,
 		int32_t generation_budget, int32_t render_distance);
+	int32_t set_light_update_config(
+		const voxel_light_update_config &config) noexcept;
+	const voxel_light_update_config &light_update_config() const noexcept;
 	int32_t stream_last_error() const;
 	int32_t stream_retryable_count() const;
 	StreamDiagnostics stream_diagnostics() const;

@@ -12,6 +12,7 @@ const uint8_t WorldChunkStreamer::CANDIDATE_FAILED_RETRYABLE = 6U;
 
 WorldChunkStreamer::WorldChunkStreamer(World &world) : world_(world)
 {
+	voxel_light_update_config_defaults(this->light_update_config_);
 }
 
 WorldChunkStreamer::WorldChunkStreamer(const WorldChunkStreamer &other)
@@ -215,6 +216,21 @@ uint64_t WorldChunkStreamer::world_epoch() const noexcept
 uint32_t WorldChunkStreamer::generation_revision() const noexcept
 {
 	return (this->generation_revision_);
+}
+
+int32_t WorldChunkStreamer::set_light_update_config(
+	const voxel_light_update_config &config) noexcept
+{
+	if (voxel_light_update_config_is_valid(config) == FT_FALSE)
+		return (FT_ERR_INVALID_ARGUMENT);
+	this->light_update_config_ = config;
+	return (FT_ERR_SUCCESS);
+}
+
+const voxel_light_update_config &WorldChunkStreamer::light_update_config()
+	const noexcept
+{
+	return (this->light_update_config_);
 }
 
 void WorldChunkStreamer::bump_generation_revision() noexcept
