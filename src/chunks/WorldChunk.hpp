@@ -21,6 +21,7 @@ class WorldChunk
 	/* Keep frequently scanned render/stream metadata contiguous. The voxel
 	 * storage and mesh payloads are cold during slot discovery and culling. */
 	game_voxel_chunk chunk;
+	voxel_light_chunk light;
 	chunk_mesh mesh;
 
 	WorldChunk();

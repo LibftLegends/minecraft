@@ -152,6 +152,7 @@ int32_t WorldGenerationResultCommitter::create_chunk_from_stream_result(WorldChu
 	phase_start = std::chrono::steady_clock::now();
 	#endif
 	if (slot->chunk.move(result.chunk->chunk) != FT_ERR_SUCCESS
+		|| slot->light.move(result.chunk->light) != FT_ERR_SUCCESS
 		|| chunk_mesh_initialize(slot->mesh) != FT_ERR_SUCCESS
 		|| WorldGenerationResultCommitter::move_mesh(slot->mesh,
 			result.chunk->mesh) != FT_ERR_SUCCESS)

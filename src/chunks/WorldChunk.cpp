@@ -2,14 +2,14 @@
 
 WorldChunk::WorldChunk() : chunk_x(0), chunk_z(0), world_x(0), world_z(0),
 	mesh_revision(0U), voxel_revision(0U), pending_mesh_request_id(0U),
-	mesh_dirty(false), initialized(false), chunk(), mesh()
+	mesh_dirty(false), initialized(false), chunk(), light(), mesh()
 {
 }
 
 WorldChunk::WorldChunk(const WorldChunk &other) : chunk_x(0), chunk_z(0),
 	world_x(0), world_z(0), mesh_revision(0U), voxel_revision(0U),
 	pending_mesh_request_id(0U), mesh_dirty(false), initialized(false),
-	chunk(), mesh()
+	chunk(), light(), mesh()
 {
 	(void)other;
 }
@@ -67,6 +67,7 @@ void WorldChunk::destroy()
 	if (!this->initialized)
 		return ;
 	(void)chunk_mesh_destroy(this->mesh);
+	(void)this->light.destroy();
 	(void)this->chunk.destroy();
 	this->initialized = false;
 	this->voxel_revision = 0U;

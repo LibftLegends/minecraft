@@ -1,6 +1,24 @@
 #include "../../src/world/WorldChunkGenerationWorker.hpp"
 #include <chrono>
 
+namespace
+{
+	int32_t lookup_local_light_block(void *user_data, int32_t world_x,
+		int32_t world_y, int32_t world_z, uint32_t *block_id) noexcept
+	{
+		game_voxel_chunk *chunk = static_cast<game_voxel_chunk *>(user_data);
+		if (chunk == nullptr || block_id == nullptr)
+			return (FT_ERR_INVALID_ARGUMENT);
+		world_x %= GAME_VOXEL_CHUNK_WIDTH;
+		world_z %= GAME_VOXEL_CHUNK_DEPTH;
+		if (world_x < 0)
+			world_x += GAME_VOXEL_CHUNK_WIDTH;
+		if (world_z < 0)
+			world_z += GAME_VOXEL_CHUNK_DEPTH;
+		return (chunk->read_block(world_x, world_y, world_z, block_id));
+	}
+}
+
 WorldChunkGenerationWorker::WorldChunkGenerationWorker()
 {
 }
@@ -56,7 +74,13 @@ int32_t WorldChunkGenerationWorker::initialize_chunk_for_generation(WorldChunk &
 				std::chrono::steady_clock::now() - phase_start).count());
 	phase_start = std::chrono::steady_clock::now();
 	if (error_code == FT_ERR_SUCCESS)
-		error_code = chunk_mesh_generate_from_chunk(chunk.mesh, chunk.chunk);
+	{
+		error_code = voxel_light_build_chunk_local(chunk.light, chunk.world_x,
+			chunk.world_z, lookup_local_light_block, &chunk.chunk);
+		if (error_code == FT_ERR_SUCCESS)
+			error_code = chunk_mesh_generate_from_chunk_with_light(chunk.mesh,
+				chunk.chunk, chunk.light);
+	}
 	if (mesh_duration_nanoseconds != nullptr)
 		*mesh_duration_nanoseconds = static_cast<uint64_t>(
 			std::chrono::duration_cast<std::chrono::nanoseconds>(
