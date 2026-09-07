@@ -176,8 +176,10 @@ aggregate suite.
    the neighbor is published or evicted. Arrival and eviction invalidation are
    now wired and newly published chunks use the ordinary bounded dirty-remesh
    path so startup generation cannot be starved. The bounded propagation
-   scheduler and a dedicated arrival/eviction convergence validator are still
-   required.
+   scheduler is still required. The visibility validator now waits for the
+   local 3x3 neighborhood to become clean after initial arrival and after
+   recenter, including nonzero light revisions and no pending remesh request,
+   and reports per-chunk gaps if convergence times out.
 3. Complete the Libft lighting tests. Foundational coverage now includes
    pack/unpack, combined darkening, update-configuration bounds, direct
    skylight, full roof occlusion, deterministic local builds, and build stats.

@@ -72,6 +72,85 @@ static bool wait_for_chunk_state(World &world, double camera_x,
 	return (false);
 }
 
+static bool required_light_converged(const World &world,
+	const Camera &camera) noexcept
+{
+	const int32_t radius = 1;
+	const int32_t center_chunk_x = WorldCoordinates::floor_divide(
+		static_cast<int32_t>(camera.x), GAME_VOXEL_CHUNK_WIDTH);
+	const int32_t center_chunk_z = WorldCoordinates::floor_divide(
+		static_cast<int32_t>(camera.z), GAME_VOXEL_CHUNK_DEPTH);
+	int32_t index;
+
+	index = 0;
+	while (index < world.chunk_count)
+	{
+		const WorldChunk &chunk = world.chunks[index];
+		const int32_t offset_x = chunk.chunk_x - center_chunk_x;
+		const int32_t offset_z = chunk.chunk_z - center_chunk_z;
+		if (chunk.initialized == true
+			&& offset_x * offset_x + offset_z * offset_z <= radius * radius
+			&& (chunk.mesh_dirty || chunk.pending_mesh_request_id != 0U
+				|| chunk.light_revision == 0U))
+			return (false);
+		index += 1;
+	}
+	return (true);
+}
+
+static bool wait_for_required_light_convergence(World &world,
+	const Camera &camera) noexcept
+{
+	const std::chrono::steady_clock::time_point deadline =
+		std::chrono::steady_clock::now() + std::chrono::seconds(30);
+	int32_t error_code;
+
+	while (std::chrono::steady_clock::now() < deadline)
+	{
+		error_code = world.update_around(camera.x, camera.z, 0,
+			WorldCoordinates::REQUIRED_VISIBLE_DISTANCE);
+		if (error_code != FT_ERR_SUCCESS)
+			return (false);
+		if (required_light_converged(world, camera))
+			return (true);
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	World::StreamDiagnostics diagnostics = world.stream_diagnostics();
+	std::fprintf(stderr,
+		"visible-distance: light convergence timeout pending=%zu active=%zu "
+		"stale=%zu\n", diagnostics.pending_count,
+		diagnostics.active_generation_count, diagnostics.stale_result_count);
+	{
+		const int32_t radius = 1;
+		const int32_t center_chunk_x = WorldCoordinates::floor_divide(
+			static_cast<int32_t>(camera.x), GAME_VOXEL_CHUNK_WIDTH);
+		const int32_t center_chunk_z = WorldCoordinates::floor_divide(
+			static_cast<int32_t>(camera.z), GAME_VOXEL_CHUNK_DEPTH);
+		int32_t index = 0;
+		while (index < world.chunk_count)
+		{
+			const WorldChunk &chunk = world.chunks[index];
+			const int32_t offset_x = chunk.chunk_x - center_chunk_x;
+			const int32_t offset_z = chunk.chunk_z - center_chunk_z;
+			if (chunk.initialized == true
+				&& offset_x * offset_x + offset_z * offset_z <= radius * radius
+				&& (chunk.mesh_dirty
+					|| chunk.pending_mesh_request_id != 0U
+					|| chunk.light_revision == 0U))
+				std::fprintf(stderr,
+					"visible-distance: light gap chunk=(%d,%d) dirty=%d "
+					"pending=%llu light_revision=%llu mesh_revision=%llu\n",
+					chunk.chunk_x, chunk.chunk_z, chunk.mesh_dirty ? 1 : 0,
+					static_cast<unsigned long long>(
+						chunk.pending_mesh_request_id),
+					static_cast<unsigned long long>(chunk.light_revision),
+					static_cast<unsigned long long>(chunk.mesh_revision));
+			index += 1;
+		}
+	}
+	return (false);
+}
+
 WorldVisibilityValidator::WorldVisibilityValidator()
 {
 }
@@ -125,6 +204,11 @@ int WorldVisibilityValidator::validate() const
 		world.destroy();
 		return (1);
 	}
+	if (!wait_for_required_light_convergence(world, validation_camera))
+	{
+		world.destroy();
+		return (1);
+	}
 	visibility_validation_phase("visible-distance-complete", validation_started);
 	if (validate_height_invariant(world) == false)
 	{
@@ -163,6 +247,7 @@ int WorldVisibilityValidator::validate() const
 		error_code = FT_ERR_TIMEOUT;
 	visibility_validation_phase("recenter-complete", validation_started);
 	if (error_code != FT_ERR_SUCCESS
+		|| !wait_for_required_light_convergence(world, validation_camera)
 		|| validate_height_invariant(world) == false
 		|| validate_streamed_mesh_drawability(world) == false
 		|| validate_streamed_culling_admission(world, validation_camera)
