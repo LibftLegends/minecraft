@@ -171,9 +171,13 @@ aggregate suite.
    now in place; section-level/per-cell coalescing and starvation proof are
    still required. Verify that repeated requeueing cannot starve generation
    or a nearby player edit. Minecraft now uses a separate bounded background
-   configuration of 512/2048/8192 nodes with a 4 ms slice budget; the generic
-   Libft defaults remain unchanged. This prevents a large halo from being
-   split into thousands of tiny worker round trips on a single-worker host.
+   configuration of 2048/8192/32768 nodes with an 8 ms slice budget; the generic
+   Libft defaults remain unchanged. Dirty chunks in the visible 3x3
+   neighborhood are deduplicated into the existing priority queue, with only
+   the front request using the separate bounded 4096/65536/131072-node, 8 ms
+   interactive configuration. Distant arrival work retains the background
+   budget, so local convergence does not make every nearby solve compete at
+   once.
 2. Verify that neighbor arrival/removal enqueue bounded relighting as well as
    face remeshing, and that temporary conservative boundaries converge after
    the neighbor is published or evicted. Arrival and eviction invalidation are
@@ -550,9 +554,11 @@ generation and ordinary remesh requests are queued, a bounded number of
 generation requests is selected before another ordinary remesh. This prevents
 initial world construction from being consumed by lighting work without
 removing the asynchronous lighting path. The async-generation validator now
-also performs a break/place edit while startup generation is still active and
-requires the playable area to continue converging. It currently records the
-loaded-chunk progress, remesh queue peak, and the first visible mesh frame.
+also performs four consecutive break/place cycles on the same block while
+startup generation is still active and requires the playable area to continue
+converging. This exercises invalidation coalescing and repeated priority
+requeueing instead of only testing one edit. It records loaded-chunk progress,
+remesh queue peak, and the first visible mesh frame.
 These measurements are now available in the validator output. The validator
 now enforces a 1,200-frame startup budget and emits an async-worldgen-metrics
 JSON line containing frames, loaded chunks, snapshot bytes, scanned/propagated

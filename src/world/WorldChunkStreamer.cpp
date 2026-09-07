@@ -31,17 +31,17 @@ WorldChunkStreamer::WorldChunkStreamer(World &world) : world_(world)
 	 * would make a 15-block halo require thousands of scheduler round trips on
 	 * a single-worker host.  Keep the work bounded while making each worker
 	 * slice large enough to finish in a practical time. */
-	this->light_update_config_.min_nodes_per_frame = 512U;
-	this->light_update_config_.target_nodes_per_frame = 2048U;
-	this->light_update_config_.max_nodes_per_frame = 8192U;
-	this->light_update_config_.time_budget_microseconds = 4000U;
+	this->light_update_config_.min_nodes_per_frame = 2048U;
+	this->light_update_config_.target_nodes_per_frame = 8192U;
+	this->light_update_config_.max_nodes_per_frame = 32768U;
+	this->light_update_config_.time_budget_microseconds = 8000U;
 	/* Interactive edits must converge in one worker solve whenever possible.
 	 * This remains off the render thread; the normal configuration continues
 	 * to bound background remesh slices more conservatively. */
-	this->interactive_light_update_config_.min_nodes_per_frame = 1048576U;
-	this->interactive_light_update_config_.target_nodes_per_frame = 1048576U;
-	this->interactive_light_update_config_.max_nodes_per_frame = 1048576U;
-	this->interactive_light_update_config_.time_budget_microseconds = 100000U;
+	this->interactive_light_update_config_.min_nodes_per_frame = 4096U;
+	this->interactive_light_update_config_.target_nodes_per_frame = 65536U;
+	this->interactive_light_update_config_.max_nodes_per_frame = 131072U;
+	this->interactive_light_update_config_.time_budget_microseconds = 8000U;
 }
 
 WorldChunkStreamer::WorldChunkStreamer(const WorldChunkStreamer &other)
@@ -144,6 +144,10 @@ void WorldChunkStreamer::handle_recenter() noexcept
 		index += 1;
 	}
 	this->stream_relevance_epoch_ += 1U;
+	this->remesh_priority_anchor_valid_ = true;
+	this->remesh_priority_anchor_x_ = this->world_.center_chunk_x;
+	this->remesh_priority_anchor_z_ = this->world_.center_chunk_z;
+	this->remesh_priority_anchor_expiry_frame_ = this->stream_frame_ + 32U;
 	this->stream_candidate_cursor_ = 0U;
 	for (StreamCandidate &candidate : this->stream_candidates_)
 	{

@@ -8,6 +8,7 @@
 namespace
 {
 	static const int32_t ASYNC_WORLDGEN_MAX_STARTUP_FRAMES = 1200;
+	static const int32_t ASYNC_STARTUP_EDIT_REPETITIONS = 4;
 }
 
 WorldAsyncGenerationValidator::WorldAsyncGenerationValidator()
@@ -519,10 +520,22 @@ const WorldChunk *WorldAsyncGenerationValidator::stream_until_ready(World &world
 							{
 								const int32_t world_x = edit_chunk->world_x + edit_x;
 								const int32_t world_z = edit_chunk->world_z + edit_z;
-								if (world.delete_block_at(world_x, edit_y,
-									world_z) == FT_ERR_SUCCESS
-									&& world.place_block_at(world_x, edit_y,
-									world_z, block_id) == FT_ERR_SUCCESS)
+								int32_t edit_round;
+								bool edit_sequence_succeeded;
+
+								edit_round = 0;
+								edit_sequence_succeeded = true;
+								while (edit_round < ASYNC_STARTUP_EDIT_REPETITIONS
+									&& edit_sequence_succeeded)
+								{
+									if (world.delete_block_at(world_x, edit_y,
+										world_z) != FT_ERR_SUCCESS
+										|| world.place_block_at(world_x, edit_y,
+										world_z, block_id) != FT_ERR_SUCCESS)
+										edit_sequence_succeeded = false;
+									edit_round += 1;
+								}
+								if (edit_sequence_succeeded)
 									*startup_edit_applied = true;
 								edit_attempted = true;
 							}

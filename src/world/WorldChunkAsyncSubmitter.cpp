@@ -149,6 +149,27 @@ int32_t WorldChunkAsyncSubmitter::submit_dirty_remeshes(
 		&& streamer.stream_frame_
 			>= streamer.remesh_priority_anchor_expiry_frame_)
 		streamer.remesh_priority_anchor_valid_ = false;
+	/* Keep the visible neighborhood ahead of distant arrival work, but retain
+	 * one bounded interactive solve at a time. The priority queue deduplicates
+	 * repeated notifications and the normal scan still services everything
+	 * outside this local window. */
+	{
+		static const int32_t offsets[9][2] = {{-1, -1}, {0, -1}, {1, -1},
+			{-1, 0}, {0, 0}, {1, 0}, {-1, 1}, {0, 1}, {1, 1}};
+		int32_t offset_index = 0;
+		while (offset_index < 9)
+		{
+			WorldChunk *nearby_chunk = streamer.world_.find_chunk_mutable(
+				streamer.world_.center_chunk_x + offsets[offset_index][0],
+				streamer.world_.center_chunk_z + offsets[offset_index][1]);
+			if (nearby_chunk != nullptr && nearby_chunk->initialized
+				&& nearby_chunk->mesh_dirty
+				&& nearby_chunk->pending_mesh_request_id == 0U)
+				streamer.prioritize_chunk_remesh(nearby_chunk->chunk_x,
+					nearby_chunk->chunk_z);
+			offset_index += 1;
+		}
+	}
 	if (streamer.priority_remesh_pending_)
 	{
 		const WorldChunkStreamer::RemeshPriority priority =
