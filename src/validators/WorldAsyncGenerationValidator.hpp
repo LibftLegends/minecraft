@@ -16,7 +16,9 @@ class WorldAsyncGenerationValidator : public IValidator
 	static bool playable_area_is_ready(const World &world) noexcept;
 	static void report_playable_area_gaps(const World &world) noexcept;
 	static const WorldChunk *stream_until_ready(World &world,
-		int32_t *frame, bool *startup_edit_applied) noexcept;
+		int32_t *frame, bool *startup_edit_applied,
+		std::size_t *remesh_queue_peak,
+		int32_t *first_visible_mesh_frame) noexcept;
 	static void report_failure(const World &world, int32_t frame) noexcept;
 
   public:

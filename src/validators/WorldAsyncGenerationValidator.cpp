@@ -463,17 +463,24 @@ void WorldAsyncGenerationValidator::report_playable_area_gaps(
 }
 
 const WorldChunk *WorldAsyncGenerationValidator::stream_until_ready(World &world,
-	int32_t *frame, bool *startup_edit_applied) noexcept
+	int32_t *frame, bool *startup_edit_applied,
+	std::size_t *remesh_queue_peak,
+	int32_t *first_visible_mesh_frame) noexcept
 {
 	/* Require the same center-plus-playable-ring contract used by loading. */
 	const int32_t target_chunk_x = -1;
 	const int32_t target_chunk_z = 0;
+	World::StreamDiagnostics initial_diagnostics;
 	int32_t error_code;
 	bool edit_attempted;
 
-	if (startup_edit_applied == nullptr)
+	if (startup_edit_applied == nullptr || remesh_queue_peak == nullptr
+		|| first_visible_mesh_frame == nullptr)
 		return (nullptr);
 	*startup_edit_applied = false;
+	*remesh_queue_peak = 0U;
+	*first_visible_mesh_frame = -1;
+	initial_diagnostics = world.stream_diagnostics();
 	edit_attempted = false;
 
 	while (!WorldAsyncGenerationValidator::playable_area_is_ready(world)
@@ -528,12 +535,20 @@ const WorldChunk *WorldAsyncGenerationValidator::stream_until_ready(World &world
 			std::chrono::steady_clock::now();
 		error_code = world.update_around(0.0, 0.0, 4,
 				WorldCoordinates::REQUIRED_VISIBLE_DISTANCE);
+		World::StreamDiagnostics current_diagnostics =
+			world.stream_diagnostics();
+		if (current_diagnostics.remesh_queue_peak > *remesh_queue_peak)
+			*remesh_queue_peak = current_diagnostics.remesh_queue_peak;
+		if (*first_visible_mesh_frame < 0
+			&& current_diagnostics.playable_drawable_count
+				> initial_diagnostics.playable_drawable_count)
+			*first_visible_mesh_frame = *frame;
 		const uint64_t update_us = static_cast<uint64_t>(
 			std::chrono::duration_cast<std::chrono::microseconds>(
 				std::chrono::steady_clock::now() - update_start).count());
 		if (error_code != FT_ERR_SUCCESS)
 		{
-			World::StreamDiagnostics diagnostics = world.stream_diagnostics();
+			World::StreamDiagnostics diagnostics = current_diagnostics;
 			std::fprintf(stderr,
 				"async-worldgen: update failed frame=%d error=%d "
 				"pending=%zu ready=%zu active=%zu failed=%zu retry=%zu last_error=%d\n",
@@ -545,7 +560,7 @@ const WorldChunk *WorldAsyncGenerationValidator::stream_until_ready(World &world
 		}
 		if (update_us >= 1000000U)
 		{
-			World::StreamDiagnostics diagnostics = world.stream_diagnostics();
+			World::StreamDiagnostics diagnostics = current_diagnostics;
 			std::fprintf(stderr,
 				"async-worldgen: slow update frame=%d duration_us=%llu "
 				"loaded=%d pending=%zu ready=%zu active=%zu failed=%zu retry=%zu "
@@ -558,7 +573,7 @@ const WorldChunk *WorldAsyncGenerationValidator::stream_until_ready(World &world
 		}
 		if ((*frame % 100) == 0)
 		{
-			World::StreamDiagnostics diagnostics = world.stream_diagnostics();
+			World::StreamDiagnostics diagnostics = current_diagnostics;
 			std::fprintf(stderr,
 				"async-worldgen: progress frame=%d loaded=%d pending=%zu "
 				"ready=%zu active=%zu failed=%zu retry=%zu result_age_ns=%llu\n", *frame,
@@ -608,6 +623,8 @@ int WorldAsyncGenerationValidator::validate() const
 	int32_t frame;
 	int32_t initial_loaded_chunk_count;
 	int32_t final_loaded_chunk_count;
+	std::size_t remesh_queue_peak;
+	int32_t first_visible_mesh_frame;
 
 	error_code = WorldAsyncGenerationValidator::validate_diagonal_lighting_halo();
 	if (error_code != 0)
@@ -629,10 +646,12 @@ int WorldAsyncGenerationValidator::validate() const
 	frame = 0;
 	bool startup_edit_applied = false;
 	generated = WorldAsyncGenerationValidator::stream_until_ready(world,
-			&frame, &startup_edit_applied);
+			&frame, &startup_edit_applied, &remesh_queue_peak,
+			&first_visible_mesh_frame);
 	if (generated == nullptr
 		|| world.loaded_chunk_count <= initial_loaded_chunk_count
 		|| !startup_edit_applied
+		|| first_visible_mesh_frame < 0
 		|| (generated != nullptr
 			&& !WorldAsyncGenerationValidator::mesh_payload_is_valid(
 				generated->mesh))
@@ -655,5 +674,8 @@ int WorldAsyncGenerationValidator::validate() const
 	world.destroy();
 	std::printf("async-worldgen: ok frame=%d initial_loaded=%d final_loaded=%d\n",
 		frame, initial_loaded_chunk_count, final_loaded_chunk_count);
+	std::printf("async-worldgen: startup_edit=1 remesh_queue_peak=%zu "
+		"first_visible_mesh_frame=%d\n", remesh_queue_peak,
+		first_visible_mesh_frame);
 	return (0);
 }
