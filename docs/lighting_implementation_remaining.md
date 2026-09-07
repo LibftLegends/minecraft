@@ -186,12 +186,13 @@ aggregate suite.
   budget. The block-edit validator now also waits for the loaded cardinal
   neighborhood to become clean after an edit, exposing stranded pending
   remesh requests. The repeated block-edit workload and p50/p95/p99 remesh
-  timing are now present. The validator also edits a block on a chunk edge
-  and requires all four loaded cardinal neighbors to publish newer, clean
-  meshes and newer light revisions after both placement and deletion. Queue peak,
-  propagation count,
-  snapshot bytes, stale-job counts, and direct edit-to-outside light-value
-  assertions still need to be added.
+   timing are now present. The validator now places an emitting block on a
+   chunk edge, verifies block-light propagation into the neighboring chunk,
+   verifies restoration after deletion, and requires all four loaded cardinal
+   neighbors to publish newer, clean meshes and newer light revisions after
+   both placement and deletion. Queue peak, propagation count, snapshot
+   bytes, and stale-job counts still need to be exported as machine-readable
+   metrics.
 5. Add software-renderer lighting parity tests. The implementation now
    prepares the packed-light multiplier once per triangle and performs no
    per-pixel world/light lookup. The renderer validator now compares dark,
