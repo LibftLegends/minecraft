@@ -25,6 +25,39 @@ void World::register_chunk_index(const WorldChunk &chunk)
 			+ WorldCoordinates::CACHE_CHUNK_RADIUS)] = const_cast<WorldChunk *>(&chunk);
 }
 
+int32_t World::capture_remesh_snapshot(int32_t chunk_x, int32_t chunk_z,
+	WorldGenerationPipeline::WorldChunkSnapshot &snapshot) const noexcept
+{
+	const WorldChunk *target;
+	std::shared_lock<std::shared_mutex> read_lock(this->world_data_mutex_);
+
+	target = this->find_chunk(chunk_x, chunk_z);
+	if (target == nullptr || !target->initialized)
+		return (FT_ERR_NOT_FOUND);
+	return (this->chunk_streamer.pipeline().capture_snapshot(*target,
+		this->find_chunk(chunk_x - 1, chunk_z),
+		this->find_chunk(chunk_x + 1, chunk_z),
+		this->find_chunk(chunk_x, chunk_z - 1),
+		this->find_chunk(chunk_x, chunk_z + 1),
+		this->find_chunk(chunk_x - 1, chunk_z - 1),
+		this->find_chunk(chunk_x + 1, chunk_z - 1),
+		this->find_chunk(chunk_x - 1, chunk_z + 1),
+		this->find_chunk(chunk_x + 1, chunk_z + 1), snapshot));
+}
+
+void World::clear_pending_remesh(int32_t chunk_x, int32_t chunk_z,
+	uint64_t request_id) noexcept
+{
+	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
+	WorldChunk *chunk = this->find_chunk_mutable(chunk_x, chunk_z);
+
+	if (chunk != nullptr && chunk->pending_mesh_request_id == request_id)
+	{
+		chunk->pending_mesh_request_id = 0U;
+		chunk->mesh_dirty = true;
+	}
+}
+
 const WorldChunk *World::find_chunk(int32_t chunk_x, int32_t chunk_z) const
 {
 	int32_t slot_x;

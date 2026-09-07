@@ -52,6 +52,7 @@ WorldChunkStreamer::WorldChunkStreamer(const WorldChunkStreamer &other)
 
 WorldChunkStreamer::~WorldChunkStreamer()
 {
+	this->reset();
 }
 
 WorldChunkStreamer &WorldChunkStreamer::operator=(const WorldChunkStreamer &other)
@@ -62,12 +63,21 @@ WorldChunkStreamer &WorldChunkStreamer::operator=(const WorldChunkStreamer &othe
 
 int32_t WorldChunkStreamer::initialize_pipeline() noexcept
 {
-	return (this->generation_pipeline_.initialize(0U, 0U));
+	int32_t error_code;
+
+	error_code = this->generation_pipeline_.initialize(0U, 0U);
+	if (error_code != FT_ERR_SUCCESS)
+		return (error_code);
+	error_code = this->start_remesh_capture_worker();
+	if (error_code != FT_ERR_SUCCESS)
+		(void)this->generation_pipeline_.destroy();
+	return (error_code);
 }
 
 void WorldChunkStreamer::reset() noexcept
 {
 	this->world_epoch_ += 1U;
+	this->stop_remesh_capture_worker();
 	(void)this->generation_pipeline_.destroy();
 	this->stream_candidates_radius_ = -1;
 	this->stream_candidate_cursor_ = 0U;
@@ -77,7 +87,7 @@ void WorldChunkStreamer::reset() noexcept
 	this->stale_result_count_ = 0U;
 	this->stale_stream_result_count_ = 0U;
 	this->stale_remesh_result_count_ = 0U;
-	this->remesh_snapshot_bytes_ = 0U;
+	this->remesh_snapshot_bytes_.store(0U);
 	this->remesh_scanned_cells_ = 0U;
 	this->remesh_propagated_cells_ = 0U;
 	this->remesh_light_queue_peak_ = 0U;
@@ -98,6 +108,95 @@ void WorldChunkStreamer::reset() noexcept
 	this->deferred_pending_edits_.clear();
 	this->deferred_touched_chunks_.clear();
 	this->priority_remeshes_.clear();
+}
+
+int32_t WorldChunkStreamer::start_remesh_capture_worker() noexcept
+{
+	if (this->remesh_capture_thread_.joinable())
+		return (FT_ERR_SUCCESS);
+	{
+		std::lock_guard<std::mutex> lock(this->remesh_capture_mutex_);
+		this->remesh_capture_stopping_ = false;
+	}
+	try
+	{
+		this->remesh_capture_thread_ = std::thread(
+			&WorldChunkStreamer::run_remesh_capture_worker, this);
+	}
+	catch (...)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	return (FT_ERR_SUCCESS);
+}
+
+void WorldChunkStreamer::stop_remesh_capture_worker() noexcept
+{
+	std::deque<RemeshCaptureTask> cancelled_tasks;
+
+	{
+		std::lock_guard<std::mutex> lock(this->remesh_capture_mutex_);
+		this->remesh_capture_stopping_ = true;
+		cancelled_tasks.swap(this->remesh_capture_tasks_);
+	}
+	this->remesh_capture_condition_.notify_all();
+	if (this->remesh_capture_thread_.joinable())
+		this->remesh_capture_thread_.join();
+	while (!cancelled_tasks.empty())
+	{
+		this->world_.clear_pending_remesh(cancelled_tasks.front().chunk_x,
+			cancelled_tasks.front().chunk_z, cancelled_tasks.front().request_id);
+		cancelled_tasks.pop_front();
+	}
+	this->remesh_capture_in_flight_.store(0U);
+}
+
+void WorldChunkStreamer::run_remesh_capture_worker() noexcept
+{
+	while (true)
+	{
+		RemeshCaptureTask task;
+		WorldGenerationPipeline::WorldChunkSnapshot snapshot;
+		int32_t error_code;
+		bool should_stop;
+
+		{
+			std::unique_lock<std::mutex> lock(this->remesh_capture_mutex_);
+			this->remesh_capture_condition_.wait(lock, [this]()
+			{
+				return (this->remesh_capture_stopping_
+					|| !this->remesh_capture_tasks_.empty());
+			});
+			should_stop = this->remesh_capture_stopping_
+				&& this->remesh_capture_tasks_.empty();
+			if (should_stop)
+				return ;
+			task = this->remesh_capture_tasks_.front();
+			this->remesh_capture_tasks_.pop_front();
+		}
+		error_code = this->world_.capture_remesh_snapshot(task.chunk_x,
+			task.chunk_z, snapshot);
+		if (error_code == FT_ERR_SUCCESS)
+		{
+			this->remesh_snapshot_bytes_.fetch_add(
+				(static_cast<uint64_t>(snapshot.blocks.size())
+					+ static_cast<uint64_t>(snapshot.lighting_blocks.size())
+					+ static_cast<uint64_t>(snapshot.west_border.size())
+					+ static_cast<uint64_t>(snapshot.east_border.size())
+					+ static_cast<uint64_t>(snapshot.north_border.size())
+					+ static_cast<uint64_t>(snapshot.south_border.size()))
+					* sizeof(uint32_t));
+			error_code = this->generation_pipeline_.submit_remesh(
+				task.request_id, task.world_epoch, task.relevance_epoch,
+				task.generation_revision, task.chunk_x, task.chunk_z,
+				task.voxel_revision, task.light_revision, std::move(snapshot),
+				&task.light_update_config);
+		}
+		if (error_code != FT_ERR_SUCCESS)
+			this->world_.clear_pending_remesh(task.chunk_x, task.chunk_z,
+				task.request_id);
+		this->remesh_capture_in_flight_.fetch_sub(1U);
+	}
 }
 
 int32_t WorldChunkStreamer::seed_initial_stream(int32_t stream_radius,
@@ -311,6 +410,11 @@ WorldGenerationPipeline &WorldChunkStreamer::pipeline() noexcept
 	return (this->generation_pipeline_);
 }
 
+const WorldGenerationPipeline &WorldChunkStreamer::pipeline() const noexcept
+{
+	return (this->generation_pipeline_);
+}
+
 void WorldChunkStreamer::invalidate_non_ready_candidates() noexcept
 {
 	for (StreamCandidate &candidate : this->stream_candidates_)
@@ -336,13 +440,9 @@ void WorldChunkStreamer::reset_candidates_after_regeneration() noexcept
 
 int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk) noexcept
 {
-	WorldGenerationPipeline::WorldChunkSnapshot snapshot;
 	int32_t error_code;
 	uint64_t request_id;
 	const voxel_light_update_config *resolved_light_config;
-#if defined(LIBFT_ENABLE_ANALYTICS)
-	const auto snapshot_start = std::chrono::steady_clock::now();
-#endif
 
 	if (!chunk.initialized || !chunk.mesh_dirty
 		|| chunk.pending_mesh_request_id != 0U)
@@ -354,55 +454,35 @@ int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk) noexcept
 		&& this->priority_remeshes_.front().chunk_z == chunk.chunk_z)
 		resolved_light_config = &this->interactive_light_update_config_;
 	if (this->generation_pipeline_.remesh_in_flight_count()
+		+ this->remesh_capture_in_flight_.load()
 		>= WORLD_STREAM_MAX_REMESH_IN_FLIGHT)
 		return (FT_ERR_FULL);
-	error_code = this->generation_pipeline_.capture_snapshot(chunk,
-			this->world_.find_chunk(chunk.chunk_x - 1, chunk.chunk_z),
-			this->world_.find_chunk(chunk.chunk_x + 1, chunk.chunk_z),
-			this->world_.find_chunk(chunk.chunk_x, chunk.chunk_z - 1),
-			this->world_.find_chunk(chunk.chunk_x, chunk.chunk_z + 1),
-			this->world_.find_chunk(chunk.chunk_x - 1, chunk.chunk_z - 1),
-			this->world_.find_chunk(chunk.chunk_x + 1, chunk.chunk_z - 1),
-			this->world_.find_chunk(chunk.chunk_x - 1, chunk.chunk_z + 1),
-			this->world_.find_chunk(chunk.chunk_x + 1, chunk.chunk_z + 1),
-			snapshot);
-#if defined(LIBFT_ENABLE_ANALYTICS)
-	const uint64_t snapshot_us = static_cast<uint64_t>(
-		std::chrono::duration_cast<std::chrono::microseconds>(
-			std::chrono::steady_clock::now() - snapshot_start).count());
-	if (snapshot_us >= 8000U)
-		std::fprintf(stderr,
-			"[Analytics][World] slow remesh snapshot chunk=(%d,%d) "
-			"duration_us=%llu blocks=%zu lighting_blocks=%zu "
-			"border_bytes=%zu\n", chunk.chunk_x, chunk.chunk_z,
-			static_cast<unsigned long long>(snapshot_us), snapshot.blocks.size(),
-			snapshot.lighting_blocks.size(),
-			(snapshot.west_border.size() + snapshot.east_border.size()
-				+ snapshot.north_border.size() + snapshot.south_border.size())
-				* sizeof(uint32_t));
-#endif
-	if (error_code != FT_ERR_SUCCESS)
-		return (error_code);
-	this->remesh_snapshot_bytes_ +=
-		(snapshot.blocks.size() + snapshot.lighting_blocks.size()
-			+ snapshot.west_border.size() + snapshot.east_border.size()
-			+ snapshot.north_border.size() + snapshot.south_border.size())
-		* sizeof(uint32_t);
 	request_id = this->next_request_id_++;
-	error_code = this->generation_pipeline_.submit_remesh(request_id,
-			this->world_epoch_, this->stream_relevance_epoch_,
-			this->generation_revision_, chunk.chunk_x, chunk.chunk_z,
-			chunk.voxel_revision, chunk.light_revision, std::move(snapshot),
-			resolved_light_config);
-	if (error_code == FT_ERR_SUCCESS)
+	RemeshCaptureTask task;
+	task.request_id = request_id;
+	task.world_epoch = this->world_epoch_;
+	task.relevance_epoch = this->stream_relevance_epoch_;
+	task.generation_revision = this->generation_revision_;
+	task.chunk_x = chunk.chunk_x;
+	task.chunk_z = chunk.chunk_z;
+	task.voxel_revision = chunk.voxel_revision;
+	task.light_revision = chunk.light_revision;
+	task.light_update_config = *resolved_light_config;
+	try
 	{
+		std::lock_guard<std::mutex> lock(this->remesh_capture_mutex_);
+		if (this->remesh_capture_stopping_)
+			return (FT_ERR_INVALID_STATE);
 		chunk.pending_mesh_request_id = request_id;
-		const std::size_t in_flight =
-			this->generation_pipeline_.remesh_in_flight_count();
-		if (in_flight > this->remesh_queue_peak_)
-			this->remesh_queue_peak_ = in_flight;
+		this->remesh_capture_tasks_.push_back(task);
+		this->remesh_capture_in_flight_.fetch_add(1U);
 	}
-	return (error_code);
+	catch (...)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	this->remesh_capture_condition_.notify_one();
+	return (FT_ERR_SUCCESS);
 }
 
 void WorldChunkStreamer::mark_remesh_dirty(WorldChunk &chunk) noexcept

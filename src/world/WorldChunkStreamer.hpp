@@ -2,6 +2,10 @@
 # define WORLD_CHUNK_STREAMER_HPP
 
 # include "../../src/world/WorldGenerationPipeline.hpp"
+# include <atomic>
+# include <condition_variable>
+# include <mutex>
+# include <thread>
 
 class						World;
 class						WorldChunk;
@@ -85,7 +89,7 @@ class WorldChunkStreamer
 		int32_t chunk_z;
 	};
 
-	uint64_t remesh_snapshot_bytes_ = 0U;
+	std::atomic<uint64_t> remesh_snapshot_bytes_ = 0U;
 	uint64_t remesh_scanned_cells_ = 0U;
 	uint64_t remesh_propagated_cells_ = 0U;
 	uint64_t remesh_light_queue_peak_ = 0U;
@@ -108,6 +112,24 @@ class WorldChunkStreamer
 		std::size_t			stale_result_count_ = 0U;
 		std::size_t			stale_stream_result_count_ = 0U;
 		std::size_t			stale_remesh_result_count_ = 0U;
+	struct RemeshCaptureTask
+	{
+		uint64_t request_id;
+		uint64_t world_epoch;
+		uint64_t relevance_epoch;
+		uint32_t generation_revision;
+		int32_t chunk_x;
+		int32_t chunk_z;
+		uint64_t voxel_revision;
+		uint64_t light_revision;
+		voxel_light_update_config light_update_config;
+	};
+	std::deque<RemeshCaptureTask> remesh_capture_tasks_;
+	std::mutex remesh_capture_mutex_;
+	std::condition_variable remesh_capture_condition_;
+	std::thread remesh_capture_thread_;
+	bool remesh_capture_stopping_ = false;
+	std::atomic<std::size_t> remesh_capture_in_flight_ = 0U;
 
 	WorldChunkStreamer(World &world);
 	WorldChunkStreamer(const WorldChunkStreamer &other);
@@ -132,6 +154,7 @@ class WorldChunkStreamer
 	uint32_t generation_revision() const noexcept;
 	void bump_generation_revision() noexcept;
 	WorldGenerationPipeline &pipeline() noexcept;
+	const WorldGenerationPipeline &pipeline() const noexcept;
 	void invalidate_non_ready_candidates() noexcept;
 	void reset_candidates_after_regeneration() noexcept;
 	int32_t queue_chunk_remesh(WorldChunk &chunk) noexcept;
@@ -146,6 +169,9 @@ class WorldChunkStreamer
 	int32_t					generation_credit_ = 0;
 
 	void handle_recenter() noexcept;
+	int32_t start_remesh_capture_worker() noexcept;
+	void stop_remesh_capture_worker() noexcept;
+	void run_remesh_capture_worker() noexcept;
 	int32_t stream_full_sync(int32_t stream_radius, int32_t generation_budget,
 		int32_t *generated) noexcept;
 	int32_t dispatch_incremental_stream(int32_t stream_radius,

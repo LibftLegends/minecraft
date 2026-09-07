@@ -83,6 +83,10 @@ int32_t RuntimeAnalytics::initialize(ft_bool start_exporter,
     error_code = g_session.initialize(configuration);
     if (error_code == FT_ERR_SUCCESS)
         error_code = register_regions(g_session, g_region_ids);
+    if (error_code == FT_ERR_SUCCESS)
+        error_code = analytics_runtime_register_regions(&g_session);
+    if (error_code == FT_ERR_SUCCESS)
+        error_code = analytics_runtime_set_sample_rate(16U);
     if (error_code != FT_ERR_SUCCESS)
     {
         int32_t destroy_error;
@@ -126,13 +130,17 @@ int32_t RuntimeAnalytics::shutdown() noexcept
 {
     int32_t error_code;
     int32_t world_error;
+    int32_t runtime_error;
 
     if (g_initialised == FT_FALSE)
         return (FT_ERR_SUCCESS);
     world_error = RuntimeAnalytics::end_world_session();
+    runtime_error = analytics_runtime_shutdown();
     error_code = g_session.destroy();
     if (error_code == FT_ERR_SUCCESS && world_error != FT_ERR_SUCCESS)
         error_code = world_error;
+    if (error_code == FT_ERR_SUCCESS && runtime_error != FT_ERR_SUCCESS)
+        error_code = runtime_error;
     g_initialised = FT_FALSE;
     return (error_code);
 }

@@ -185,6 +185,10 @@ class World
 	const WorldChunk *find_chunk(int32_t chunk_x, int32_t chunk_z) const;
 	WorldChunk *find_chunk_mutable(int32_t chunk_x, int32_t chunk_z);
 	void register_chunk_index(const WorldChunk &chunk);
+	int32_t capture_remesh_snapshot(int32_t chunk_x, int32_t chunk_z,
+		WorldGenerationPipeline::WorldChunkSnapshot &snapshot) const noexcept;
+	void clear_pending_remesh(int32_t chunk_x, int32_t chunk_z,
+		uint64_t request_id) noexcept;
 
 	int32_t begin_world_revision(const voxel_generation_config &config,
 		RegenerationMode mode);
