@@ -72,6 +72,12 @@ int32_t WorldGenerationResultCommitter::commit_remesh_result(World &world,
 	uint64_t destination_move_us;
 	uint64_t light_move_us;
 #endif
+	world.chunk_streamer.remesh_scanned_cells_ += result.light_scanned_cells;
+	world.chunk_streamer.remesh_propagated_cells_ +=
+		result.light_propagated_cells;
+	if (result.light_queue_peak > world.chunk_streamer.remesh_light_queue_peak_)
+		world.chunk_streamer.remesh_light_queue_peak_ = result.light_queue_peak;
+	world.chunk_streamer.remesh_completed_count_ += 1U;
 
 	chunk = world.find_chunk_mutable(result.chunk_x, result.chunk_z);
 	if (chunk == nullptr || !chunk->initialized

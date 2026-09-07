@@ -170,7 +170,10 @@ aggregate suite.
    approximated by chunk distance. Notification-level revision coalescing is
    now in place; section-level/per-cell coalescing and starvation proof are
    still required. Verify that repeated requeueing cannot starve generation
-   or a nearby player edit.
+   or a nearby player edit. Minecraft now uses a separate bounded background
+   configuration of 512/2048/8192 nodes with a 4 ms slice budget; the generic
+   Libft defaults remain unchanged. This prevents a large halo from being
+   split into thousands of tiny worker round trips on a single-worker host.
 2. Verify that neighbor arrival/removal enqueue bounded relighting as well as
    face remeshing, and that temporary conservative boundaries converge after
    the neighbor is published or evicted. Arrival and eviction invalidation are
@@ -179,7 +182,9 @@ aggregate suite.
    scheduler is still required. The visibility validator now waits for the
    local 3x3 neighborhood to become clean after initial arrival and after
    recenter, including nonzero light revisions and no pending remesh request,
-   and reports per-chunk gaps if convergence times out.
+   and reports per-chunk gaps if convergence times out. The Windows visibility
+   validator now passes both convergence checks with this scheduling
+   configuration, and the full aggregate validator passes as well.
 3. Complete the Libft lighting tests. Foundational coverage now includes
    pack/unpack, combined darkening, update-configuration bounds, direct
    skylight, full roof occlusion, deterministic local builds, and build stats.
@@ -202,8 +207,8 @@ aggregate suite.
    verifies restoration after deletion, and requires all four loaded cardinal
    neighbors to publish newer, clean meshes and newer light revisions after
    both placement and deletion. Queue peak, propagation count, snapshot
-   bytes, and stale-job counts still need to be exported as machine-readable
-   metrics.
+   bytes, and stale-job counts are now exported by the async-generation
+   validator as a machine-readable JSON metrics line.
 5. Add software-renderer lighting parity tests. The implementation now
    prepares the packed-light multiplier once per triangle and performs no
    per-pixel world/light lookup. The renderer validator now compares dark,
@@ -539,6 +544,9 @@ removing the asynchronous lighting path. The async-generation validator now
 also performs a break/place edit while startup generation is still active and
 requires the playable area to continue converging. It currently records the
 loaded-chunk progress, remesh queue peak, and the first visible mesh frame.
-These measurements are now available in the validator output; the remaining
-work is to add an explicit latency budget assertion and retain the values in
-the CI artifact so regressions are visible across runs.
+These measurements are now available in the validator output. The validator
+now enforces a 1,200-frame startup budget and emits an async-worldgen-metrics
+JSON line containing frames, loaded chunks, snapshot bytes, scanned/propagated
+cells, light queue peak, completed remeshes, stale results, and first-visible-
+mesh frame. A CI wrapper can retain this line as an artifact without parsing
+human-readable diagnostics.

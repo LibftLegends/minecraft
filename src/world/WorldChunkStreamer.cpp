@@ -26,6 +26,15 @@ WorldChunkStreamer::WorldChunkStreamer(World &world) : world_(world)
 {
 	voxel_light_update_config_defaults(this->light_update_config_);
 	voxel_light_update_config_defaults(this->interactive_light_update_config_);
+	/* A remesh snapshot is already immutable and the solve is worker-owned.
+	 * The generic Libft defaults are intentionally small, but using them here
+	 * would make a 15-block halo require thousands of scheduler round trips on
+	 * a single-worker host.  Keep the work bounded while making each worker
+	 * slice large enough to finish in a practical time. */
+	this->light_update_config_.min_nodes_per_frame = 512U;
+	this->light_update_config_.target_nodes_per_frame = 2048U;
+	this->light_update_config_.max_nodes_per_frame = 8192U;
+	this->light_update_config_.time_budget_microseconds = 4000U;
 	/* Interactive edits must converge in one worker solve whenever possible.
 	 * This remains off the render thread; the normal configuration continues
 	 * to bound background remesh slices more conservatively. */
@@ -68,6 +77,11 @@ void WorldChunkStreamer::reset() noexcept
 	this->stale_result_count_ = 0U;
 	this->stale_stream_result_count_ = 0U;
 	this->stale_remesh_result_count_ = 0U;
+	this->remesh_snapshot_bytes_ = 0U;
+	this->remesh_scanned_cells_ = 0U;
+	this->remesh_propagated_cells_ = 0U;
+	this->remesh_light_queue_peak_ = 0U;
+	this->remesh_completed_count_ = 0U;
 	this->next_remesh_submission_frame_ = 0U;
 	this->priority_remesh_pending_ = false;
 	this->remesh_priority_anchor_valid_ = false;
@@ -365,6 +379,11 @@ int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk) noexcept
 #endif
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
+	this->remesh_snapshot_bytes_ +=
+		(snapshot.blocks.size() + snapshot.lighting_blocks.size()
+			+ snapshot.west_border.size() + snapshot.east_border.size()
+			+ snapshot.north_border.size() + snapshot.south_border.size())
+		* sizeof(uint32_t);
 	request_id = this->next_request_id_++;
 	error_code = this->generation_pipeline_.submit_remesh(request_id,
 			this->world_epoch_, this->stream_relevance_epoch_,

@@ -25,6 +25,11 @@ class WorldChunkStreamer
 		std::size_t playable_drawable_count;
 		std::size_t active_generation_count;
 		std::size_t remesh_queue_peak;
+		uint64_t remesh_snapshot_bytes;
+		uint64_t remesh_scanned_cells;
+		uint64_t remesh_propagated_cells;
+		uint64_t remesh_light_queue_peak;
+		uint64_t remesh_completed_count;
 		std::size_t stale_result_count;
 		std::size_t stale_stream_result_count;
 		std::size_t stale_remesh_result_count;
@@ -79,6 +84,12 @@ class WorldChunkStreamer
 		int32_t chunk_x;
 		int32_t chunk_z;
 	};
+
+	uint64_t remesh_snapshot_bytes_ = 0U;
+	uint64_t remesh_scanned_cells_ = 0U;
+	uint64_t remesh_propagated_cells_ = 0U;
+	uint64_t remesh_light_queue_peak_ = 0U;
+	uint64_t remesh_completed_count_ = 0U;
 	std::deque<RemeshPriority> priority_remeshes_;
 	bool deferred_edits_sorted_ = false;
 	std::size_t deferred_apply_cursor_ = 0U;

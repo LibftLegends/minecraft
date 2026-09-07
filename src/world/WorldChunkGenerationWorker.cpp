@@ -139,6 +139,9 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 	result->error_code = FT_ERR_SUCCESS;
 	result->generation_duration_nanoseconds = 0U;
 	result->mesh_duration_nanoseconds = 0U;
+	result->light_scanned_cells = 0U;
+	result->light_propagated_cells = 0U;
+	result->light_queue_peak = 0U;
 	result->chunk.reset(new (std::nothrow) WorldChunk());
 	if (result->chunk == nullptr)
 	{
@@ -208,6 +211,9 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 	result->error_code = FT_ERR_SUCCESS;
 	result->generation_duration_nanoseconds = 0U;
 	result->mesh_duration_nanoseconds = 0U;
+	result->light_scanned_cells = 0U;
+	result->light_propagated_cells = 0U;
+	result->light_queue_peak = 0U;
 	if (request.snapshot == nullptr)
 	{
 		result->error_code = FT_ERR_NO_MEMORY;
@@ -250,6 +256,9 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 	light_complete = FT_FALSE;
 	error_code = request.remesh_light_operation->step(light_config,
 			&light_stats, &light_complete);
+	result->light_scanned_cells = light_stats.scanned_cells;
+	result->light_propagated_cells = light_stats.propagated_cells;
+	result->light_queue_peak = light_stats.queue_peak;
 	if (error_code != FT_ERR_SUCCESS)
 	{
 		result->error_code = error_code;

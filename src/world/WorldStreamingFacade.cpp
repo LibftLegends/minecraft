@@ -211,6 +211,11 @@ World::StreamDiagnostics World::stream_diagnostics() const
 	diagnostics.playable_drawable_count = source.playable_drawable_count;
 	diagnostics.active_generation_count = source.active_generation_count;
 	diagnostics.remesh_queue_peak = source.remesh_queue_peak;
+	diagnostics.remesh_snapshot_bytes = source.remesh_snapshot_bytes;
+	diagnostics.remesh_scanned_cells = source.remesh_scanned_cells;
+	diagnostics.remesh_propagated_cells = source.remesh_propagated_cells;
+	diagnostics.remesh_light_queue_peak = source.remesh_light_queue_peak;
+	diagnostics.remesh_completed_count = source.remesh_completed_count;
 	diagnostics.stale_result_count = source.stale_result_count;
 	diagnostics.stale_stream_result_count = source.stale_stream_result_count;
 	diagnostics.stale_remesh_result_count = source.stale_remesh_result_count;

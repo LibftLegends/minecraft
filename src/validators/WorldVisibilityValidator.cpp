@@ -118,8 +118,12 @@ static bool wait_for_required_light_convergence(World &world,
 	World::StreamDiagnostics diagnostics = world.stream_diagnostics();
 	std::fprintf(stderr,
 		"visible-distance: light convergence timeout pending=%zu active=%zu "
-		"stale=%zu\n", diagnostics.pending_count,
-		diagnostics.active_generation_count, diagnostics.stale_result_count);
+		"stale=%zu pipeline_queued=%zu pipeline_active=%zu "
+		"remesh_in_flight=%zu\n", diagnostics.pending_count,
+		diagnostics.active_generation_count, diagnostics.stale_result_count,
+		world.chunk_streamer.pipeline().queued_count(),
+		world.chunk_streamer.pipeline().active_count(),
+		world.chunk_streamer.pipeline().remesh_in_flight_count());
 	{
 		const int32_t radius = 1;
 		const int32_t center_chunk_x = WorldCoordinates::floor_divide(

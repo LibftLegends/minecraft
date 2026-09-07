@@ -90,6 +90,11 @@ class World
 		size_t						playable_drawable_count;
 		size_t						active_generation_count;
 		size_t						remesh_queue_peak;
+		uint64_t					remesh_snapshot_bytes;
+		uint64_t					remesh_scanned_cells;
+		uint64_t					remesh_propagated_cells;
+		uint64_t					remesh_light_queue_peak;
+		uint64_t					remesh_completed_count;
 		size_t					deferred_edit_count;
 		size_t					deferred_edit_cursor;
 		uint64_t					frame;

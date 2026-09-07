@@ -5,6 +5,11 @@
 #include <cstdio>
 #include <thread>
 
+namespace
+{
+	static const int32_t ASYNC_WORLDGEN_MAX_STARTUP_FRAMES = 1200;
+}
+
 WorldAsyncGenerationValidator::WorldAsyncGenerationValidator()
 {
 }
@@ -484,7 +489,7 @@ const WorldChunk *WorldAsyncGenerationValidator::stream_until_ready(World &world
 	edit_attempted = false;
 
 	while (!WorldAsyncGenerationValidator::playable_area_is_ready(world)
-		&& *frame < 4000)
+		&& *frame < ASYNC_WORLDGEN_MAX_STARTUP_FRAMES)
 	{
 		/* Exercise the same priority edit path while generation and ordinary
 		 * arrival remeshes are still active.  A previous implementation could
@@ -650,6 +655,7 @@ int WorldAsyncGenerationValidator::validate() const
 			&frame, &startup_edit_applied, &remesh_queue_peak,
 			&first_visible_mesh_frame);
 	if (generated == nullptr
+		|| frame >= ASYNC_WORLDGEN_MAX_STARTUP_FRAMES
 		|| world.loaded_chunk_count <= initial_loaded_chunk_count
 		|| !startup_edit_applied
 		|| first_visible_mesh_frame < 0
@@ -678,7 +684,26 @@ int WorldAsyncGenerationValidator::validate() const
 		frame, initial_loaded_chunk_count, final_loaded_chunk_count);
 	std::printf("async-worldgen: startup_edit=1 remesh_queue_peak=%zu "
 		"stale_result_count=%zu stale_stream=%zu stale_remesh=%zu "
-		"first_visible_mesh_frame=%d\n", remesh_queue_peak,
+		"first_visible_mesh_frame=%d startup_budget_frames=%d\n",
+		remesh_queue_peak,
+		final_diagnostics.stale_result_count,
+		final_diagnostics.stale_stream_result_count,
+		final_diagnostics.stale_remesh_result_count,
+		first_visible_mesh_frame, ASYNC_WORLDGEN_MAX_STARTUP_FRAMES);
+	std::printf("async-worldgen-metrics: {\"frames\":%d,"
+		"\"initial_loaded\":%d,\"final_loaded\":%d,"
+		"\"remesh_queue_peak\":%zu,\"snapshot_bytes\":%llu,"
+		"\"scanned_cells\":%llu,\"propagated_cells\":%llu,"
+		"\"light_queue_peak\":%llu,\"remesh_completed\":%llu,"
+		"\"stale_results\":%zu,\"stale_stream\":%zu,"
+		"\"stale_remesh\":%zu,\"first_visible_mesh_frame\":%d}\n",
+		frame, initial_loaded_chunk_count, final_loaded_chunk_count,
+		remesh_queue_peak,
+		static_cast<unsigned long long>(final_diagnostics.remesh_snapshot_bytes),
+		static_cast<unsigned long long>(final_diagnostics.remesh_scanned_cells),
+		static_cast<unsigned long long>(final_diagnostics.remesh_propagated_cells),
+		static_cast<unsigned long long>(final_diagnostics.remesh_light_queue_peak),
+		static_cast<unsigned long long>(final_diagnostics.remesh_completed_count),
 		final_diagnostics.stale_result_count,
 		final_diagnostics.stale_stream_result_count,
 		final_diagnostics.stale_remesh_result_count,

@@ -63,6 +63,9 @@ class WorldGenerationPipeline
 		uint64_t					completed_at_nanoseconds;
 		uint64_t					generation_duration_nanoseconds;
 		uint64_t					mesh_duration_nanoseconds;
+		uint64_t					light_scanned_cells;
+		uint64_t					light_propagated_cells;
+		uint64_t					light_queue_peak;
 		int32_t						chunk_x;
 		int32_t						chunk_z;
 		WorldGenerationOperation	operation;

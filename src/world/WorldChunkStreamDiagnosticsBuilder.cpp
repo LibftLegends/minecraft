@@ -61,6 +61,11 @@ WorldChunkStreamer::Diagnostics WorldChunkStreamDiagnosticsBuilder::build(const 
 	diagnostics.playable_drawable_count = 0U;
 	diagnostics.active_generation_count = streamer.generation_pipeline_.active_count();
 	diagnostics.remesh_queue_peak = streamer.remesh_queue_peak_;
+	diagnostics.remesh_snapshot_bytes = streamer.remesh_snapshot_bytes_;
+	diagnostics.remesh_scanned_cells = streamer.remesh_scanned_cells_;
+	diagnostics.remesh_propagated_cells = streamer.remesh_propagated_cells_;
+	diagnostics.remesh_light_queue_peak = streamer.remesh_light_queue_peak_;
+	diagnostics.remesh_completed_count = streamer.remesh_completed_count_;
 	diagnostics.stale_result_count = streamer.stale_result_count_;
 	diagnostics.stale_stream_result_count = streamer.stale_stream_result_count_;
 	diagnostics.stale_remesh_result_count = streamer.stale_remesh_result_count_;
