@@ -143,6 +143,10 @@ Focused Windows evidence from the current checkout:
   has stopped expanding the world.
 - The normal `make -j2` target rebuilt and linked the analytics executable
   successfully.
+- The Windows `automated_tests.exe --validate-all` aggregate passed with zero
+  failures after the boundary-light validator change. The run reported 16
+  repeated edit samples at p50=59 ms, p95=60 ms, p99=60 ms, max=61 ms, and
+  async startup first-visible mesh at frame 9.
 
 This proves storage-to-CPU-mesh publication for the validator workload. The
 edit-priority upload path is compiled into both normal and analytics builds.
