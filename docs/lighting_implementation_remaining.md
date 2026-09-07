@@ -178,7 +178,9 @@ aggregate suite.
    executable, including metadata attenuation contracts, incremental
    operation versus clean-rebuild equivalence, and a per-step configured
    slice-bound assertion and sliced-operation versus clean-rebuild equality.
-   Still add broader chunk seams and cross-source deterministic-order cases.
+   A neighboring-chunk block-emitter seam regression now verifies contribution
+   and removal across the boundary; broader multi-source ordering cases and
+   Minecraft-level edit-to-outside assertions remain.
 4. Add Minecraft validators for edit-to-outside lighting, edit propagation
    across chunk boundaries, stale worker rejection, and the configured work
   budget. The block-edit validator now also waits for the loaded cardinal
