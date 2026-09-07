@@ -65,6 +65,9 @@ void WorldChunkStreamer::reset() noexcept
 	this->stream_candidate_lookup_.clear();
 	this->dirty_remesh_cursor_ = 0;
 	this->remesh_queue_peak_ = 0U;
+	this->stale_result_count_ = 0U;
+	this->stale_stream_result_count_ = 0U;
+	this->stale_remesh_result_count_ = 0U;
 	this->next_remesh_submission_frame_ = 0U;
 	this->priority_remesh_pending_ = false;
 	this->remesh_priority_anchor_valid_ = false;

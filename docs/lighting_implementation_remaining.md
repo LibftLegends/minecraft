@@ -147,6 +147,11 @@ Focused Windows evidence from the current checkout:
   failures after the boundary-light validator change. The run reported 16
   repeated edit samples at p50=59 ms, p95=60 ms, p99=60 ms, max=61 ms, and
   async startup first-visible mesh at frame 9.
+- Stale-result diagnostics are now split by source. A fresh async-generation
+  run completed successfully with `stale_result_count=5`, consisting of four
+  stale stream results and one stale remesh result. This confirms rejection is
+  active and gives the next scheduler pass a concrete remesh-stale case to
+  explain rather than hiding it in debug output.
 
 This proves storage-to-CPU-mesh publication for the validator workload. The
 edit-priority upload path is compiled into both normal and analytics builds.

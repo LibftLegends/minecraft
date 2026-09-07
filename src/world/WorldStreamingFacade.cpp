@@ -211,6 +211,9 @@ World::StreamDiagnostics World::stream_diagnostics() const
 	diagnostics.playable_drawable_count = source.playable_drawable_count;
 	diagnostics.active_generation_count = source.active_generation_count;
 	diagnostics.remesh_queue_peak = source.remesh_queue_peak;
+	diagnostics.stale_result_count = source.stale_result_count;
+	diagnostics.stale_stream_result_count = source.stale_stream_result_count;
+	diagnostics.stale_remesh_result_count = source.stale_remesh_result_count;
 	diagnostics.oldest_result_age_nanoseconds =
 		source.oldest_result_age_nanoseconds;
 	diagnostics.oldest_pending_age = source.oldest_pending_age;

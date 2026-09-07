@@ -625,6 +625,7 @@ int WorldAsyncGenerationValidator::validate() const
 	int32_t final_loaded_chunk_count;
 	std::size_t remesh_queue_peak;
 	int32_t first_visible_mesh_frame;
+	World::StreamDiagnostics final_diagnostics;
 
 	error_code = WorldAsyncGenerationValidator::validate_diagonal_lighting_halo();
 	if (error_code != 0)
@@ -670,12 +671,17 @@ int WorldAsyncGenerationValidator::validate() const
 		return (1);
 	}
 	final_loaded_chunk_count = world.loaded_chunk_count;
+	final_diagnostics = world.stream_diagnostics();
 	(void)expected.destroy();
 	world.destroy();
 	std::printf("async-worldgen: ok frame=%d initial_loaded=%d final_loaded=%d\n",
 		frame, initial_loaded_chunk_count, final_loaded_chunk_count);
 	std::printf("async-worldgen: startup_edit=1 remesh_queue_peak=%zu "
+		"stale_result_count=%zu stale_stream=%zu stale_remesh=%zu "
 		"first_visible_mesh_frame=%d\n", remesh_queue_peak,
+		final_diagnostics.stale_result_count,
+		final_diagnostics.stale_stream_result_count,
+		final_diagnostics.stale_remesh_result_count,
 		first_visible_mesh_frame);
 	return (0);
 }

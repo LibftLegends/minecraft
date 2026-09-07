@@ -82,6 +82,9 @@ class World
 
 	struct							StreamDiagnostics
 	{
+		size_t						stale_result_count;
+		size_t						stale_stream_result_count;
+		size_t						stale_remesh_result_count;
 		size_t						playable_failed_count;
 		size_t						playable_required_count;
 		size_t						playable_drawable_count;

@@ -79,6 +79,8 @@ int32_t WorldGenerationResultCommitter::commit_remesh_result(World &world,
 		|| chunk->voxel_revision != result.voxel_revision
 		|| chunk->light_revision != result.light_revision)
 	{
+		world.chunk_streamer.stale_result_count_ += 1U;
+		world.chunk_streamer.stale_remesh_result_count_ += 1U;
 #if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
 		if (chunk != nullptr && chunk->initialized
 			&& chunk->light_revision != result.light_revision)
@@ -348,6 +350,8 @@ int32_t WorldGenerationResultCommitter::commit_stream_result(WorldChunkStreamer 
 		|| candidate->relevance_epoch != result.relevance_epoch
 		|| candidate->generation_revision != result.generation_revision)
 	{
+		streamer.stale_result_count_ += 1U;
+		streamer.stale_stream_result_count_ += 1U;
 #if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
 		std::fprintf(stderr,
 			"[WorldGen] stale result request=%llu chunk=(%d,%d) "

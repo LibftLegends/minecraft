@@ -25,6 +25,9 @@ class WorldChunkStreamer
 		std::size_t playable_drawable_count;
 		std::size_t active_generation_count;
 		std::size_t remesh_queue_peak;
+		std::size_t stale_result_count;
+		std::size_t stale_stream_result_count;
+		std::size_t stale_remesh_result_count;
 		uint64_t		oldest_result_age_nanoseconds;
 		uint64_t			oldest_pending_age;
 		int32_t				last_error;
@@ -91,6 +94,9 @@ class WorldChunkStreamer
 		int32_t					remesh_priority_anchor_z_ = 0;
 		uint64_t				remesh_priority_anchor_expiry_frame_ = 0U;
 		std::size_t			remesh_queue_peak_ = 0U;
+		std::size_t			stale_result_count_ = 0U;
+		std::size_t			stale_stream_result_count_ = 0U;
+		std::size_t			stale_remesh_result_count_ = 0U;
 
 	WorldChunkStreamer(World &world);
 	WorldChunkStreamer(const WorldChunkStreamer &other);
