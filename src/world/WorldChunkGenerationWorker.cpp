@@ -194,6 +194,10 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 	voxel_light_update_config light_config;
 	ft_bool light_complete;
 	int32_t error_code;
+#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	std::chrono::steady_clock::time_point light_step_start;
+	std::chrono::steady_clock::time_point mesh_start;
+#endif
 
 	if (result == nullptr)
 		return (nullptr);
@@ -254,8 +258,28 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 		return (result);
 	}
 	light_complete = FT_FALSE;
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	light_step_start = std::chrono::steady_clock::now();
+	#endif
 	error_code = request.remesh_light_operation->step(light_config,
 			&light_stats, &light_complete);
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	{
+		const uint64_t light_step_us = static_cast<uint64_t>(
+			std::chrono::duration_cast<std::chrono::microseconds>(
+				std::chrono::steady_clock::now() - light_step_start).count());
+		if (light_step_us >= 100000U)
+			std::fprintf(stderr,
+				"[WorldGen] slow remesh light step request=%llu chunk=(%d,%d) "
+				"duration_us=%llu scanned=%llu propagated=%llu complete=%d\n",
+				static_cast<unsigned long long>(request.request_id),
+				request.chunk_x, request.chunk_z,
+				static_cast<unsigned long long>(light_step_us),
+				static_cast<unsigned long long>(light_stats.scanned_cells),
+				static_cast<unsigned long long>(light_stats.propagated_cells),
+				light_complete != FT_FALSE ? 1 : 0);
+	}
+	#endif
 	result->light_scanned_cells = light_stats.scanned_cells;
 	result->light_propagated_cells = light_stats.propagated_cells;
 	result->light_queue_peak = light_stats.queue_peak;
@@ -291,10 +315,27 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 		return (result);
 	}
 	result->light = std::move(request.remesh_light);
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	mesh_start = std::chrono::steady_clock::now();
+	#endif
 	result->error_code = chunk_mesh_generate_from_chunk_with_neighbors(
 		*result->mesh, *request.remesh_target, request.chunk_x, request.chunk_z,
 		&WorldChunkSnapshotReader::lookup_snapshot_block, request.snapshot.get(),
 		result->light.get());
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	{
+		const uint64_t mesh_us = static_cast<uint64_t>(
+			std::chrono::duration_cast<std::chrono::microseconds>(
+				std::chrono::steady_clock::now() - mesh_start).count());
+		if (mesh_us >= 100000U)
+			std::fprintf(stderr,
+				"[WorldGen] slow remesh mesh request=%llu chunk=(%d,%d) "
+				"duration_us=%llu error=%d\n",
+				static_cast<unsigned long long>(request.request_id),
+				request.chunk_x, request.chunk_z,
+				static_cast<unsigned long long>(mesh_us), result->error_code);
+	}
+	#endif
 	request.remesh_light_operation.reset();
 	request.remesh_target.reset();
 	request.remesh_in_progress = FT_FALSE;

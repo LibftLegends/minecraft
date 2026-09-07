@@ -484,7 +484,6 @@ int32_t WorldChunkStreamer::queue_neighbor_remeshes(int32_t chunk_x,
 		chunk_z + 1}};
 	int32_t index;
 	WorldChunk *chunk;
-	int32_t error_code;
 
 	index = 0;
 	while (index < 5)
@@ -492,12 +491,7 @@ int32_t WorldChunkStreamer::queue_neighbor_remeshes(int32_t chunk_x,
 		chunk = this->world_.find_chunk_mutable(coordinates[index][0],
 				coordinates[index][1]);
 		if (chunk != nullptr)
-		{
 			this->mark_remesh_dirty(*chunk);
-			error_code = this->queue_chunk_remesh(*chunk);
-			if (error_code != FT_ERR_SUCCESS && error_code != FT_ERR_FULL)
-				return (error_code);
-		}
 		index += 1;
 	}
 	return (FT_ERR_SUCCESS);

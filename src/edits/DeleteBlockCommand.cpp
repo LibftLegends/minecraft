@@ -66,9 +66,9 @@ int32_t DeleteBlockCommand::execute(World &world) const
 	world.edit_history.record(record);
 	world.chunk_streamer.mark_neighbor_remeshes(cx, cz);
 	world.chunk_streamer.prioritize_chunk_remesh(cx, cz);
-	/* Submit the edited chunk immediately when the remesh slot is available;
-	 * the priority queue remains the retry path while generation is busy. */
-	remesh_error = world.chunk_streamer.queue_neighbor_remeshes(cx, cz);
+	/* Submit only the edited chunk immediately. Neighbor snapshots are large;
+	 * their dirty marks are consumed one at a time by the persistent scheduler. */
+	remesh_error = world.chunk_streamer.queue_chunk_remesh(*wc);
 	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
 	std::fprintf(stderr,
 		"[RendererTrace] delete chunk=(%d,%d) voxel=%llu remesh=%d pending=%llu\n",
