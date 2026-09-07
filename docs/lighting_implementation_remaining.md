@@ -144,9 +144,9 @@ Focused Windows evidence from the current checkout:
 - The normal `make -j2` target rebuilt and linked the analytics executable
   successfully.
 - The Windows `automated_tests.exe --validate-all` aggregate passed with zero
-  failures after the boundary-light validator change. The run reported 16
-  repeated edit samples at p50=59 ms, p95=60 ms, p99=60 ms, max=61 ms, and
-  async startup first-visible mesh at frame 9.
+  failures after the scheduler-priority correction. The run reported 16
+  repeated edit samples at p50=75 ms, p95=78 ms, p99=78 ms, max=79 ms, and
+  async startup first-visible mesh at frame 8.
 - Stale-result diagnostics are now split by source. Fresh async-generation
   runs completed successfully with 5--6 rejected results: four stale stream
   results and one or two stale remesh results. This confirms rejection is
@@ -548,6 +548,12 @@ interactive work can fill the remesh window, starve generation, and leave the
 renderer waiting on a world that is still only partially built. Arrival work is
 therefore kept in the normal dirty-remesh scan, while an explicit block edit
 continues to use the front priority queue and immediate submission cadence.
+Visible dirty chunks are appended to the back of the priority queue rather than
+using the explicit front-priority operation. This prevents a visible arrival
+scan from repeatedly pushing itself ahead of a player edit or its chunk-border
+neighbours. Neighbor snapshot capture is also limited to the edited target on
+the immediate edit path; dirty neighbours are captured by the persistent
+worker scheduler one at a time.
 
 The persistent generation workers must also share work fairly: when both
 generation and ordinary remesh requests are queued, a bounded number of

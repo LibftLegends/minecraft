@@ -476,6 +476,33 @@ void WorldChunkStreamer::prioritize_chunk_remesh(int32_t chunk_x,
 	return ;
 }
 
+void WorldChunkStreamer::enqueue_background_remesh(int32_t chunk_x,
+	int32_t chunk_z) noexcept
+{
+	bool already_queued;
+
+	already_queued = false;
+	for (const RemeshPriority &priority : this->priority_remeshes_)
+	{
+		if (priority.chunk_x == chunk_x && priority.chunk_z == chunk_z)
+		{
+			already_queued = true;
+			break ;
+		}
+	}
+	if (!already_queued)
+		this->priority_remeshes_.push_back({chunk_x, chunk_z});
+	this->priority_remesh_pending_ = !this->priority_remeshes_.empty();
+	if (this->priority_remesh_pending_)
+	{
+		this->priority_remesh_chunk_x_ =
+			this->priority_remeshes_.front().chunk_x;
+		this->priority_remesh_chunk_z_ =
+			this->priority_remeshes_.front().chunk_z;
+	}
+	return ;
+}
+
 int32_t WorldChunkStreamer::queue_neighbor_remeshes(int32_t chunk_x,
 	int32_t chunk_z) noexcept
 {

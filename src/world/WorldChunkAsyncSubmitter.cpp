@@ -165,7 +165,7 @@ int32_t WorldChunkAsyncSubmitter::submit_dirty_remeshes(
 			if (nearby_chunk != nullptr && nearby_chunk->initialized
 				&& nearby_chunk->mesh_dirty
 				&& nearby_chunk->pending_mesh_request_id == 0U)
-				streamer.prioritize_chunk_remesh(nearby_chunk->chunk_x,
+				streamer.enqueue_background_remesh(nearby_chunk->chunk_x,
 					nearby_chunk->chunk_z);
 			offset_index += 1;
 		}
