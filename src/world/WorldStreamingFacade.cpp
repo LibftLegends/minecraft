@@ -316,14 +316,14 @@ int32_t World::apply_authoritative_block_change(
 	this->edit_history.record(record);
 	this->chunk_streamer.mark_neighbor_remeshes(request.chunk_x,
 		request.chunk_z);
-	this->chunk_streamer.prioritize_chunk_remesh(request.chunk_x,
+	this->chunk_streamer.prioritize_edit_border_remeshes(request.chunk_x,
 		request.chunk_z);
 	/* Authoritative edits follow the same immediate publication path as local
 	 * edits. If the single remesh slot is occupied, the priority queue retries
 	 * the request without losing the edit notification. */
 	if (this->chunk_streamer.queue_chunk_remesh(*world_chunk) != FT_ERR_SUCCESS
 		&& world_chunk->pending_mesh_request_id == 0U)
-		this->chunk_streamer.prioritize_chunk_remesh(request.chunk_x,
+		this->chunk_streamer.prioritize_edit_border_remeshes(request.chunk_x,
 			request.chunk_z);
 	return (FT_ERR_SUCCESS);
 }

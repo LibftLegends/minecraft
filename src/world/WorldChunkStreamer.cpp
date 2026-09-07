@@ -476,6 +476,31 @@ void WorldChunkStreamer::prioritize_chunk_remesh(int32_t chunk_x,
 	return ;
 }
 
+void WorldChunkStreamer::prioritize_edit_border_remeshes(int32_t chunk_x,
+	int32_t chunk_z) noexcept
+{
+	const int32_t coordinates[4][2] = {{chunk_x - 1, chunk_z},
+		{chunk_x + 1, chunk_z}, {chunk_x, chunk_z - 1},
+		{chunk_x, chunk_z + 1}};
+	int32_t index;
+
+	/* Keep the four face-sharing chunks in the same bounded interactive queue
+	 * as the edited chunk.  Diagonal lighting work remains background work; it
+	 * will be coalesced by the normal dirty-remesh scheduler.  Queue neighbors
+	 * first so the edited chunk is left at the front of the deque. */
+	index = 0;
+	while (index < 4)
+	{
+		if (this->world_.find_chunk(coordinates[index][0],
+				coordinates[index][1]) != nullptr)
+			this->prioritize_chunk_remesh(coordinates[index][0],
+				coordinates[index][1]);
+		index += 1;
+	}
+	this->prioritize_chunk_remesh(chunk_x, chunk_z);
+	return ;
+}
+
 void WorldChunkStreamer::enqueue_background_remesh(int32_t chunk_x,
 	int32_t chunk_z) noexcept
 {

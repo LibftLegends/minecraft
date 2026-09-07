@@ -178,6 +178,10 @@ aggregate suite.
    interactive configuration. Distant arrival work retains the background
    budget, so local convergence does not make every nearby solve compete at
    once.
+   The edit path now promotes the edited chunk and its four loaded
+   face-sharing neighbors into that bounded interactive queue. Diagonal
+   neighbors remain background work. This keeps an edit's lighting seam ahead
+   of unrelated arrival remeshes without submitting all nine chunks at once.
 2. Verify that neighbor arrival/removal enqueue bounded relighting as well as
    face remeshing, and that temporary conservative boundaries converge after
    the neighbor is published or evicted. Arrival and eviction invalidation are

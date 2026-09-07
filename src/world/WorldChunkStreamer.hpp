@@ -139,6 +139,7 @@ class WorldChunkStreamer
 	void mark_neighbor_remeshes(int32_t chunk_x, int32_t chunk_z) noexcept;
 	int32_t queue_neighbor_remeshes(int32_t chunk_x, int32_t chunk_z) noexcept;
 	void prioritize_chunk_remesh(int32_t chunk_x, int32_t chunk_z) noexcept;
+	void prioritize_edit_border_remeshes(int32_t chunk_x, int32_t chunk_z) noexcept;
 	void enqueue_background_remesh(int32_t chunk_x, int32_t chunk_z) noexcept;
 
   private:

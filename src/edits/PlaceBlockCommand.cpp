@@ -72,7 +72,7 @@ int32_t PlaceBlockCommand::execute(World &world) const
 	(void)wc->chunk.record_dirty_edit(record.edit);
 	world.edit_history.record(record);
 	world.chunk_streamer.mark_neighbor_remeshes(cx, cz);
-	world.chunk_streamer.prioritize_chunk_remesh(cx, cz);
+	world.chunk_streamer.prioritize_edit_border_remeshes(cx, cz);
 	/* Submit only the edited chunk immediately. Neighbor snapshots are large;
 	 * their dirty marks are consumed one at a time by the persistent scheduler. */
 	remesh_error = world.chunk_streamer.queue_chunk_remesh(*wc);
@@ -85,6 +85,6 @@ int32_t PlaceBlockCommand::execute(World &world) const
 	#endif
 	if (remesh_error != FT_ERR_SUCCESS
 		&& wc->pending_mesh_request_id == 0U)
-		world.chunk_streamer.prioritize_chunk_remesh(cx, cz);
+		world.chunk_streamer.prioritize_edit_border_remeshes(cx, cz);
 	return (FT_ERR_SUCCESS);
 }
