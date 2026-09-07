@@ -449,6 +449,15 @@ sampled-frame spike, but it does not reduce the underlying software mesh
 rasterization cost. That cost needs a matched normal/analytics render test
 before any renderer optimization is selected.
 
+The current Windows continuation completed the matched build/runtime gate:
+`make -j2 automated_tests.exe` and `make -j2 analytics` both rebuilt from the
+current branch, `--validate-all` passed with zero failures, and both
+`ft_vox.exe --validate-renderer-publication` and
+`ft_vox_analytics.exe --validate-renderer-publication` passed with
+`renderer-publication: ok`. The async validator emitted a JSON metrics record
+with startup frames, snapshot bytes, scanned and propagated cells, queue peak,
+completed remeshes, stale-result counts, and first-visible-mesh frame.
+
 The workload must be run against both normal and analytics executables. The
 analytics launcher itself must be compiled from the current branch and its
 output must identify the branch, Libft revision, configuration, and executable
