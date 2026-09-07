@@ -207,7 +207,7 @@ aggregate suite.
 8. Finish the CSV test run. The broad test build was initially blocked by an
     existing `-Werror` useless-cast failure in
     `Test/Test/test_compression_stream.cpp`; that warning was corrected. The
-    full Windows Libft executable now passes all 6,320 tests when launched
+    full Windows Libft executable now passes all 6,321 tests when launched
     from `Libft\Test` (the fixture-relative working directory). Launching it
     from `Libft` produces false failures for path-dependent File/Voxel tests,
     so CI and local instructions must preserve the intended working directory.
