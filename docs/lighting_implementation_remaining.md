@@ -354,6 +354,9 @@ The continuation must:
 - run water placement as a deterministic post-terrain stage, with vegetation
   sampling the final water result so trees and shrubs do not overwrite or float
   beside invalid water;
+- validate surface-water candidates on chunk borders against deterministic
+  world-coordinate samples from the neighboring column, so generation order
+  cannot retain a detached one-column border fragment;
 - add seeded regression tests for desert rivers, surface lakes, and small
   underground lakes in every biome family.
 
@@ -521,5 +524,7 @@ initial world construction from being consumed by lighting work without
 removing the asynchronous lighting path. The async-generation validator now
 also performs a break/place edit while startup generation is still active and
 requires the playable area to continue converging. It currently records the
-loaded-chunk progress and frame at completion; remesh queue peak and exact
-first-visible-mesh latency remain follow-up instrumentation.
+loaded-chunk progress, remesh queue peak, and the first visible mesh frame.
+These measurements are now available in the validator output; the remaining
+work is to add an explicit latency budget assertion and retain the values in
+the CI artifact so regressions are visible across runs.
