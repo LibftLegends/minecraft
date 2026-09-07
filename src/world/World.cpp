@@ -235,6 +235,10 @@ void World::destroy()
         this->world_epoch_ += 1U;
         this->mark_geometry_changed();
     }
+    /* Stop the streamer's dedicated snapshot worker before destroying chunk
+     * storage.  The worker may still be taking a shared snapshot or may be
+     * waiting to clear a failed request through world_data_mutex_. */
+    this->chunk_streamer.reset();
     (void)this->generation_pipeline_.destroy();
     std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
     int32_t index;
