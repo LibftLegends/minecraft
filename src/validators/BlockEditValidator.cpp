@@ -458,10 +458,15 @@ int BlockEditValidator::validate_boundary_edit(World &world) noexcept
 	uint64_t previous_revisions[4];
 	uint64_t previous_light_revisions[4];
 	uint8_t baseline_light;
+	uint8_t baseline_neighbor_light;
 	uint8_t placed_light;
+	uint8_t placed_neighbor_light;
 	uint8_t deleted_light;
+	uint8_t deleted_neighbor_light;
 	WorldChunk *target_chunk;
+	WorldChunk *right_neighbor;
 	int32_t y;
+	int32_t local_z;
 	double surface_top;
 	int32_t index;
 	int32_t error_code;
@@ -475,9 +480,14 @@ int BlockEditValidator::validate_boundary_edit(World &world) noexcept
 	target_chunk = world.find_chunk_mutable(chunk_x, chunk_z);
 	if (target_chunk == nullptr || !target_chunk->initialized)
 		return (ApplicationError::fail("block-edit boundary target", 1));
+	right_neighbor = world.find_chunk_mutable(chunk_x + 1, chunk_z);
+	if (right_neighbor == nullptr || !right_neighbor->initialized)
+		return (ApplicationError::fail("block-edit boundary right neighbor", 1));
+	local_z = z - chunk_z * GAME_VOXEL_CHUNK_DEPTH;
 	baseline_light = target_chunk->light.get(
 		x - chunk_x * GAME_VOXEL_CHUNK_WIDTH, y,
 		z - chunk_z * GAME_VOXEL_CHUNK_DEPTH);
+	baseline_neighbor_light = right_neighbor->light.get(0, y, local_z);
 	index = 0;
 	while (index < 4)
 	{
@@ -489,7 +499,8 @@ int BlockEditValidator::validate_boundary_edit(World &world) noexcept
 		previous_light_revisions[index] = chunk->light_revision;
 		index += 1;
 	}
-	error_code = world.place_block_at(x, y, z, VOXEL_GENERATOR_STONE_BLOCK);
+	error_code = world.place_block_at(x, y, z,
+		VOXEL_GENERATOR_SHIMMER_STONE_BLOCK);
 	if (error_code != FT_ERR_SUCCESS)
 		return (ApplicationError::fail("block-edit boundary place", error_code));
 	error_code = BlockEditValidator::wait_for_boundary_convergence(world, x, z,
@@ -499,12 +510,17 @@ int BlockEditValidator::validate_boundary_edit(World &world) noexcept
 	placed_light = target_chunk->light.get(
 		x - chunk_x * GAME_VOXEL_CHUNK_WIDTH, y,
 		z - chunk_z * GAME_VOXEL_CHUNK_DEPTH);
-	if (placed_light == baseline_light)
+	placed_neighbor_light = right_neighbor->light.get(0, y, local_z);
+	if (placed_light <= baseline_light
+		|| placed_neighbor_light <= baseline_neighbor_light)
 	{
 		std::fprintf(stderr,
-			"block-edit: boundary light did not change before=%u after=%u\n",
+			"block-edit: boundary light did not propagate target=%u->%u "
+			"neighbor=%u->%u\n",
 			static_cast<unsigned int>(baseline_light),
-			static_cast<unsigned int>(placed_light));
+			static_cast<unsigned int>(placed_light),
+			static_cast<unsigned int>(baseline_neighbor_light),
+			static_cast<unsigned int>(placed_neighbor_light));
 		return (ApplicationError::fail("block-edit boundary light place", 1));
 	}
 	index = 0;
@@ -528,12 +544,16 @@ int BlockEditValidator::validate_boundary_edit(World &world) noexcept
 	deleted_light = target_chunk->light.get(
 		x - chunk_x * GAME_VOXEL_CHUNK_WIDTH, y,
 		z - chunk_z * GAME_VOXEL_CHUNK_DEPTH);
-	if (deleted_light != baseline_light)
+	deleted_neighbor_light = right_neighbor->light.get(0, y, local_z);
+	if (deleted_light != baseline_light
+		|| deleted_neighbor_light != baseline_neighbor_light)
 	{
 		std::fprintf(stderr,
-			"block-edit: boundary light did not restore baseline=%u "
-			"after_delete=%u\n", static_cast<unsigned int>(baseline_light),
-			static_cast<unsigned int>(deleted_light));
+			"block-edit: boundary light did not restore target=%u->%u "
+			"neighbor=%u->%u\n", static_cast<unsigned int>(baseline_light),
+			static_cast<unsigned int>(deleted_light),
+			static_cast<unsigned int>(baseline_neighbor_light),
+			static_cast<unsigned int>(deleted_neighbor_light));
 		return (ApplicationError::fail("block-edit boundary light delete", 1));
 	}
 	return (FT_ERR_SUCCESS);
