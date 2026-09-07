@@ -159,3 +159,11 @@ double RendererColor::face_shade(uint8_t face)
 		return (0.82);
 	return (0.72);
 }
+
+double RendererColor::light_shade(uint8_t packed_light)
+{
+	static const double brightness[16] = {0.05, 0.08, 0.11, 0.15,
+		0.20, 0.27, 0.35, 0.44, 0.54, 0.64, 0.73, 0.81, 0.87, 0.92,
+		0.97, 1.0};
+	return (brightness[voxel_light_combined(packed_light)]);
+}

@@ -346,3 +346,11 @@ size_t GpuWorldRenderer::gpu_bytes() const
 	b += static_cast<size_t>(_atlas.is_loaded() ? 384 * 384 * 4 : 0);
 	return (b);
 }
+
+bool GpuWorldRenderer::uploaded_identity_matches(int32_t slot,
+	uint64_t revision, int32_t chunk_x, int32_t chunk_z,
+	uint64_t voxel_revision) const
+{
+	return (this->_batch.uploaded_identity_matches(slot, revision, chunk_x,
+		chunk_z, voxel_revision));
+}

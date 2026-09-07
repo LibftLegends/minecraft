@@ -18,6 +18,7 @@ class ApplicationOptions
 	bool validate_camera_speed_mode;
 	bool validate_collision_mode;
 	bool validate_block_edit_mode;
+	bool validate_camera_interaction_mode;
 	bool validate_visible_distance_mode;
 	bool validate_voxel_determinism_mode;
 	bool validate_world_scale_mode;
@@ -25,6 +26,8 @@ class ApplicationOptions
 	bool validate_voxel_configuration_mode;
 	bool validate_world_revision_mode;
 	bool validate_async_generation_mode;
+	bool validate_network_repair_mode;
+	bool validate_renderer_publication_mode;
 	bool validate_all_mode;
 	double perf_seconds_limit;
 

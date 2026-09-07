@@ -1,4 +1,5 @@
 #include "../../src/world/WorldRegenerationResultApplier.hpp"
+#include <cstdio>
 
 WorldRegenerationResultApplier::WorldRegenerationResultApplier()
 {
@@ -47,6 +48,7 @@ void WorldRegenerationResultApplier::apply_chunk(WorldChunkStreamer &streamer,
 	chunk->initialized = true;
 	chunk->mesh_revision += 1U;
 	chunk->voxel_revision += 1U;
+	chunk->light_revision += 1U;
 	chunk->pending_mesh_request_id = 0U;
 	chunk->mesh_dirty = true;
 	world.mark_geometry_changed();
@@ -70,7 +72,18 @@ int32_t WorldRegenerationResultApplier::commit(WorldChunkStreamer &streamer,
 		return (FT_ERR_SUCCESS);
 	world.revision_manager.record_regeneration_completed();
 	if (result.error_code != FT_ERR_SUCCESS || result.chunk == nullptr)
+	{
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+		std::fprintf(stderr,
+			"[WorldRevision] regeneration result failed request=%llu "
+			"chunk=(%d,%d) error=%d has_chunk=%s relevance=%llu\n",
+			static_cast<unsigned long long>(result.request_id), result.chunk_x,
+			result.chunk_z, result.error_code,
+			result.chunk == nullptr ? "false" : "true",
+			static_cast<unsigned long long>(result.relevance_epoch));
+	#endif
 		world.revision_manager.record_regeneration_error(result.error_code);
+	}
 	else
 		WorldRegenerationResultApplier::apply_chunk(streamer, world, result);
 	if (world.revision_manager.all_regeneration_jobs_done())

@@ -37,10 +37,14 @@ class GpuChunkMesh
 	void destroy();
 	void invalidate();
 	bool has_geometry() const;
+	bool has_uploaded_geometry() const;
 	bool has_solid_geometry() const;
 	bool has_water_geometry() const;
 	bool needs_sync(uint64_t revision, int32_t chunk_x, int32_t chunk_z,
 		uint64_t voxel_revision) const;
+	bool identity_matches(uint64_t revision, int32_t chunk_x, int32_t chunk_z,
+		uint64_t voxel_revision) const;
+	bool uploaded_coordinates_match(int32_t chunk_x, int32_t chunk_z) const;
 	size_t gpu_bytes() const;
 #if defined(LIBFT_ENABLE_ANALYTICS)
 	bool diagnostics_identity_matches(uint64_t revision, int32_t chunk_x,

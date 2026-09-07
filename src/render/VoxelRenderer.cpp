@@ -124,9 +124,11 @@ void VoxelRenderer::render_world_software(ft_render_framebuffer &framebuffer,
 	uint64_t software_slowest_chunk_us;
 	int32_t software_slowest_chunk_x;
 	int32_t software_slowest_chunk_z;
+	std::size_t software_timed_chunks;
 	std::chrono::steady_clock::time_point chunk_start;
 	uint64_t chunk_us;
 	ft_bool collect_software_detail;
+	ft_bool timed_chunk;
 #endif
 
 	analytics_error = RuntimeAnalytics::begin_scope(RuntimeAnalyticsScope::VOXEL_RENDER_SOFTWARE);
@@ -212,7 +214,8 @@ void VoxelRenderer::render_world_software(ft_render_framebuffer &framebuffer,
 			analytics_error);
 	#if defined(LIBFT_ENABLE_ANALYTICS)
 	this->_software_diagnostic_frame += 1U;
-	collect_software_detail = this->_software_diagnostic_frame % 120U == 0U
+	collect_software_detail = RuntimeAnalytics::is_enabled()
+		&& this->_software_diagnostic_frame % 120U == 0U
 		? FT_TRUE : FT_FALSE;
 	software_candidates = 0U;
 	software_visible_chunks = 0U;
@@ -220,6 +223,7 @@ void VoxelRenderer::render_world_software(ft_render_framebuffer &framebuffer,
 	software_slowest_chunk_us = 0U;
 	software_slowest_chunk_x = 0;
 	software_slowest_chunk_z = 0;
+	software_timed_chunks = 0U;
 	#endif
 	for (int32_t visible_index = 0; visible_index
 		< static_cast<int32_t>(_software_visible_chunk_slots.size());
@@ -227,9 +231,13 @@ void VoxelRenderer::render_world_software(ft_render_framebuffer &framebuffer,
 	{
 		const int32_t i = _software_visible_chunk_slots[visible_index];
 		#if defined(LIBFT_ENABLE_ANALYTICS)
-		if (collect_software_detail != FT_FALSE)
+		timed_chunk = FT_FALSE;
+		if (collect_software_detail != FT_FALSE
+			&& software_timed_chunks < 16U)
 		{
 			software_candidates += 1U;
+			software_timed_chunks += 1U;
+			timed_chunk = FT_TRUE;
 			chunk_start = std::chrono::steady_clock::now();
 		}
 		#endif
@@ -248,7 +256,7 @@ void VoxelRenderer::render_world_software(ft_render_framebuffer &framebuffer,
 			#endif
 		}
 		#if defined(LIBFT_ENABLE_ANALYTICS)
-		if (collect_software_detail != FT_FALSE)
+		if (timed_chunk != FT_FALSE)
 		{
 			chunk_us = static_cast<uint64_t>(std::chrono::duration_cast<
 				std::chrono::microseconds>(std::chrono::steady_clock::now()

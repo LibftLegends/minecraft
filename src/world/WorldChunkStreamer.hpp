@@ -24,6 +24,7 @@ class WorldChunkStreamer
 		std::size_t playable_required_count;
 		std::size_t playable_drawable_count;
 		std::size_t active_generation_count;
+		std::size_t remesh_queue_peak;
 		uint64_t		oldest_result_age_nanoseconds;
 		uint64_t			oldest_pending_age;
 		int32_t				last_error;
@@ -66,14 +67,30 @@ class WorldChunkStreamer
 	uint64_t				world_epoch_ = 1U;
 	uint64_t				next_request_id_ = 1U;
 	voxel_light_update_config light_update_config_;
+	voxel_light_update_config interactive_light_update_config_;
 	std::vector<WorldGenerationPipeline::WorldDeferredBlockEdit> deferred_edits_;
 	std::vector<WorldGenerationPipeline::WorldDeferredBlockEdit> deferred_pending_edits_;
 	std::vector<WorldChunk *> deferred_touched_chunks_;
+	struct RemeshPriority
+	{
+		int32_t chunk_x;
+		int32_t chunk_z;
+	};
+	std::deque<RemeshPriority> priority_remeshes_;
 	bool deferred_edits_sorted_ = false;
 	std::size_t deferred_apply_cursor_ = 0U;
 	std::size_t deferred_sorted_end_ = 0U;
 	WorldGenerationPipeline	generation_pipeline_;
 	int32_t					dirty_remesh_cursor_ = 0;
+	uint64_t					next_remesh_submission_frame_ = 0U;
+		bool					priority_remesh_pending_ = false;
+		int32_t					priority_remesh_chunk_x_ = 0;
+		int32_t					priority_remesh_chunk_z_ = 0;
+		bool					remesh_priority_anchor_valid_ = false;
+		int32_t					remesh_priority_anchor_x_ = 0;
+		int32_t					remesh_priority_anchor_z_ = 0;
+		uint64_t				remesh_priority_anchor_expiry_frame_ = 0U;
+		std::size_t			remesh_queue_peak_ = 0U;
 
 	WorldChunkStreamer(World &world);
 	WorldChunkStreamer(const WorldChunkStreamer &other);
@@ -101,8 +118,10 @@ class WorldChunkStreamer
 	void invalidate_non_ready_candidates() noexcept;
 	void reset_candidates_after_regeneration() noexcept;
 	int32_t queue_chunk_remesh(WorldChunk &chunk) noexcept;
+	void mark_remesh_dirty(WorldChunk &chunk) noexcept;
 	void mark_neighbor_remeshes(int32_t chunk_x, int32_t chunk_z) noexcept;
 	int32_t queue_neighbor_remeshes(int32_t chunk_x, int32_t chunk_z) noexcept;
+	void prioritize_chunk_remesh(int32_t chunk_x, int32_t chunk_z) noexcept;
 
   private:
 	int32_t					generation_credit_ = 0;

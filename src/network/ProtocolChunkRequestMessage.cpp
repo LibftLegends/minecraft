@@ -38,15 +38,25 @@ int32_t ProtocolChunkRequestMessage::serialize(ft_byte_buffer &buffer) const noe
 
 int32_t ProtocolChunkRequestMessage::deserialize(ft_byte_buffer &buffer) noexcept
 {
+	ft_size_t initial_read_position;
 	uint32_t raw_x;
 	uint32_t raw_z;
 	int32_t error_code;
+	int32_t restore_error;
 
+	initial_read_position = buffer.read_position();
 	error_code = buffer.read_u32_le(&raw_x);
 	if (error_code == FT_ERR_SUCCESS)
 		error_code = buffer.read_u32_le(&raw_z);
+	if (error_code == FT_ERR_SUCCESS && buffer.remaining() != 0U)
+		error_code = FT_ERR_INVALID_ARGUMENT;
 	if (error_code != FT_ERR_SUCCESS)
+	{
+		restore_error = buffer.set_read_position(initial_read_position);
+		if (restore_error != FT_ERR_SUCCESS)
+			return (restore_error);
 		return (error_code);
+	}
 	this->chunk_x = static_cast<int32_t>(raw_x);
 	this->chunk_z = static_cast<int32_t>(raw_z);
 	return (FT_ERR_SUCCESS);

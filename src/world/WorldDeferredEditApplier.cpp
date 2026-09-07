@@ -34,7 +34,8 @@ bool WorldDeferredEditApplier::deferred_edit_less(const WorldGenerationPipeline:
 	return (left.sequence < right.sequence);
 }
 
-int32_t WorldDeferredEditApplier::apply_single_edit(World &world,
+int32_t WorldDeferredEditApplier::apply_single_edit(
+	WorldChunkStreamer &streamer, World &world,
 	const WorldGenerationPipeline::WorldDeferredBlockEdit &edit,
 	std::vector<WorldGenerationPipeline::WorldDeferredBlockEdit> &pending,
 	std::vector<WorldChunk *> &touched_chunks) noexcept
@@ -63,7 +64,14 @@ int32_t WorldDeferredEditApplier::apply_single_edit(World &world,
 			edit.block_id) != FT_ERR_SUCCESS)
 		return (FT_ERR_INVALID_OPERATION);
 	chunk->voxel_revision += 1U;
-	chunk->mesh_dirty = true;
+	/* A deferred edit can change both the edited chunk's lighting and the
+	 * border faces of every adjacent chunk.  Updating only the edited chunk
+	 * leaves a neighboring mesh with the old border occupancy, which can make
+	 * the renderer show a hole through the chunk boundary until an unrelated
+	 * remesh happens.  Use the same 3x3 invalidation policy as authoritative
+	 * edits; the immediate queue below prioritizes the cardinal meshes whose
+	 * border faces are directly affected. */
+	streamer.mark_neighbor_remeshes(chunk->chunk_x, chunk->chunk_z);
 	world.mark_geometry_changed();
 	for (std::size_t touched_index = 0U;
 		touched_index < touched_chunks.size(); ++touched_index)
@@ -155,7 +163,7 @@ int32_t WorldDeferredEditApplier::apply(WorldChunkStreamer &streamer,
 		&& (processed == 0U || maximum_milliseconds == 0U
 			|| std::chrono::steady_clock::now() < deadline))
 	{
-		error_code = WorldDeferredEditApplier::apply_single_edit(world,
+		error_code = WorldDeferredEditApplier::apply_single_edit(streamer, world,
 			streamer.deferred_edits_[index], pending,
 			streamer.deferred_touched_chunks_);
 		if (error_code != FT_ERR_SUCCESS)
@@ -185,8 +193,9 @@ int32_t WorldDeferredEditApplier::apply(WorldChunkStreamer &streamer,
 	touched_index = 0U;
 	while (touched_index < streamer.deferred_touched_chunks_.size())
 	{
-		error_code = streamer.queue_chunk_remesh(
-			*streamer.deferred_touched_chunks_[touched_index]);
+		error_code = streamer.queue_neighbor_remeshes(
+			streamer.deferred_touched_chunks_[touched_index]->chunk_x,
+			streamer.deferred_touched_chunks_[touched_index]->chunk_z);
 		if (error_code != FT_ERR_SUCCESS && error_code != FT_ERR_FULL)
 			return (error_code);
 		touched_index += 1U;

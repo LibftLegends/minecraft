@@ -1,4 +1,5 @@
 #include "../../src/world/WorldChunkSnapshotCapture.hpp"
+#include <vector>
 
 WorldChunkSnapshotCapture::WorldChunkSnapshotCapture()
 {
@@ -23,83 +24,108 @@ int32_t WorldChunkSnapshotCapture::capture_border_column(const WorldChunk *sourc
 	std::vector<uint32_t> &border, int32_t border_local_x,
 	int32_t border_local_z) noexcept
 {
-	int32_t read_x;
-	int32_t read_z;
-	uint32_t block_id;
-
 	if (source == nullptr || !source->initialized)
 		return (FT_ERR_SUCCESS);
-	for (int32_t y = 0; y < GAME_VOXEL_CHUNK_HEIGHT; ++y)
-	{
-		for (int32_t axis = 0; axis < GAME_VOXEL_CHUNK_WIDTH; ++axis)
-		{
-			if (border_local_x < 0)
-				read_x = GAME_VOXEL_CHUNK_WIDTH - 1;
-			else if (border_local_x >= GAME_VOXEL_CHUNK_WIDTH)
-				read_x = 0;
-			else
-				read_x = axis;
-			if (border_local_z < 0)
-				read_z = GAME_VOXEL_CHUNK_DEPTH - 1;
-			else if (border_local_z >= GAME_VOXEL_CHUNK_DEPTH)
-				read_z = 0;
-			else
-				read_z = axis;
-			if (source->chunk.read_block(read_x, y, read_z,
-					&block_id) != FT_ERR_SUCCESS)
-				return (FT_ERR_INVALID_OPERATION);
-			if (border_local_x < 0 || border_local_x >= GAME_VOXEL_CHUNK_WIDTH)
-				border[static_cast<std::size_t>(y) * GAME_VOXEL_CHUNK_DEPTH
-					+ static_cast<std::size_t>(axis)] = block_id;
-			else
-				border[static_cast<std::size_t>(y) * GAME_VOXEL_CHUNK_WIDTH
-					+ static_cast<std::size_t>(axis)] = block_id;
-		}
-	}
-	return (FT_ERR_SUCCESS);
+	if (border_local_x < 0 || border_local_x >= GAME_VOXEL_CHUNK_WIDTH)
+		return (source->chunk.copy_x_border(&border[0],
+			static_cast<uint32_t>(border.size()), border_local_x < 0
+				? GAME_VOXEL_CHUNK_WIDTH - 1 : 0));
+	return (source->chunk.copy_z_border(&border[0],
+		static_cast<uint32_t>(border.size()), border_local_z < 0
+			? GAME_VOXEL_CHUNK_DEPTH - 1 : 0));
 }
 
 int32_t WorldChunkSnapshotCapture::capture_blocks(const WorldChunk &target,
 	WorldGenerationPipeline::WorldChunkSnapshot &snapshot) noexcept
 {
-	uint32_t block_id;
-	std::size_t index;
-
-	for (int32_t local_z = 0; local_z < GAME_VOXEL_CHUNK_DEPTH; ++local_z)
-	{
-		for (int32_t local_y = 0; local_y < GAME_VOXEL_CHUNK_HEIGHT; ++local_y)
-		{
-			for (int32_t local_x = 0; local_x < GAME_VOXEL_CHUNK_WIDTH; ++local_x)
-			{
-				if (target.chunk.read_block(local_x, local_y, local_z,
-						&block_id) != FT_ERR_SUCCESS)
-					return (FT_ERR_INVALID_OPERATION);
-				index = (static_cast<std::size_t>(local_z)
-						* static_cast<std::size_t>(GAME_VOXEL_CHUNK_HEIGHT)
-						+ static_cast<std::size_t>(local_y))
-					* static_cast<std::size_t>(GAME_VOXEL_CHUNK_WIDTH)
-					+ static_cast<std::size_t>(local_x);
-				snapshot.blocks[index] = block_id;
-			}
-		}
-	}
-	return (FT_ERR_SUCCESS);
+	return (target.chunk.copy_blocks(&snapshot.blocks[0],
+			static_cast<uint32_t>(snapshot.blocks.size())));
 }
 
 int32_t WorldChunkSnapshotCapture::capture_lighting_halo(
 	const WorldChunk &target, const WorldChunk *west, const WorldChunk *east,
 	const WorldChunk *north, const WorldChunk *south,
+	const WorldChunk *northwest, const WorldChunk *northeast,
+	const WorldChunk *southwest, const WorldChunk *southeast,
 	WorldGenerationPipeline::WorldChunkSnapshot &snapshot) noexcept
 {
+	const WorldChunk *sources[9] = {&target, west, east, north, south,
+		northwest, northeast, southwest, southeast};
 	const int32_t halo = WorldGenerationPipeline::LIGHT_SNAPSHOT_HALO;
 	const int32_t edge = GAME_VOXEL_CHUNK_WIDTH + halo * 2;
+	struct SourceRegion
+	{
+		uint32_t first_x;
+		uint32_t first_z;
+		uint32_t width;
+		uint32_t depth;
+		std::vector<uint32_t> blocks;
+	};
+	SourceRegion source_regions[9];
 	int32_t halo_z;
 	int32_t halo_x;
 	int32_t local_x;
 	int32_t local_z;
 	const WorldChunk *source;
+	int32_t x_side;
+	int32_t z_side;
 	uint32_t block_id;
 	std::size_t index;
+	std::size_t source_index = 0U;
+	std::size_t source_block_index;
+	int32_t source_slot;
+
+	try
+	{
+		for (source_slot = 1; source_slot < 9; ++source_slot)
+		{
+			source_regions[source_slot].first_x = 0U;
+			source_regions[source_slot].first_z = 0U;
+			source_regions[source_slot].width = GAME_VOXEL_CHUNK_WIDTH;
+			source_regions[source_slot].depth = GAME_VOXEL_CHUNK_DEPTH;
+		}
+		source_regions[1].first_x = GAME_VOXEL_CHUNK_WIDTH - halo;
+		source_regions[1].width = halo;
+		source_regions[2].width = halo;
+		source_regions[3].first_z = GAME_VOXEL_CHUNK_DEPTH - halo;
+		source_regions[3].depth = halo;
+		source_regions[4].depth = halo;
+		source_regions[5].first_x = GAME_VOXEL_CHUNK_WIDTH - halo;
+		source_regions[5].first_z = GAME_VOXEL_CHUNK_DEPTH - halo;
+		source_regions[5].width = halo;
+		source_regions[5].depth = halo;
+		source_regions[6].first_z = GAME_VOXEL_CHUNK_DEPTH - halo;
+		source_regions[6].width = halo;
+		source_regions[6].depth = halo;
+		source_regions[7].first_x = GAME_VOXEL_CHUNK_WIDTH - halo;
+		source_regions[7].width = halo;
+		source_regions[7].depth = halo;
+		source_regions[8].width = halo;
+		source_regions[8].depth = halo;
+		for (source_slot = 1; source_slot < 9; ++source_slot)
+		{
+			if (sources[source_slot] != nullptr
+				&& sources[source_slot]->initialized)
+			{
+				source_regions[source_slot].blocks.resize(
+					static_cast<std::size_t>(source_regions[source_slot].width)
+					* static_cast<std::size_t>(source_regions[source_slot].depth)
+					* static_cast<std::size_t>(GAME_VOXEL_CHUNK_HEIGHT));
+				if (sources[source_slot]->chunk.copy_region(
+						&source_regions[source_slot].blocks[0],
+						static_cast<uint32_t>(source_regions[source_slot].blocks.size()),
+						source_regions[source_slot].first_x,
+						source_regions[source_slot].first_z,
+						source_regions[source_slot].width,
+						source_regions[source_slot].depth) != FT_ERR_SUCCESS)
+					return (FT_ERR_INVALID_OPERATION);
+			}
+		}
+	}
+	catch (...)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
 
 	halo_z = 0;
 	while (halo_z < edge)
@@ -109,38 +135,41 @@ int32_t WorldChunkSnapshotCapture::capture_lighting_halo(
 		{
 			local_x = halo_x - halo;
 			local_z = halo_z - halo;
-			source = &target;
-			if (local_x < 0 && local_z >= 0 && local_z < GAME_VOXEL_CHUNK_DEPTH)
-				source = west;
-			else if (local_x >= GAME_VOXEL_CHUNK_WIDTH && local_z >= 0
-				&& local_z < GAME_VOXEL_CHUNK_DEPTH)
-				source = east;
-			else if (local_z < 0 && local_x >= 0
-				&& local_x < GAME_VOXEL_CHUNK_WIDTH)
-				source = north;
-			else if (local_z >= GAME_VOXEL_CHUNK_DEPTH && local_x >= 0
-				&& local_x < GAME_VOXEL_CHUNK_WIDTH)
-				source = south;
-			else if (local_x < 0 || local_x >= GAME_VOXEL_CHUNK_WIDTH
-				|| local_z < 0 || local_z >= GAME_VOXEL_CHUNK_DEPTH)
-				source = nullptr;
+			source_index = 0U;
+			x_side = local_x < 0 ? -1 : (local_x >= GAME_VOXEL_CHUNK_WIDTH ? 1 : 0);
+			z_side = local_z < 0 ? -1 : (local_z >= GAME_VOXEL_CHUNK_DEPTH ? 1 : 0);
+			if (x_side < 0 && z_side < 0)
+				source_index = 5U;
+			else if (x_side > 0 && z_side < 0)
+				source_index = 6U;
+			else if (x_side < 0 && z_side > 0)
+				source_index = 7U;
+			else if (x_side > 0 && z_side > 0)
+				source_index = 8U;
+			else if (x_side < 0)
+				source_index = 1U;
+			else if (x_side > 0)
+				source_index = 2U;
+			else if (z_side < 0)
+				source_index = 3U;
+			else if (z_side > 0)
+				source_index = 4U;
+			source = sources[source_index];
 			if (source == nullptr || source->initialized == false)
 				block_id = VOXEL_GENERATOR_STONE_BLOCK;
 			else
 			{
-				if (source == &target)
-				{
-					local_x = halo_x - halo;
-					local_z = halo_z - halo;
-				}
-				else if (source == west)
-					local_x = GAME_VOXEL_CHUNK_WIDTH + local_x;
-				else if (source == east)
+				if (x_side < 0)
+					local_x += GAME_VOXEL_CHUNK_WIDTH;
+				else if (x_side > 0)
 					local_x -= GAME_VOXEL_CHUNK_WIDTH;
-				else if (source == north)
-					local_z = GAME_VOXEL_CHUNK_DEPTH + local_z;
-				else if (source == south)
+				if (z_side < 0)
+					local_z += GAME_VOXEL_CHUNK_DEPTH;
+				else if (z_side > 0)
 					local_z -= GAME_VOXEL_CHUNK_DEPTH;
+				if (source_index != 0U
+					&& source_regions[source_index].blocks.empty())
+					 return (FT_ERR_INVALID_OPERATION);
 			}
 			index = (static_cast<std::size_t>(halo_z)
 				* static_cast<std::size_t>(edge)
@@ -150,9 +179,32 @@ int32_t WorldChunkSnapshotCapture::capture_lighting_halo(
 			{
 				if (source == nullptr || source->initialized == false)
 					block_id = VOXEL_GENERATOR_STONE_BLOCK;
-				else if (source->chunk.read_block(local_x, y, local_z,
-						&block_id) != FT_ERR_SUCCESS)
-					return (FT_ERR_INVALID_OPERATION);
+				else
+				{
+					if (source_index == 0U)
+					{
+						source_block_index = (
+							static_cast<std::size_t>(local_z)
+							* static_cast<std::size_t>(GAME_VOXEL_CHUNK_HEIGHT)
+							+ static_cast<std::size_t>(y))
+							* static_cast<std::size_t>(GAME_VOXEL_CHUNK_WIDTH)
+							+ static_cast<std::size_t>(local_x);
+						block_id = snapshot.blocks[source_block_index];
+					}
+					else
+					{
+						source_block_index = (
+							static_cast<std::size_t>(local_z
+								- static_cast<int32_t>(source_regions[source_index].first_z))
+							* static_cast<std::size_t>(GAME_VOXEL_CHUNK_HEIGHT)
+							+ static_cast<std::size_t>(y))
+							* static_cast<std::size_t>(source_regions[source_index].width)
+							+ static_cast<std::size_t>(local_x
+								- static_cast<int32_t>(source_regions[source_index].first_x));
+						block_id = source_regions[source_index].blocks[
+							source_block_index];
+					}
+				}
 				snapshot.lighting_blocks[index + static_cast<std::size_t>(y)] = block_id;
 			}
 			halo_x += 1;
@@ -164,11 +216,14 @@ int32_t WorldChunkSnapshotCapture::capture_lighting_halo(
 
 int32_t WorldChunkSnapshotCapture::capture(const WorldChunk &target,
 	const WorldChunk *west, const WorldChunk *east, const WorldChunk *north,
-	const WorldChunk *south,
+	const WorldChunk *south, const WorldChunk *northwest,
+	const WorldChunk *northeast, const WorldChunk *southwest,
+	const WorldChunk *southeast,
 	WorldGenerationPipeline::WorldChunkSnapshot &snapshot) noexcept
 {
 	snapshot.chunk_x = target.chunk_x;
 	snapshot.chunk_z = target.chunk_z;
+	snapshot.generation_metadata = target.chunk.get_generation_metadata();
 	snapshot.blocks.clear();
 	snapshot.west_border.clear();
 	snapshot.east_border.clear();
@@ -203,7 +258,8 @@ int32_t WorldChunkSnapshotCapture::capture(const WorldChunk &target,
 			snapshot) != FT_ERR_SUCCESS)
 		return (FT_ERR_INVALID_OPERATION);
 	if (WorldChunkSnapshotCapture::capture_lighting_halo(target, west, east,
-			north, south, snapshot) != FT_ERR_SUCCESS)
+		north, south, northwest, northeast, southwest, southeast,
+		snapshot) != FT_ERR_SUCCESS)
 		return (FT_ERR_INVALID_OPERATION);
 	if (WorldChunkSnapshotCapture::capture_border_column(west,
 			snapshot.west_border, -1, 0) != FT_ERR_SUCCESS

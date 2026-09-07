@@ -62,6 +62,9 @@ int32_t World::update_around(double camera_x, double camera_z,
 	bool	center_changed;
 	int32_t	stream_radius;
 	int32_t analytics_error;
+	std::vector<int32_t> evicted_chunk_x;
+	std::vector<int32_t> evicted_chunk_z;
+	std::vector<std::unique_ptr<WorldChunk>> retired_chunks;
 	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
 #if defined(LIBFT_ENABLE_ANALYTICS)
 	int32_t loaded_before_recenter;
@@ -91,9 +94,45 @@ int32_t World::update_around(double camera_x, double camera_z,
 			std::fprintf(stderr,
 				"Analytics: stream recenter scope start failed (%d)\n",
 				analytics_error);
-		WorldChunkStore::evict_far_chunks(this->chunks, this->chunk_count,
-			&this->loaded_chunk_count, this->center_chunk_x,
-			this->center_chunk_z);
+		for (int32_t index = 0; index < this->chunk_count; ++index)
+		{
+			if (this->chunks[index].initialized
+				&& WorldCoordinates::chunk_distance_squared(
+					this->chunks[index].chunk_x, this->chunks[index].chunk_z,
+					this->center_chunk_x, this->center_chunk_z)
+					> WorldCoordinates::CACHE_CHUNK_RADIUS
+						* WorldCoordinates::CACHE_CHUNK_RADIUS)
+			{
+				evicted_chunk_x.push_back(this->chunks[index].chunk_x);
+				evicted_chunk_z.push_back(this->chunks[index].chunk_z);
+			}
+		}
+		retired_chunks.reserve(evicted_chunk_x.size());
+		for (int32_t index = 0; index < this->chunk_count; ++index)
+		{
+			if (this->chunks[index].initialized == false
+				|| WorldCoordinates::chunk_distance_squared(
+					this->chunks[index].chunk_x, this->chunks[index].chunk_z,
+					this->center_chunk_x, this->center_chunk_z)
+					<= WorldCoordinates::CACHE_CHUNK_RADIUS
+						* WorldCoordinates::CACHE_CHUNK_RADIUS)
+				continue ;
+			std::unique_ptr<WorldChunk> retired(new (std::nothrow) WorldChunk());
+			if (retired == nullptr
+				|| retired->move(this->chunks[index]) != FT_ERR_SUCCESS)
+			{
+				this->chunks[index].destroy();
+			}
+			else
+				retired_chunks.push_back(std::move(retired));
+			if (this->loaded_chunk_count > 0)
+				this->loaded_chunk_count -= 1;
+		}
+		for (std::unique_ptr<WorldChunk> &retired : retired_chunks)
+			(void)this->chunk_streamer.pipeline().retire_chunk(std::move(retired));
+		for (std::size_t index = 0U; index < evicted_chunk_x.size(); ++index)
+			this->chunk_streamer.mark_neighbor_remeshes(evicted_chunk_x[index],
+				evicted_chunk_z[index]);
 		this->rebuild_chunk_index();
 #if defined(LIBFT_ENABLE_ANALYTICS)
 		loaded_after_recenter = this->loaded_chunk_count;
@@ -171,6 +210,7 @@ World::StreamDiagnostics World::stream_diagnostics() const
 	diagnostics.playable_required_count = source.playable_required_count;
 	diagnostics.playable_drawable_count = source.playable_drawable_count;
 	diagnostics.active_generation_count = source.active_generation_count;
+	diagnostics.remesh_queue_peak = source.remesh_queue_peak;
 	diagnostics.oldest_result_age_nanoseconds =
 		source.oldest_result_age_nanoseconds;
 	diagnostics.oldest_pending_age = source.oldest_pending_age;
@@ -223,7 +263,61 @@ int32_t World::place_block_at(int32_t world_x, int32_t world_y, int32_t world_z,
 {
 	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
 	return (WorldBlockEditor::place_block_at(*this, world_x, world_y, world_z,
-			block_id));
+		block_id));
+}
+
+int32_t World::apply_authoritative_block_change(
+	const game_block_change_request &request, game_block_delta *delta_out)
+{
+	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
+	WorldChunk *world_chunk;
+	uint64_t previous_revision;
+	uint64_t current_revision;
+	game_block_edit_op edit;
+	WorldEditHistory::Record record;
+	int32_t error_code;
+
+	if (delta_out == nullptr || request.local_x >= GAME_VOXEL_CHUNK_WIDTH
+		|| request.local_y >= GAME_VOXEL_CHUNK_HEIGHT
+		|| request.local_z >= GAME_VOXEL_CHUNK_DEPTH)
+		return (FT_ERR_INVALID_ARGUMENT);
+	world_chunk = this->find_chunk_mutable(request.chunk_x, request.chunk_z);
+	if (world_chunk == nullptr)
+		return (FT_ERR_NOT_FOUND);
+	previous_revision = world_chunk->chunk.get_revision();
+	error_code = world_chunk->chunk.apply_authoritative_block_change(request,
+		delta_out);
+	if (error_code != FT_ERR_SUCCESS)
+		return (error_code);
+	current_revision = world_chunk->chunk.get_revision();
+	if (current_revision == previous_revision)
+		return (FT_ERR_SUCCESS);
+	world_chunk->voxel_revision = current_revision;
+	this->mark_geometry_changed();
+	this->chunk_streamer.mark_remesh_dirty(*world_chunk);
+	world_chunk->pending_mesh_request_id = 0U;
+	edit.world_x = request.chunk_x * GAME_VOXEL_CHUNK_WIDTH
+		+ static_cast<int32_t>(request.local_x);
+	edit.world_y = static_cast<int32_t>(request.local_y);
+	edit.world_z = request.chunk_z * GAME_VOXEL_CHUNK_DEPTH
+		+ static_cast<int32_t>(request.local_z);
+	edit.block_type = request.requested_block_id;
+	edit.tick = this->current_tick;
+	record.edit = edit;
+	record.previous_block_id = request.expected_block_id;
+	this->edit_history.record(record);
+	this->chunk_streamer.mark_neighbor_remeshes(request.chunk_x,
+		request.chunk_z);
+	this->chunk_streamer.prioritize_chunk_remesh(request.chunk_x,
+		request.chunk_z);
+	/* Authoritative edits follow the same immediate publication path as local
+	 * edits. If the single remesh slot is occupied, the priority queue retries
+	 * the request without losing the edit notification. */
+	if (this->chunk_streamer.queue_chunk_remesh(*world_chunk) != FT_ERR_SUCCESS
+		&& world_chunk->pending_mesh_request_id == 0U)
+		this->chunk_streamer.prioritize_chunk_remesh(request.chunk_x,
+			request.chunk_z);
+	return (FT_ERR_SUCCESS);
 }
 
 void World::advance_tick()

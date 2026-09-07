@@ -33,6 +33,8 @@ int ApplicationBootstrap::run_validators(const ApplicationOptions &options)
 		return (ApplicationValidator::validate_collision());
 	if (options.validate_block_edit_mode)
 		return (ApplicationValidator::validate_block_edit());
+	if (options.validate_camera_interaction_mode)
+		return (ApplicationValidator::validate_camera_interaction());
 	if (options.validate_visible_distance_mode)
 		return (ApplicationValidator::validate_visible_distance());
 	if (options.validate_voxel_determinism_mode)
@@ -47,6 +49,10 @@ int ApplicationBootstrap::run_validators(const ApplicationOptions &options)
 		return (ApplicationValidator::validate_world_revision());
 	if (options.validate_async_generation_mode)
 		return (ApplicationValidator::validate_async_generation());
+	if (options.validate_network_repair_mode)
+		return (ApplicationValidator::validate_network_repair());
+	if (options.validate_renderer_publication_mode)
+		return (ApplicationValidator::validate_renderer_publication());
 	return (-1);
 }
 

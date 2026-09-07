@@ -86,6 +86,7 @@ class World
 		size_t						playable_required_count;
 		size_t						playable_drawable_count;
 		size_t						active_generation_count;
+		size_t						remesh_queue_peak;
 		size_t					deferred_edit_count;
 		size_t					deferred_edit_cursor;
 		uint64_t					frame;
@@ -157,6 +158,9 @@ class World
 	int32_t delete_block_at(int32_t world_x, int32_t world_y, int32_t world_z);
 	int32_t place_block_at(int32_t world_x, int32_t world_y, int32_t world_z,
 		uint32_t block_id);
+	int32_t apply_authoritative_block_change(
+		const game_block_change_request &request,
+		game_block_delta *delta_out);
 	void advance_tick();
 	int32_t undo_last_edit();
 	int32_t redo_last_edit();

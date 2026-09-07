@@ -28,6 +28,8 @@ class GpuWorldRenderer
 	void resize(int width, int height);
 	void render(const Camera &camera, const World &world);
 	size_t gpu_bytes() const;
+	bool uploaded_identity_matches(int32_t slot, uint64_t revision,
+		int32_t chunk_x, int32_t chunk_z, uint64_t voxel_revision) const;
 
   private:
 	ft_gpu_shader _world_shader;

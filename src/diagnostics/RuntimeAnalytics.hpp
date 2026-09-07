@@ -52,6 +52,7 @@ class RuntimeAnalytics
     static int32_t end_world_session() noexcept;
     static int32_t begin_frame() noexcept;
     static int32_t end_frame() noexcept;
+    static ft_bool is_enabled() noexcept;
     static int32_t begin_scope(RuntimeAnalyticsScope scope) noexcept;
     static int32_t end_scope() noexcept;
 #else
@@ -64,6 +65,7 @@ class RuntimeAnalytics
     static int32_t end_world_session() noexcept { return (FT_ERR_SUCCESS); }
     static int32_t begin_frame() noexcept { return (FT_ERR_SUCCESS); }
     static int32_t end_frame() noexcept { return (FT_ERR_SUCCESS); }
+    static ft_bool is_enabled() noexcept { return (FT_FALSE); }
     static int32_t begin_scope(RuntimeAnalyticsScope) noexcept
     {
         return (FT_ERR_SUCCESS);

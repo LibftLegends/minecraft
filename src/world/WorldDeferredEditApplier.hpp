@@ -20,7 +20,7 @@ class WorldDeferredEditApplier
   private:
 	static bool deferred_edit_less(const WorldGenerationPipeline::WorldDeferredBlockEdit &left,
 		const WorldGenerationPipeline::WorldDeferredBlockEdit &right) noexcept;
-	static int32_t apply_single_edit(World &world,
+	static int32_t apply_single_edit(WorldChunkStreamer &streamer, World &world,
 		const WorldGenerationPipeline::WorldDeferredBlockEdit &edit,
 		std::vector<WorldGenerationPipeline::WorldDeferredBlockEdit> &pending,
 		std::vector<WorldChunk *> &touched_chunks) noexcept;

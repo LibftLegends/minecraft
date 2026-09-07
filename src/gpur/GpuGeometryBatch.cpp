@@ -1,8 +1,10 @@
 #include "../../src/gpur/GpuGeometryBatch.hpp"
 #include "../../src/diagnostics/RuntimeAnalytics.hpp"
 
-#if defined(LIBFT_ENABLE_ANALYTICS)
+#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
 # include <cstdio>
+#endif
+#if defined(LIBFT_ENABLE_ANALYTICS)
 # include <chrono>
 #endif
 
@@ -84,7 +86,9 @@ void GpuGeometryBatch::sync_pending_visible_meshes(const Camera &camera,
 	int32_t cursor_index = -1;
 	int32_t cursor_slot;
 	int32_t nearest_pending_index = -1;
+	int32_t priority_pending_index = -1;
 	double nearest_pending_distance = 0.0;
+	double priority_pending_distance = 0.0;
 	if (visible_slot_count > 0)
 	{
 		cursor_index = 0;
@@ -160,11 +164,24 @@ void GpuGeometryBatch::sync_pending_visible_meshes(const Camera &camera,
 						nearest_pending_index = pending_index;
 						nearest_pending_distance = pending_distance;
 					}
+					/* Interactive edits take priority over background mesh
+					 * publication.  Initial generated chunks use voxel revision 1;
+					 * a higher revision means the player/world changed this chunk
+					 * after that initial publication. */
+					if (pending_chunk.voxel_revision > 1U
+						&& (priority_pending_index < 0
+							|| pending_distance < priority_pending_distance))
+					{
+						priority_pending_index = pending_index;
+						priority_pending_distance = pending_distance;
+					}
 				}
 			}
 			pending_index += 1;
 		}
-		if (nearest_pending_index >= 0)
+		if (priority_pending_index >= 0)
+			visible_start = priority_pending_index;
+		else if (nearest_pending_index >= 0)
 			visible_start = nearest_pending_index;
 	}
 	int32_t visible_offset = 0;
@@ -191,6 +208,18 @@ void GpuGeometryBatch::sync_pending_visible_meshes(const Camera &camera,
 			else if (_chunk_meshes[slot].needs_sync(chunk.mesh_revision,
 				chunk.chunk_x, chunk.chunk_z, chunk.voxel_revision))
 			{
+				/* Keep the last committed GPU mesh visible while an edited chunk's
+				 * replacement is being built. The CPU chunk already has the new voxel
+				 * revision, but its mesh is still the old committed geometry until the
+				 * remesh result is published. Never upload that old mesh under the new
+				 * revision. */
+				if (chunk.mesh_dirty && chunk.voxel_revision > 1U
+					&& _chunk_meshes[slot].uploaded_coordinates_match(
+						chunk.chunk_x, chunk.chunk_z))
+				{
+					visible_offset += 1;
+					continue ;
+				}
 				/* A storage slot can be reused after recentering. Do not draw the
 				 * previous chunk's GPU geometry at the new chunk's coordinates while
 				 * the replacement upload is waiting for its frame budget. */
@@ -215,6 +244,14 @@ void GpuGeometryBatch::sync_pending_visible_meshes(const Camera &camera,
 #endif
 					_chunk_meshes[slot].sync(chunk.mesh, chunk.mesh_revision,
 						chunk.chunk_x, chunk.chunk_z, chunk.voxel_revision);
+				#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+					if (chunk.voxel_revision > 1U)
+						std::fprintf(stderr,
+							"[RendererTrace] GPU upload slot=%d chunk=(%d,%d) voxel=%llu mesh=%llu\n",
+							slot, chunk.chunk_x, chunk.chunk_z,
+							static_cast<unsigned long long>(chunk.voxel_revision),
+							static_cast<unsigned long long>(chunk.mesh_revision));
+				#endif
 					uploaded_count += 1;
 					uploaded_bytes += mesh_bytes;
 #if defined(LIBFT_ENABLE_ANALYTICS)
@@ -708,4 +745,14 @@ size_t GpuGeometryBatch::gpu_bytes() const
 	for (int32_t index = 0; index < WorldCoordinates::CHUNK_COUNT; ++index)
 		bytes += _chunk_meshes[index].gpu_bytes();
 	return (bytes);
+}
+
+bool GpuGeometryBatch::uploaded_identity_matches(int32_t slot,
+	uint64_t revision, int32_t chunk_x, int32_t chunk_z,
+	uint64_t voxel_revision) const
+{
+	if (slot < 0 || slot >= WorldCoordinates::CHUNK_COUNT)
+		return (false);
+	return (_chunk_meshes[slot].identity_matches(revision, chunk_x,
+		chunk_z, voxel_revision));
 }

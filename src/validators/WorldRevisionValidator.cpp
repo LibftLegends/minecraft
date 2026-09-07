@@ -1,6 +1,8 @@
 #include "../../src/validators/WorldRevisionValidator.hpp"
 
 #include <chrono>
+#include <memory>
+#include <new>
 #include <thread>
 
 WorldRevisionValidator::WorldRevisionValidator()
@@ -194,21 +196,22 @@ int32_t WorldRevisionValidator::regenerate_and_check(World &world,
 int32_t WorldRevisionValidator::roundtrip_metadata(World &world) noexcept
 {
 	const char *metadata_path;
-	World restored_world;
+	std::unique_ptr<World> restored_world(new (std::nothrow) World());
 
 	metadata_path = "world_revision_validator.bin";
-	if (world.save_revision_metadata(metadata_path) != FT_ERR_SUCCESS)
+	if (restored_world == nullptr
+		|| world.save_revision_metadata(metadata_path) != FT_ERR_SUCCESS)
 		return (1);
-	if (restored_world.initialize("revision-validator") != FT_ERR_SUCCESS
-		|| restored_world.load_revision_metadata(metadata_path) != FT_ERR_SUCCESS
-		|| !restored_world.is_chunk_protected(4, 0))
+	if (restored_world->initialize("revision-validator") != FT_ERR_SUCCESS
+		|| restored_world->load_revision_metadata(metadata_path) != FT_ERR_SUCCESS
+		|| !restored_world->is_chunk_protected(4, 0))
 	{
 		std::remove(metadata_path);
-		restored_world.destroy();
+		restored_world->destroy();
 		return (1);
 	}
 	std::remove(metadata_path);
-	restored_world.destroy();
+	restored_world->destroy();
 	return (FT_ERR_SUCCESS);
 }
 
@@ -239,28 +242,30 @@ bool WorldRevisionValidator::fail_if_error(World &world,
 
 int WorldRevisionValidator::validate() const
 {
-	World world;
+	std::unique_ptr<World> world(new (std::nothrow) World());
 	std::vector<World::RevisionPreviewEntry> preview;
 	int32_t regenerated;
 	int32_t skipped;
 
-	if (WorldRevisionValidator::initialize_world_with_edit(world) != FT_ERR_SUCCESS)
+	if (world == nullptr
+		|| WorldRevisionValidator::initialize_world_with_edit(*world)
+			!= FT_ERR_SUCCESS)
 		return (1);
-	if (WorldRevisionValidator::fail_if_error(world,
-			WorldRevisionValidator::setup_revision_selection(world, preview)))
+	if (WorldRevisionValidator::fail_if_error(*world,
+			WorldRevisionValidator::setup_revision_selection(*world, preview)))
 		return (1);
-	if (WorldRevisionValidator::fail_if_error(world,
-			WorldRevisionValidator::regenerate_and_check(world, &regenerated,
+	if (WorldRevisionValidator::fail_if_error(*world,
+			WorldRevisionValidator::regenerate_and_check(*world, &regenerated,
 				&skipped)))
 		return (1);
-	if (WorldRevisionValidator::fail_if_error(world,
-			WorldRevisionValidator::roundtrip_metadata(world)))
+	if (WorldRevisionValidator::fail_if_error(*world,
+			WorldRevisionValidator::roundtrip_metadata(*world)))
 		return (1);
-	if (WorldRevisionValidator::fail_if_error(world,
-			WorldRevisionValidator::apply_request_test(world)))
+	if (WorldRevisionValidator::fail_if_error(*world,
+			WorldRevisionValidator::apply_request_test(*world)))
 		return (1);
 	std::printf("world-revision: ok regenerated=%d skipped=%d\n", regenerated,
 		skipped);
-	world.destroy();
+	world->destroy();
 	return (0);
 }

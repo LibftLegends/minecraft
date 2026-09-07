@@ -1,4 +1,7 @@
 #include "../../src/edits/DeleteBlockCommand.hpp"
+#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+# include <cstdio>
+#endif
 
 DeleteBlockCommand::DeleteBlockCommand() : world_x(0), world_y(0), world_z(0)
 {
@@ -33,6 +36,7 @@ DeleteBlockCommand &DeleteBlockCommand::operator=(const DeleteBlockCommand &othe
 int32_t DeleteBlockCommand::execute(World &world) const
 {
 	int32_t cx, cz, lx, lz;
+	int32_t remesh_error;
 	WorldChunk *wc = resolve_chunk(world, world_x, world_y, world_z, cx, cz, lx,
 			lz);
 	if (!wc)
@@ -49,6 +53,7 @@ int32_t DeleteBlockCommand::execute(World &world) const
 		return (err);
 	wc->voxel_revision += 1U;
 	world.mark_geometry_changed();
+	world.chunk_streamer.mark_remesh_dirty(*wc);
 	wc->pending_mesh_request_id = 0U;
 	WorldEditHistory::Record record;
 	record.edit.world_x = world_x;
@@ -60,5 +65,19 @@ int32_t DeleteBlockCommand::execute(World &world) const
 	(void)wc->chunk.record_dirty_edit(record.edit);
 	world.edit_history.record(record);
 	world.chunk_streamer.mark_neighbor_remeshes(cx, cz);
+	world.chunk_streamer.prioritize_chunk_remesh(cx, cz);
+	/* Submit the edited chunk immediately when the remesh slot is available;
+	 * the priority queue remains the retry path while generation is busy. */
+	remesh_error = world.chunk_streamer.queue_neighbor_remeshes(cx, cz);
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	std::fprintf(stderr,
+		"[RendererTrace] delete chunk=(%d,%d) voxel=%llu remesh=%d pending=%llu\n",
+		cx, cz, static_cast<unsigned long long>(wc->voxel_revision),
+		remesh_error,
+		static_cast<unsigned long long>(wc->pending_mesh_request_id));
+	#endif
+	if (remesh_error != FT_ERR_SUCCESS
+		&& wc->pending_mesh_request_id == 0U)
+		world.chunk_streamer.prioritize_chunk_remesh(cx, cz);
 	return (FT_ERR_SUCCESS);
 }

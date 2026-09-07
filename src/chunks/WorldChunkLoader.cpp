@@ -176,6 +176,7 @@ int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk,
 	world_chunk->initialized = true;
 	world_chunk->mesh_revision += 1U;
 	world_chunk->voxel_revision += 1U;
+	world_chunk->light_revision += 1U;
 	world_chunk->pending_mesh_request_id = 0U;
 	world_chunk->mesh_dirty = false;
 	return (FT_ERR_SUCCESS);
@@ -200,6 +201,7 @@ int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk,
 	world_chunk->initialized = true;
 	world_chunk->mesh_revision += 1U;
 	world_chunk->voxel_revision += 1U;
+	world_chunk->light_revision += 1U;
 	world_chunk->pending_mesh_request_id = 0U;
 	world_chunk->mesh_dirty = false;
 	return (FT_ERR_SUCCESS);
@@ -224,6 +226,7 @@ int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk,
 	world_chunk->initialized = true;
 	world_chunk->mesh_revision += 1U;
 	world_chunk->voxel_revision += 1U;
+	world_chunk->light_revision += 1U;
 	world_chunk->pending_mesh_request_id = 0U;
 	world_chunk->mesh_dirty = false;
 	return (FT_ERR_SUCCESS);
@@ -267,6 +270,7 @@ int32_t WorldChunkLoader::remesh_chunk(WorldChunk *chunks, int32_t chunk_count,
 		lookup_world_light_block, &light_context);
 	if (err != FT_ERR_SUCCESS)
 		return (err);
+	wc->light_revision += 1U;
 	err = chunk_mesh_clear(wc->mesh);
 	if (err == FT_ERR_SUCCESS)
 		err = chunk_mesh_generate_from_chunk_with_light(wc->mesh, wc->chunk,
@@ -299,6 +303,7 @@ int32_t WorldChunkLoader::remesh_chunk(WorldChunk *chunks, int32_t chunk_count,
 		lookup_world_light_block, &light_context);
 	if (err != FT_ERR_SUCCESS)
 		return (err);
+	wc->light_revision += 1U;
 	err = chunk_mesh_clear(wc->mesh);
 	if (err != FT_ERR_SUCCESS)
 		return (err);

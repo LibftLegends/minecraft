@@ -60,6 +60,7 @@ WorldChunkStreamer::Diagnostics WorldChunkStreamDiagnosticsBuilder::build(const 
 	diagnostics.playable_required_count = 0U;
 	diagnostics.playable_drawable_count = 0U;
 	diagnostics.active_generation_count = streamer.generation_pipeline_.active_count();
+	diagnostics.remesh_queue_peak = streamer.remesh_queue_peak_;
 	diagnostics.oldest_result_age_nanoseconds = streamer.generation_pipeline_
 		.oldest_completed_result_age_nanoseconds();
 	diagnostics.oldest_pending_age = 0U;

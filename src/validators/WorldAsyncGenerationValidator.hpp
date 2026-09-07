@@ -10,10 +10,13 @@ class WorldAsyncGenerationValidator : public IValidator
 	static bool chunks_equal(const game_voxel_chunk &left,
 		const game_voxel_chunk &right) noexcept;
 	static bool mesh_payload_is_valid(const chunk_mesh &mesh) noexcept;
+	static int validate_diagonal_lighting_halo() noexcept;
+	static int validate_cardinal_lighting_propagation() noexcept;
+	static int validate_diagonal_lighting_propagation() noexcept;
 	static bool playable_area_is_ready(const World &world) noexcept;
 	static void report_playable_area_gaps(const World &world) noexcept;
 	static const WorldChunk *stream_until_ready(World &world,
-		int32_t *frame) noexcept;
+		int32_t *frame, bool *startup_edit_applied) noexcept;
 	static void report_failure(const World &world, int32_t frame) noexcept;
 
   public:

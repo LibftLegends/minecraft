@@ -15,6 +15,7 @@ class WorldChunk
 	int32_t world_z;
 	uint64_t mesh_revision;
 	uint64_t voxel_revision;
+	uint64_t light_revision;
 	uint64_t pending_mesh_request_id;
 	bool mesh_dirty;
 	bool initialized;
@@ -28,6 +29,7 @@ class WorldChunk
 	WorldChunk(const WorldChunk &other);
 	~WorldChunk();
 	WorldChunk &operator=(const WorldChunk &other);
+	int32_t move(WorldChunk &other) noexcept;
 
 	void reset_coordinates();
 	void destroy();

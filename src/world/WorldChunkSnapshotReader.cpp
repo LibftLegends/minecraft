@@ -52,6 +52,16 @@ int32_t WorldChunkSnapshotReader::initialize_snapshot_chunk(game_voxel_chunk &ch
 		}
 		index += 1U;
 	}
+	if (snapshot.generation_metadata.valid != FT_FALSE)
+	{
+		error_code = chunk.set_generation_metadata(
+			snapshot.generation_metadata);
+		if (error_code != FT_ERR_SUCCESS)
+		{
+			(void)chunk.destroy();
+			return (error_code);
+		}
+	}
 	return (FT_ERR_SUCCESS);
 }
 

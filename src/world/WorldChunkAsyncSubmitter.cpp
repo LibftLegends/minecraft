@@ -1,4 +1,39 @@
 #include "../../src/world/WorldChunkAsyncSubmitter.hpp"
+#include <cstdio>
+
+namespace
+{
+	static bool remesh_candidate_is_better(const WorldChunk &candidate,
+		const WorldChunk *best, int32_t center_chunk_x,
+		int32_t center_chunk_z) noexcept
+	{
+		int64_t candidate_dx;
+		int64_t candidate_dz;
+		int64_t best_dx;
+		int64_t best_dz;
+		int64_t candidate_distance;
+		int64_t best_distance;
+
+		if (best == nullptr)
+			return (true);
+		candidate_dx = static_cast<int64_t>(candidate.chunk_x)
+			- static_cast<int64_t>(center_chunk_x);
+		candidate_dz = static_cast<int64_t>(candidate.chunk_z)
+			- static_cast<int64_t>(center_chunk_z);
+		best_dx = static_cast<int64_t>(best->chunk_x)
+			- static_cast<int64_t>(center_chunk_x);
+		best_dz = static_cast<int64_t>(best->chunk_z)
+			- static_cast<int64_t>(center_chunk_z);
+		candidate_distance = candidate_dx * candidate_dx
+			+ candidate_dz * candidate_dz;
+		best_distance = best_dx * best_dx + best_dz * best_dz;
+		if (candidate_distance != best_distance)
+			return (candidate_distance < best_distance);
+		return (candidate.chunk_x < best->chunk_x
+			|| (candidate.chunk_x == best->chunk_x
+				&& candidate.chunk_z < best->chunk_z));
+	}
+}
 
 WorldChunkAsyncSubmitter::WorldChunkAsyncSubmitter()
 {
@@ -91,6 +126,10 @@ int32_t WorldChunkAsyncSubmitter::submit_dirty_remeshes(
 	 * the cursor preserves eventual progress across frames. */
 	int32_t scan_budget;
 	int32_t queue_budget;
+	int32_t best_dirty_index;
+	WorldChunk *best_dirty_chunk;
+	int32_t priority_center_x;
+	int32_t priority_center_z;
 	const voxel_light_update_config &light_config =
 		streamer.light_update_config_;
 	scan_budget = static_cast<int32_t>(light_config.target_nodes_per_frame);
@@ -99,30 +138,101 @@ int32_t WorldChunkAsyncSubmitter::submit_dirty_remeshes(
 	if (scan_budget > static_cast<int32_t>(light_config.max_nodes_per_frame))
 		scan_budget = static_cast<int32_t>(light_config.max_nodes_per_frame);
 	queue_budget = static_cast<int32_t>(light_config.max_nodes_per_frame);
-	if (queue_budget > 8)
-		queue_budget = 8;
+	if (queue_budget > 1)
+		queue_budget = 1;
 
 	if (streamer.world_.chunk_count <= 0)
 		return (FT_ERR_SUCCESS);
+	if (streamer.stream_frame_ < streamer.next_remesh_submission_frame_)
+		return (FT_ERR_SUCCESS);
+	if (streamer.remesh_priority_anchor_valid_
+		&& streamer.stream_frame_
+			>= streamer.remesh_priority_anchor_expiry_frame_)
+		streamer.remesh_priority_anchor_valid_ = false;
+	if (streamer.priority_remesh_pending_)
+	{
+		const WorldChunkStreamer::RemeshPriority priority =
+			streamer.priority_remeshes_.front();
+		WorldChunk *priority_chunk = streamer.world_.find_chunk_mutable(
+			priority.chunk_x, priority.chunk_z);
+		if (priority_chunk == nullptr || !priority_chunk->mesh_dirty)
+		{
+			streamer.priority_remeshes_.pop_front();
+			streamer.priority_remesh_pending_ =
+				!streamer.priority_remeshes_.empty();
+		}
+		else
+		{
+			error_code = streamer.queue_chunk_remesh(*priority_chunk);
+		#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+			if (error_code != FT_ERR_SUCCESS
+				&& (error_code != FT_ERR_FULL
+					|| streamer.stream_frame_ % 32U == 0U))
+				std::fprintf(stderr,
+					"[WorldGen] priority remesh deferred chunk=(%d,%d) "
+					"error=%d in_flight=%zu queued=%zu\n",
+					priority.chunk_x, priority.chunk_z, error_code,
+					streamer.generation_pipeline_.remesh_in_flight_count(),
+					streamer.generation_pipeline_.queued_count());
+		#endif
+			if (error_code == FT_ERR_SUCCESS
+				&& priority_chunk->pending_mesh_request_id != 0U)
+			{
+				streamer.priority_remeshes_.pop_front();
+				streamer.priority_remesh_pending_ =
+					!streamer.priority_remeshes_.empty();
+				if (streamer.priority_remesh_pending_)
+				{
+					streamer.priority_remesh_chunk_x_ =
+						streamer.priority_remeshes_.front().chunk_x;
+					streamer.priority_remesh_chunk_z_ =
+						streamer.priority_remeshes_.front().chunk_z;
+				}
+				streamer.next_remesh_submission_frame_ = streamer.stream_frame_ + 2U;
+			}
+			else if (error_code != FT_ERR_FULL)
+				return (error_code);
+		}
+	}
 	dirty_index = streamer.dirty_remesh_cursor_;
 	scanned_count = 0;
+	best_dirty_index = -1;
+	best_dirty_chunk = nullptr;
+	priority_center_x = streamer.world_.center_chunk_x;
+	priority_center_z = streamer.world_.center_chunk_z;
+	if (streamer.remesh_priority_anchor_valid_)
+	{
+		priority_center_x = streamer.remesh_priority_anchor_x_;
+		priority_center_z = streamer.remesh_priority_anchor_z_;
+	}
 	while (scanned_count < scan_budget
-		&& scanned_count < streamer.world_.chunk_count
-		&& streamer.generation_pipeline_.queued_count()
-			< static_cast<std::size_t>(queue_budget))
+		&& scanned_count < streamer.world_.chunk_count)
 	{
 		if (streamer.world_.chunks[dirty_index].initialized
-			&& streamer.world_.chunks[dirty_index].mesh_dirty)
+			&& streamer.world_.chunks[dirty_index].mesh_dirty
+			&& streamer.world_.chunks[dirty_index].pending_mesh_request_id == 0U
+			&& remesh_candidate_is_better(streamer.world_.chunks[dirty_index],
+				best_dirty_chunk, priority_center_x, priority_center_z))
 		{
-			error_code = streamer.queue_chunk_remesh(
-				streamer.world_.chunks[dirty_index]);
-			if (error_code != FT_ERR_SUCCESS && error_code != FT_ERR_FULL)
-				return (error_code);
+			best_dirty_chunk = &streamer.world_.chunks[dirty_index];
+			best_dirty_index = dirty_index;
 		}
 		dirty_index = (dirty_index + 1) % streamer.world_.chunk_count;
 		scanned_count += 1;
 	}
 	streamer.dirty_remesh_cursor_ = dirty_index;
+	if (best_dirty_index >= 0
+		&& streamer.generation_pipeline_.remesh_in_flight_count()
+			< static_cast<std::size_t>(queue_budget))
+	{
+		error_code = streamer.queue_chunk_remesh(
+			*best_dirty_chunk);
+		if (error_code != FT_ERR_SUCCESS && error_code != FT_ERR_FULL)
+			return (error_code);
+		if (error_code == FT_ERR_SUCCESS
+			&& best_dirty_chunk->pending_mesh_request_id != 0U)
+			streamer.next_remesh_submission_frame_ = streamer.stream_frame_ + 2U;
+	}
 	return (FT_ERR_SUCCESS);
 }
 

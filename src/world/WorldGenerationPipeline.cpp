@@ -1,11 +1,20 @@
 #include "../../src/world/WorldGenerationPipeline.hpp"
 #include <chrono>
+#include <cstdio>
 
 WorldGenerationPipeline::WorldGenerationPipeline() noexcept : requests_(),
 	results_(), retired_results_(), mutex_(), results_mutex_(), condition_(), pipeline_epoch_(1U),
 	remesh_in_flight_(0U), active_requests_(0U), stopping_(false), workers_(), maximum_queued_(0U),
 	initialized_(false)
 {
+}
+
+WorldGenerationPipeline::Result::~Result() noexcept
+{
+	if (this->mesh != nullptr)
+		(void)chunk_mesh_destroy(*this->mesh);
+	if (this->retired_mesh != nullptr)
+		(void)chunk_mesh_destroy(*this->retired_mesh);
 }
 
 WorldGenerationPipeline::WorldGenerationPipeline(const WorldGenerationPipeline &other) noexcept
@@ -155,7 +164,17 @@ int32_t WorldGenerationPipeline::submit_generation(uint64_t request_id,
 		std::lock_guard<std::mutex> lock(this->mutex_);
 
 		if (!this->initialized_ || this->stopping_)
+		{
+		#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+			std::fprintf(stderr,
+				"[WorldGen] submit generation rejected initialized=%d stopping=%d "
+				"epoch=%ju queued=%zu active=%zu\n",
+				this->initialized_ ? 1 : 0, this->stopping_ ? 1 : 0,
+				this->pipeline_epoch_.load(),
+				this->requests_.size(), this->active_requests_.load());
+		#endif
 			return (FT_ERR_INVALID_STATE);
+		}
 		if (this->requests_.size() >= this->maximum_queued_)
 			return (FT_ERR_FULL);
 		this->requests_.push_back(std::move(request));
@@ -167,28 +186,47 @@ int32_t WorldGenerationPipeline::submit_generation(uint64_t request_id,
 int32_t WorldGenerationPipeline::submit_remesh(uint64_t request_id,
 	uint64_t world_epoch, uint64_t relevance_epoch,
 	uint32_t generation_revision, int32_t chunk_x, int32_t chunk_z,
-	uint64_t voxel_revision, const WorldChunkSnapshot &snapshot) noexcept
+	uint64_t voxel_revision, uint64_t light_revision,
+	WorldChunkSnapshot &&snapshot,
+	const voxel_light_update_config *light_update_config) noexcept
 {
 	std::unique_ptr<Request> request;
 	int32_t error_code;
+	voxel_light_update_config resolved_light_config;
 
+	voxel_light_update_config_defaults(resolved_light_config);
+	if (light_update_config != nullptr)
+		resolved_light_config = *light_update_config;
 	error_code = WorldGenerationRequestBuilder::build_remesh(request,
 			request_id, this->pipeline_epoch_.load(), world_epoch,
 			relevance_epoch, generation_revision, chunk_x, chunk_z,
-			voxel_revision, snapshot);
+			voxel_revision, light_revision, std::move(snapshot),
+			resolved_light_config);
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
 	{
 		std::lock_guard<std::mutex> lock(this->mutex_);
 
 		if (!this->initialized_ || this->stopping_)
+		{
+		#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+			std::fprintf(stderr,
+				"[WorldGen] submit remesh rejected initialized=%d stopping=%d "
+				"epoch=%ju queued=%zu active=%zu\n",
+				this->initialized_ ? 1 : 0, this->stopping_ ? 1 : 0,
+				this->pipeline_epoch_.load(),
+				this->requests_.size(), this->active_requests_.load());
+		#endif
 			return (FT_ERR_INVALID_STATE);
-		if (this->remesh_in_flight_.load() >= 1U)
+		}
+		if (this->remesh_in_flight_.load() >= 2U)
 			return (FT_ERR_FULL);
-		if (this->requests_.size() >= this->maximum_queued_)
+		/* Keep capacity available for the bounded remesh window. Interactive
+		 * edits must not wait behind the initial generation burst. */
+		if (this->requests_.size() >= this->maximum_queued_ + 1U)
 			return (FT_ERR_FULL);
 		this->remesh_in_flight_.fetch_add(1U);
-		this->requests_.push_back(std::move(request));
+		this->requests_.push_front(std::move(request));
 	}
 	this->condition_.notify_one();
 	return (FT_ERR_SUCCESS);
@@ -218,85 +256,54 @@ void WorldGenerationPipeline::retire_result(
 	this->condition_.notify_one();
 }
 
+int32_t WorldGenerationPipeline::retire_chunk(
+	std::unique_ptr<WorldChunk> chunk) noexcept
+{
+	std::unique_ptr<Result> result(new (std::nothrow) Result());
+
+	if (result == nullptr || chunk == nullptr)
+		return (result == nullptr ? FT_ERR_NO_MEMORY : FT_ERR_INVALID_ARGUMENT);
+	result->chunk = std::move(chunk);
+	this->retire_result(std::move(result));
+	return (FT_ERR_SUCCESS);
+}
+
 int32_t WorldGenerationPipeline::capture_snapshot(const WorldChunk &target,
 	const WorldChunk *west, const WorldChunk *east, const WorldChunk *north,
-	const WorldChunk *south, WorldChunkSnapshot &snapshot) const noexcept
+	const WorldChunk *south, const WorldChunk *northwest,
+	const WorldChunk *northeast, const WorldChunk *southwest,
+	const WorldChunk *southeast, WorldChunkSnapshot &snapshot) const noexcept
 {
-    snapshot.chunk_x = target.chunk_x;
-    snapshot.chunk_z = target.chunk_z;
-    snapshot.blocks.clear();
-    snapshot.west_border.clear();
-    snapshot.east_border.clear();
-    snapshot.north_border.clear();
-    snapshot.south_border.clear();
-    try
-    {
-        snapshot.blocks.resize(static_cast<std::size_t>(GAME_VOXEL_CHUNK_WIDTH)
-            * static_cast<std::size_t>(GAME_VOXEL_CHUNK_DEPTH)
-            * static_cast<std::size_t>(GAME_VOXEL_CHUNK_HEIGHT));
-        snapshot.west_border.resize(static_cast<std::size_t>(GAME_VOXEL_CHUNK_HEIGHT)
-            * static_cast<std::size_t>(GAME_VOXEL_CHUNK_DEPTH), GAME_VOXEL_AIR_BLOCK);
-        snapshot.east_border = snapshot.west_border;
-        snapshot.north_border.resize(static_cast<std::size_t>(GAME_VOXEL_CHUNK_HEIGHT)
-            * static_cast<std::size_t>(GAME_VOXEL_CHUNK_WIDTH), GAME_VOXEL_AIR_BLOCK);
-        snapshot.south_border = snapshot.north_border;
-    }
-    catch (...)
-    {
-        return (FT_ERR_NO_MEMORY);
-    }
-    if (target.chunk.copy_blocks(snapshot.blocks.data(),
-            static_cast<uint32_t>(snapshot.blocks.size())) != FT_ERR_SUCCESS)
-        return (FT_ERR_INVALID_OPERATION);
-    auto capture_border = [](const WorldChunk *source, std::vector<uint32_t> &border,
-                             int32_t border_local_x, int32_t border_local_z) -> int32_t
-    {
-        uint32_t border_coordinate;
-
-        if (source == nullptr || !source->initialized)
-            return (FT_ERR_SUCCESS);
-        if (border_local_x < 0 || border_local_x >= GAME_VOXEL_CHUNK_WIDTH)
-        {
-            border_coordinate = 0U;
-            if (border_local_x < 0)
-                border_coordinate = GAME_VOXEL_CHUNK_WIDTH - 1U;
-            if (source->chunk.copy_x_border(border.data(),
-                    static_cast<uint32_t>(border.size()), border_coordinate)
-                != FT_ERR_SUCCESS)
-                return (FT_ERR_INVALID_OPERATION);
-            return (FT_ERR_SUCCESS);
-        }
-        border_coordinate = 0U;
-        if (border_local_z < 0)
-            border_coordinate = GAME_VOXEL_CHUNK_DEPTH - 1U;
-        if (source->chunk.copy_z_border(border.data(),
-                static_cast<uint32_t>(border.size()), border_coordinate)
-            != FT_ERR_SUCCESS)
-            return (FT_ERR_INVALID_OPERATION);
-        return (FT_ERR_SUCCESS);
-    };
-    if (capture_border(west, snapshot.west_border, -1, 0) != FT_ERR_SUCCESS
-        || capture_border(east, snapshot.east_border, GAME_VOXEL_CHUNK_WIDTH, 0)
-            != FT_ERR_SUCCESS
-        || capture_border(north, snapshot.north_border, 0, -1) != FT_ERR_SUCCESS
-        || capture_border(south, snapshot.south_border, 0, GAME_VOXEL_CHUNK_DEPTH)
-            != FT_ERR_SUCCESS)
-        return (FT_ERR_INVALID_OPERATION);
-    return (FT_ERR_SUCCESS);
+	return (WorldChunkSnapshotCapture::capture(target, west, east, north, south,
+		northwest, northeast, southwest, southeast, snapshot));
 }
 
 void WorldGenerationPipeline::cancel_queued() noexcept
 {
+	std::size_t cancelled_remesh_count;
+	std::size_t observed_count;
+	std::size_t replacement_count;
+
 	std::lock_guard<std::mutex> lock(this->mutex_);
 
 	this->pipeline_epoch_.fetch_add(1U);
+	cancelled_remesh_count = 0U;
 	for (const std::unique_ptr<Request> &request : this->requests_)
 	{
 		if (request != nullptr
 			&& request->operation == WorldGenerationOperation::REMESH)
-			this->remesh_in_flight_.fetch_sub(1U);
+			cancelled_remesh_count += 1U;
 	}
 	this->requests_.clear();
+	while (cancelled_remesh_count > 0U)
+	{
+		observed_count = this->remesh_in_flight_.load();
+		replacement_count = observed_count >= cancelled_remesh_count
+			? observed_count - cancelled_remesh_count : 0U;
+		if (this->remesh_in_flight_.compare_exchange_weak(observed_count,
+			replacement_count))
+			break ;
+	}
 }
 
 std::size_t WorldGenerationPipeline::queued_count() const noexcept
@@ -321,6 +328,17 @@ std::size_t WorldGenerationPipeline::active_count() const noexcept
 std::size_t WorldGenerationPipeline::remesh_in_flight_count() const noexcept
 {
 	return (this->remesh_in_flight_.load());
+}
+
+void WorldGenerationPipeline::release_remesh_slot() noexcept
+{
+	std::size_t observed_count;
+
+	observed_count = this->remesh_in_flight_.load();
+	while (observed_count != 0U
+		&& !this->remesh_in_flight_.compare_exchange_weak(observed_count,
+			observed_count - 1U))
+		continue ;
 }
 
 bool WorldGenerationPipeline::is_initialized() const noexcept

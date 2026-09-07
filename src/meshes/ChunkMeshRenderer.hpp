@@ -36,20 +36,24 @@ class ChunkMeshRenderer
 
 	bool transform_triangle(const Camera &camera,
 		const RenderCache &render_cache, const WorldChunk &world_chunk,
-		const chunk_mesh_vertex source_vertices[3],
+		const chunk_mesh_vertex &source_vertex_0,
+		const chunk_mesh_vertex &source_vertex_1,
+		const chunk_mesh_vertex &source_vertex_2,
 		ClipVertex transformed_vertices[3]) const;
 	bool project_and_draw(ft_render_framebuffer &framebuffer,
 		std::vector<double> &depth_buffer, const RenderCache &render_cache,
-		const chunk_mesh_vertex source_vertices[3],
+		const chunk_mesh_vertex &source_vertex,
 		const ClipVertex clipped_vertices[4], size_t n) const;
 	bool draw_triangle_pair(ft_render_framebuffer &framebuffer,
 		std::vector<double> &depth_buffer, const RenderCache &render_cache,
-		const chunk_mesh_vertex source_vertices[3],
+		const chunk_mesh_vertex &source_vertex,
 		const ClipVertex clipped_vertices[4], size_t clipped_count) const;
 	void process_triangle(ft_render_framebuffer &framebuffer,
 		std::vector<double> &depth_buffer, const Camera &camera,
 		const RenderCache &render_cache, const WorldChunk &world_chunk,
-		const chunk_mesh_vertex source_vertices[3],
+		const chunk_mesh_vertex &source_vertex_0,
+		const chunk_mesh_vertex &source_vertex_1,
+		const chunk_mesh_vertex &source_vertex_2,
 		ClipVertex transformed_vertices[3]) const;
 };
 

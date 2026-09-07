@@ -13,7 +13,9 @@ class WorldChunkSnapshotCapture
 
 	static int32_t capture(const WorldChunk &target, const WorldChunk *west,
 		const WorldChunk *east, const WorldChunk *north,
-		const WorldChunk *south,
+		const WorldChunk *south, const WorldChunk *northwest,
+		const WorldChunk *northeast, const WorldChunk *southwest,
+		const WorldChunk *southeast,
 		WorldGenerationPipeline::WorldChunkSnapshot &snapshot) noexcept;
 
   private:
@@ -25,6 +27,8 @@ class WorldChunkSnapshotCapture
 	static int32_t capture_lighting_halo(const WorldChunk &target,
 		const WorldChunk *west, const WorldChunk *east,
 		const WorldChunk *north, const WorldChunk *south,
+		const WorldChunk *northwest, const WorldChunk *northeast,
+		const WorldChunk *southwest, const WorldChunk *southeast,
 		WorldGenerationPipeline::WorldChunkSnapshot &snapshot) noexcept;
 };
 

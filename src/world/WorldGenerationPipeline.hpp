@@ -40,6 +40,7 @@ class WorldGenerationPipeline
 	{
 		int32_t						chunk_x;
 		int32_t						chunk_z;
+		game_voxel_generation_metadata generation_metadata;
 		std::vector<uint32_t> blocks;
 		std::vector<uint32_t> west_border;
 		std::vector<uint32_t> east_border;
@@ -57,6 +58,8 @@ class WorldGenerationPipeline
 		uint32_t					configuration_signature;
 		uint32_t					stage_mask;
 		uint64_t					voxel_revision;
+		uint64_t					light_revision;
+		voxel_light_update_config	light_update_config;
 		uint64_t					completed_at_nanoseconds;
 		uint64_t					generation_duration_nanoseconds;
 		uint64_t					mesh_duration_nanoseconds;
@@ -66,7 +69,11 @@ class WorldGenerationPipeline
 		int32_t						error_code;
 		std::unique_ptr<WorldChunk> chunk;
 		std::unique_ptr<chunk_mesh> mesh;
+		std::unique_ptr<chunk_mesh> retired_mesh;
+		std::unique_ptr<voxel_light_chunk> light;
 		std::vector<WorldDeferredBlockEdit> deferred_edits;
+
+		~Result() noexcept;
 	};
 
 	struct							Request
@@ -79,11 +86,17 @@ class WorldGenerationPipeline
 		uint32_t					configuration_signature;
 		uint32_t					stage_mask;
 		uint64_t					voxel_revision;
+		uint64_t					light_revision;
 		int32_t						chunk_x;
 		int32_t						chunk_z;
 		WorldGenerationOperation	operation;
 		std::string seed;
 		voxel_generation_config	config;
+		voxel_light_update_config	light_update_config;
+		std::unique_ptr<voxel_light_build_operation> remesh_light_operation;
+		std::unique_ptr<voxel_light_chunk> remesh_light;
+		std::unique_ptr<game_voxel_chunk> remesh_target;
+		ft_bool remesh_in_progress;
 		std::unique_ptr<WorldChunkSnapshot> snapshot;
 		std::vector<WorldDeferredBlockEdit> deferred_edits;
 	};
@@ -104,18 +117,24 @@ class WorldGenerationPipeline
 		const WorldChunkSnapshot *source_snapshot = nullptr) noexcept;
 	int32_t submit_remesh(uint64_t request_id, uint64_t world_epoch,
 		uint64_t relevance_epoch, uint32_t generation_revision, int32_t chunk_x,
-		int32_t chunk_z, uint64_t voxel_revision,
-		const WorldChunkSnapshot &snapshot) noexcept;
+		int32_t chunk_z, uint64_t voxel_revision, uint64_t light_revision,
+		WorldChunkSnapshot &&snapshot,
+		const voxel_light_update_config *light_update_config = nullptr) noexcept;
 	int32_t poll(std::unique_ptr<Result> &result) noexcept;
 	void retire_result(std::unique_ptr<Result> result) noexcept;
+	int32_t retire_chunk(std::unique_ptr<WorldChunk> chunk) noexcept;
 	int32_t capture_snapshot(const WorldChunk &target, const WorldChunk *west,
 		const WorldChunk *east, const WorldChunk *north,
-		const WorldChunk *south, WorldChunkSnapshot &snapshot) const noexcept;
+		const WorldChunk *south, const WorldChunk *northwest,
+		const WorldChunk *northeast, const WorldChunk *southwest,
+		const WorldChunk *southeast,
+		WorldChunkSnapshot &snapshot) const noexcept;
 	void cancel_queued() noexcept;
 	std::size_t queued_count() const noexcept;
 	std::size_t completed_count() const noexcept;
 	std::size_t active_count() const noexcept;
 	std::size_t remesh_in_flight_count() const noexcept;
+	void release_remesh_slot() noexcept;
 	uint64_t oldest_completed_result_age_nanoseconds() const noexcept;
 	bool is_initialized() const noexcept;
 

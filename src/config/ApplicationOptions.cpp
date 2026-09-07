@@ -6,10 +6,13 @@ ApplicationOptions::ApplicationOptions() : perf_test_mode(false),
 	auto_start(false),
 	worldgen_probe_mode(false),
 	validate_camera_speed_mode(false), validate_collision_mode(false),
-	validate_block_edit_mode(false), validate_visible_distance_mode(false),
+	validate_block_edit_mode(false), validate_camera_interaction_mode(false),
+	validate_visible_distance_mode(false),
 	validate_voxel_determinism_mode(false), validate_world_scale_mode(false),
 	validate_caves_mode(false), validate_voxel_configuration_mode(false),
 	validate_world_revision_mode(false), validate_async_generation_mode(false),
+	validate_network_repair_mode(false),
+	validate_renderer_publication_mode(false),
 	validate_all_mode(false),
 	perf_seconds_limit(10.0)
 {
@@ -21,10 +24,12 @@ ApplicationOptions::ApplicationOptions(const ApplicationOptions &other) : perf_t
 	auto_start(false),
 	worldgen_probe_mode(false),
 	validate_camera_speed_mode(false), validate_collision_mode(false),
-	validate_block_edit_mode(false), validate_visible_distance_mode(false),
+	validate_block_edit_mode(false), validate_camera_interaction_mode(false),
+	validate_visible_distance_mode(false),
 	validate_voxel_determinism_mode(false), validate_world_scale_mode(false),
 	validate_caves_mode(false), validate_voxel_configuration_mode(false),
 	validate_world_revision_mode(false), validate_async_generation_mode(false),
+	validate_network_repair_mode(false),
 	validate_all_mode(false),
 	perf_seconds_limit(10.0)
 {
@@ -50,6 +55,7 @@ ApplicationOptions &ApplicationOptions::operator=(const ApplicationOptions &othe
 		validate_camera_speed_mode = other.validate_camera_speed_mode;
 		validate_collision_mode = other.validate_collision_mode;
 		validate_block_edit_mode = other.validate_block_edit_mode;
+		validate_camera_interaction_mode = other.validate_camera_interaction_mode;
 		validate_visible_distance_mode = other.validate_visible_distance_mode;
 		validate_voxel_determinism_mode = other.validate_voxel_determinism_mode;
 		validate_world_scale_mode = other.validate_world_scale_mode;
@@ -57,6 +63,8 @@ ApplicationOptions &ApplicationOptions::operator=(const ApplicationOptions &othe
 		validate_voxel_configuration_mode = other.validate_voxel_configuration_mode;
 		validate_world_revision_mode = other.validate_world_revision_mode;
 		validate_async_generation_mode = other.validate_async_generation_mode;
+		validate_network_repair_mode = other.validate_network_repair_mode;
+		validate_renderer_publication_mode = other.validate_renderer_publication_mode;
 		validate_all_mode = other.validate_all_mode;
 		perf_seconds_limit = other.perf_seconds_limit;
 	}
@@ -86,6 +94,8 @@ int ApplicationOptions::parse(int argc, char **argv)
 			"--validate-collision");
 	validate_block_edit_mode = CommandLine::has_flag(argc, argv,
 			"--validate-block-edit");
+	validate_camera_interaction_mode = CommandLine::has_flag(argc, argv,
+			"--validate-camera-interaction");
 	validate_visible_distance_mode = CommandLine::has_flag(argc, argv,
 			"--validate-visible-distance");
 	validate_voxel_determinism_mode = CommandLine::has_flag(argc, argv,
@@ -99,6 +109,10 @@ int ApplicationOptions::parse(int argc, char **argv)
 			"--validate-world-revision");
 	validate_async_generation_mode = CommandLine::has_flag(argc, argv,
 			"--validate-async-generation");
+	validate_network_repair_mode = CommandLine::has_flag(argc, argv,
+			"--validate-network-repair");
+	validate_renderer_publication_mode = CommandLine::has_flag(argc, argv,
+			"--validate-renderer-publication");
 	validate_all_mode = CommandLine::has_flag(argc, argv, "--validate-all");
 	result = CommandLine::parse_perf_seconds(argc, argv, &perf_seconds_limit);
 	if (result < 0)

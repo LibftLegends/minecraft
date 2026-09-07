@@ -21,8 +21,9 @@ class WorldGenerationRequestBuilder
 	static int32_t build_remesh(std::unique_ptr<WorldGenerationPipeline::Request> &request,
 		uint64_t request_id, uint64_t cancellation_epoch, uint64_t world_epoch,
 		uint64_t relevance_epoch, uint32_t generation_revision, int32_t chunk_x,
-		int32_t chunk_z, uint64_t voxel_revision,
-		const WorldGenerationPipeline::WorldChunkSnapshot &snapshot) noexcept;
+		int32_t chunk_z, uint64_t voxel_revision, uint64_t light_revision,
+		WorldGenerationPipeline::WorldChunkSnapshot &&snapshot,
+		const voxel_light_update_config &light_update_config) noexcept;
 
   private:
 	static int32_t deferred_writer(int32_t world_x, int32_t world_y,

@@ -193,6 +193,11 @@ int32_t RuntimeAnalytics::end_frame() noexcept
     return (error_code);
 }
 
+ft_bool RuntimeAnalytics::is_enabled() noexcept
+{
+    return (g_initialised);
+}
+
 int32_t RuntimeAnalytics::begin_scope(RuntimeAnalyticsScope scope) noexcept
 {
     uint32_t scope_index;

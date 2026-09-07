@@ -61,28 +61,85 @@ int32_t WorldGenerationResultCommitter::commit_remesh_result(World &world,
 {
 	WorldChunk *chunk;
 	chunk_mesh replacement_mesh;
+	std::unique_ptr<chunk_mesh> retired_mesh;
 	int32_t error_code;
+#if defined(LIBFT_ENABLE_ANALYTICS)
+	const auto commit_start = std::chrono::steady_clock::now();
+	std::chrono::steady_clock::time_point phase_start;
+	uint64_t replacement_move_us;
+	uint64_t retired_move_us;
+	uint64_t destination_initialize_us;
+	uint64_t destination_move_us;
+	uint64_t light_move_us;
+#endif
 
 	chunk = world.find_chunk_mutable(result.chunk_x, result.chunk_z);
 	if (chunk == nullptr || !chunk->initialized
 		|| chunk->pending_mesh_request_id != result.request_id
-		|| chunk->voxel_revision != result.voxel_revision)
+		|| chunk->voxel_revision != result.voxel_revision
+		|| chunk->light_revision != result.light_revision)
+	{
+#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+		if (chunk != nullptr && chunk->initialized
+			&& chunk->light_revision != result.light_revision)
+			std::fprintf(stderr,
+				"[WorldGen] stale light result request=%llu chunk=(%d,%d) "
+				"result_light=%llu current_light=%llu\n",
+				static_cast<unsigned long long>(result.request_id),
+				result.chunk_x, result.chunk_z,
+				static_cast<unsigned long long>(result.light_revision),
+				static_cast<unsigned long long>(chunk->light_revision));
+#endif
+		if (chunk != nullptr && chunk->initialized
+			&& chunk->pending_mesh_request_id == result.request_id)
+		{
+			chunk->pending_mesh_request_id = 0U;
+			chunk->mesh_dirty = true;
+		}
 		return (FT_ERR_SUCCESS);
+	}
 	chunk->pending_mesh_request_id = 0U;
-	if (result.error_code != FT_ERR_SUCCESS || result.mesh == nullptr)
+	if (result.error_code != FT_ERR_SUCCESS || result.mesh == nullptr
+		|| result.light == nullptr)
+	{
+		chunk->mesh_dirty = true;
 		return (FT_ERR_SUCCESS);
+	}
 	error_code = chunk_mesh_initialize(replacement_mesh);
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
+	#if defined(LIBFT_ENABLE_ANALYTICS)
+	phase_start = std::chrono::steady_clock::now();
+	#endif
 	error_code = WorldGenerationResultCommitter::move_mesh(replacement_mesh,
 		*result.mesh);
+	#if defined(LIBFT_ENABLE_ANALYTICS)
+	replacement_move_us = static_cast<uint64_t>(std::chrono::duration_cast<
+		std::chrono::microseconds>(std::chrono::steady_clock::now()
+			- phase_start).count());
+	phase_start = std::chrono::steady_clock::now();
+	#endif
 	if (error_code != FT_ERR_SUCCESS)
 	{
 		if (chunk_mesh_destroy(replacement_mesh) != FT_ERR_SUCCESS)
 			return (FT_ERR_NO_MEMORY);
 		return (error_code);
 	}
-	error_code = chunk_mesh_destroy(chunk->mesh);
+	retired_mesh.reset(new (std::nothrow) chunk_mesh());
+	if (retired_mesh == nullptr)
+	{
+		if (chunk_mesh_destroy(replacement_mesh) != FT_ERR_SUCCESS)
+			return (FT_ERR_NO_MEMORY);
+		return (FT_ERR_NO_MEMORY);
+	}
+	error_code = WorldGenerationResultCommitter::move_mesh(*retired_mesh,
+		chunk->mesh);
+	#if defined(LIBFT_ENABLE_ANALYTICS)
+	retired_move_us = static_cast<uint64_t>(std::chrono::duration_cast<
+		std::chrono::microseconds>(std::chrono::steady_clock::now()
+			- phase_start).count());
+	phase_start = std::chrono::steady_clock::now();
+	#endif
 	if (error_code != FT_ERR_SUCCESS)
 	{
 		if (chunk_mesh_destroy(replacement_mesh) != FT_ERR_SUCCESS)
@@ -90,19 +147,68 @@ int32_t WorldGenerationResultCommitter::commit_remesh_result(World &world,
 		return (error_code);
 	}
 	error_code = chunk_mesh_initialize(chunk->mesh);
+	#if defined(LIBFT_ENABLE_ANALYTICS)
+	destination_initialize_us = static_cast<uint64_t>(
+		std::chrono::duration_cast<std::chrono::microseconds>(
+			std::chrono::steady_clock::now() - phase_start).count());
+	phase_start = std::chrono::steady_clock::now();
+	#endif
 	if (error_code != FT_ERR_SUCCESS)
 	{
+		(void)WorldGenerationResultCommitter::move_mesh(chunk->mesh,
+			*retired_mesh);
 		if (chunk_mesh_destroy(replacement_mesh) != FT_ERR_SUCCESS)
 			return (FT_ERR_NO_MEMORY);
 		return (error_code);
 	}
 	error_code = WorldGenerationResultCommitter::move_mesh(chunk->mesh,
 		replacement_mesh);
+	#if defined(LIBFT_ENABLE_ANALYTICS)
+	destination_move_us = static_cast<uint64_t>(std::chrono::duration_cast<
+		std::chrono::microseconds>(std::chrono::steady_clock::now()
+			- phase_start).count());
+	phase_start = std::chrono::steady_clock::now();
+	#endif
+	if (error_code != FT_ERR_SUCCESS)
+		return (error_code);
+	error_code = chunk->light.move(*result.light);
+	if (error_code != FT_ERR_SUCCESS)
+		return (error_code);
+	result.retired_mesh = std::move(retired_mesh);
+	#if defined(LIBFT_ENABLE_ANALYTICS)
+	light_move_us = static_cast<uint64_t>(std::chrono::duration_cast<
+		std::chrono::microseconds>(std::chrono::steady_clock::now()
+			- phase_start).count());
+	if (replacement_move_us + retired_move_us + destination_initialize_us
+		+ destination_move_us + light_move_us >= 8000U)
+		std::fprintf(stderr,
+			"[Analytics][World] remesh_commit_parts chunk=(%d,%d) "
+			"total_us=%llu replacement_move_us=%llu retired_move_us=%llu "
+			"destination_initialize_us=%llu destination_move_us=%llu "
+			"light_move_us=%llu\n", result.chunk_x, result.chunk_z,
+			static_cast<unsigned long long>(std::chrono::duration_cast<
+				std::chrono::microseconds>(std::chrono::steady_clock::now()
+					- commit_start).count()),
+			static_cast<unsigned long long>(replacement_move_us),
+			static_cast<unsigned long long>(retired_move_us),
+			static_cast<unsigned long long>(destination_initialize_us),
+			static_cast<unsigned long long>(destination_move_us),
+			static_cast<unsigned long long>(light_move_us));
+	#endif
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
 	chunk->mesh_revision += 1U;
 	chunk->mesh_dirty = false;
 	world.mark_geometry_changed();
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	if (chunk->voxel_revision > 1U)
+		std::fprintf(stderr,
+			"[RendererTrace] remesh committed chunk=(%d,%d) voxel=%llu mesh=%llu light=%llu\n",
+			chunk->chunk_x, chunk->chunk_z,
+			static_cast<unsigned long long>(chunk->voxel_revision),
+			static_cast<unsigned long long>(chunk->mesh_revision),
+			static_cast<unsigned long long>(chunk->light_revision));
+	#endif
 	return (FT_ERR_SUCCESS);
 }
 
@@ -120,6 +226,7 @@ void WorldGenerationResultCommitter::populate_chunk_slot(WorldChunk &slot,
 	 * coordinates cannot be mistaken for the old GPU mesh. */
 	slot.mesh_revision = geometry_revision == 0U ? 1U : geometry_revision;
 	slot.voxel_revision = 1U;
+	slot.light_revision = 1U;
 	slot.pending_mesh_request_id = 0U;
 	slot.mesh_dirty = true;
 }
@@ -383,14 +490,15 @@ int32_t WorldGenerationResultCommitter::drain(WorldChunkStreamer &streamer,
 				result_chunk_z, result_deferred_count,
 				static_cast<unsigned long long>(commit_us));
 		last_commit_us = commit_us;
-		if (result_generation_ns + result_mesh_ns >= 8000000U)
+		if (result_generation_ns + result_mesh_ns >= 8000000U
+			&& result_request_id % 32U == 0U)
 			std::fprintf(stderr,
 				"[Analytics][World] slow worker request=%llu chunk=(%d,%d) "
 				"generation_us=%llu mesh_us=%llu\n",
 				static_cast<unsigned long long>(result_request_id),
 				result_chunk_x, result_chunk_z,
-				static_cast<unsigned long long>(result_generation_ns / 1000U),
-				static_cast<unsigned long long>(result_mesh_ns / 1000U));
+				result_generation_ns / 1000U,
+				result_mesh_ns / 1000U);
 #endif
 		if (error_code != FT_ERR_SUCCESS)
 			return (error_code);
@@ -459,8 +567,7 @@ int32_t WorldGenerationResultCommitter::drain(WorldChunkStreamer &streamer,
 			static_cast<unsigned long long>(streamer.stream_frame_),
 			queued_before, queued_after, completed_before, completed_after,
 			processed,
-			static_cast<unsigned long long>(
-				streamer.generation_pipeline_.oldest_completed_result_age_nanoseconds()));
+			streamer.generation_pipeline_.oldest_completed_result_age_nanoseconds());
 #endif
 	return (error_code);
 }

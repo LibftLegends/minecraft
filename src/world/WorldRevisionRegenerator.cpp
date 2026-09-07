@@ -1,4 +1,5 @@
 #include "../../src/world/WorldRevisionRegenerator.hpp"
+#include <cstdio>
 
 WorldRevisionRegenerator::WorldRevisionRegenerator()
 {
@@ -30,7 +31,8 @@ int32_t WorldRevisionRegenerator::capture_chunk_snapshot(WorldRevisionManager &m
 	if (manager.mode_ == World::REGEN_FULL)
 		return (FT_ERR_SUCCESS);
 	error_code = world.chunk_streamer.pipeline().capture_snapshot(chunk,
-			nullptr, nullptr, nullptr, nullptr, snapshot);
+			nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+			nullptr, snapshot);
 	if (error_code != FT_ERR_SUCCESS)
 	{
 		manager.progress_.record_error(error_code);
@@ -163,7 +165,15 @@ int32_t WorldRevisionRegenerator::regenerate_selected_chunks(WorldRevisionManage
 		error_code = WorldGenerationResultCommitter::drain(world.chunk_streamer,
 				world);
 		if (error_code != FT_ERR_SUCCESS)
+		{
+		#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+			std::fprintf(stderr,
+				"[WorldRevision] drain failed error=%d jobs=%zu progress_error=%d\n",
+				error_code, manager.progress_.job_count(),
+				manager.progress_.error());
+		#endif
 			break ;
+		}
 		if (manager.progress_.active())
 			std::this_thread::yield();
 	}

@@ -120,15 +120,6 @@ WorldChunkStreamer::StreamCandidate *WorldChunkCandidateScanner::find_stream_can
 	return (&streamer.stream_candidates_[candidate_index]);
 }
 
-void WorldChunkCandidateScanner::remesh_loaded_neighbor(WorldChunkStreamer &streamer,
-	int32_t chunk_x, int32_t chunk_z) noexcept
-{
-	if (streamer.world_.find_chunk(chunk_x, chunk_z) == nullptr)
-		return ;
-	(void)WorldChunkLoader::remesh_chunk(streamer.world_.chunks,
-		streamer.world_.chunk_count, chunk_x, chunk_z, true);
-}
-
 int32_t WorldChunkCandidateScanner::try_load_chunk_at(WorldChunkStreamer &streamer,
 	int32_t chunk_x, int32_t chunk_z) noexcept
 {
@@ -154,14 +145,7 @@ int32_t WorldChunkCandidateScanner::try_load_chunk_at(WorldChunkStreamer &stream
 	 * renderer observes the old contents. */
 	slot->mesh_revision = streamer.world_.geometry_revision;
 	streamer.world_.register_chunk_index(*slot);
-	WorldChunkCandidateScanner::remesh_loaded_neighbor(streamer, chunk_x - 1,
-		chunk_z);
-	WorldChunkCandidateScanner::remesh_loaded_neighbor(streamer, chunk_x + 1,
-		chunk_z);
-	WorldChunkCandidateScanner::remesh_loaded_neighbor(streamer, chunk_x,
-		chunk_z - 1);
-	WorldChunkCandidateScanner::remesh_loaded_neighbor(streamer, chunk_x,
-		chunk_z + 1);
+	streamer.mark_neighbor_remeshes(chunk_x, chunk_z);
 	return (1);
 }
 

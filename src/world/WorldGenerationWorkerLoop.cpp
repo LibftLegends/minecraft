@@ -27,7 +27,7 @@ bool WorldGenerationWorkerLoop::request_is_cancelled(const WorldGenerationPipeli
 }
 
 std::unique_ptr<WorldGenerationPipeline::Result> WorldGenerationWorkerLoop::process_request(WorldGenerationPipeline &pipeline,
-	std::unique_ptr<WorldGenerationPipeline::Request> request) noexcept
+	std::unique_ptr<WorldGenerationPipeline::Request> &request) noexcept
 {
 	if (request == nullptr)
 		return (nullptr);
@@ -40,6 +40,13 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldGenerationWorkerLoop::proc
 
 void WorldGenerationWorkerLoop::run(WorldGenerationPipeline &pipeline) noexcept
 {
+	uint32_t generations_since_remesh;
+
+	/* Remesh work is bounded and persistent, but initial chunk generation must
+	 * continue while arrival-triggered lighting catches up.  Explicit player
+	 * edits are submitted at the front of the request queue and therefore remain
+	 * responsive; ordinary remeshes share the worker fairly with generation. */
+	generations_since_remesh = 4U;
 	while (true)
 	{
 		std::unique_ptr<WorldGenerationPipeline::Request> request;
@@ -64,8 +71,46 @@ void WorldGenerationWorkerLoop::run(WorldGenerationPipeline &pipeline) noexcept
 			}
 			else
 			{
-				request = std::move(pipeline.requests_.front());
-				pipeline.requests_.pop_front();
+				std::deque<std::unique_ptr<WorldGenerationPipeline::Request>>::iterator
+					selected_request;
+				std::deque<std::unique_ptr<WorldGenerationPipeline::Request>>::iterator
+					first_generation;
+				std::deque<std::unique_ptr<WorldGenerationPipeline::Request>>::iterator
+					first_remesh;
+
+				selected_request = pipeline.requests_.begin();
+				first_generation = pipeline.requests_.end();
+				first_remesh = pipeline.requests_.end();
+				for (std::deque<std::unique_ptr<WorldGenerationPipeline::Request>>::iterator
+					iterator = pipeline.requests_.begin();
+					iterator != pipeline.requests_.end(); ++iterator)
+				{
+					if (*iterator != nullptr
+						&& (*iterator)->operation
+							== WorldGenerationPipeline::WorldGenerationOperation::REMESH
+						&& first_remesh == pipeline.requests_.end())
+						first_remesh = iterator;
+					if (*iterator != nullptr
+						&& (*iterator)->operation
+							!= WorldGenerationPipeline::WorldGenerationOperation::REMESH
+						&& first_generation == pipeline.requests_.end())
+						first_generation = iterator;
+				}
+				if (first_remesh != pipeline.requests_.end()
+					&& (first_generation == pipeline.requests_.end()
+						|| generations_since_remesh >= 4U))
+				{
+					selected_request = first_remesh;
+					generations_since_remesh = 0U;
+				}
+				else if (first_generation != pipeline.requests_.end())
+				{
+					selected_request = first_generation;
+					if (generations_since_remesh < 4U)
+						generations_since_remesh += 1U;
+				}
+				request = std::move(*selected_request);
+				pipeline.requests_.erase(selected_request);
 				pipeline.active_requests_.fetch_add(1U);
 			}
 		}
@@ -74,10 +119,22 @@ void WorldGenerationWorkerLoop::run(WorldGenerationPipeline &pipeline) noexcept
 		if (retired_result != nullptr)
 			continue ;
 		is_remesh = request->operation == WorldGenerationPipeline::WorldGenerationOperation::REMESH;
-		result = WorldGenerationWorkerLoop::process_request(pipeline,
-				std::move(request));
+		result = WorldGenerationWorkerLoop::process_request(pipeline, request);
+		if (result == nullptr && request != nullptr
+			&& request->remesh_in_progress != FT_FALSE
+			&& !pipeline.stopping_.load())
+		{
+			request->remesh_in_progress = FT_FALSE;
+			pipeline.active_requests_.fetch_sub(1U);
+			{
+				std::lock_guard<std::mutex> lock(pipeline.mutex_);
+				pipeline.requests_.push_back(std::move(request));
+			}
+			pipeline.condition_.notify_one();
+			continue ;
+		}
 		if (is_remesh)
-			pipeline.remesh_in_flight_.fetch_sub(1U);
+			pipeline.release_remesh_slot();
 		pipeline.active_requests_.fetch_sub(1U);
 		if (result == nullptr)
 			continue ;

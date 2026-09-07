@@ -22,6 +22,9 @@ class MeshCuller
 	static bool triangle_faces_camera(const Camera &camera,
 		const WorldChunk &world_chunk,
 		const chunk_mesh_vertex triangle_vertices[3]);
+	static bool triangle_faces_camera(const Camera &camera,
+		const WorldChunk &world_chunk,
+		const chunk_mesh_vertex &vertex);
 
   private:
 	static void face_normal(uint8_t face, double &nx, double &ny, double &nz);

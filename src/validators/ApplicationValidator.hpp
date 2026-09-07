@@ -2,6 +2,7 @@
 # define APPLICATION_VALIDATOR_HPP
 
 # include "../../src/validators/BlockEditValidator.hpp"
+# include "../../src/validators/CameraInteractionValidator.hpp"
 # include "../../src/validators/CameraSpeedValidator.hpp"
 # include "../../src/validators/CollisionValidator.hpp"
 # include "../../src/validators/TerrainCaveValidator.hpp"
@@ -11,6 +12,8 @@
 # include "../../src/validators/WorldRevisionValidator.hpp"
 # include "../../src/validators/WorldScaleValidator.hpp"
 # include "../../src/validators/WorldVisibilityValidator.hpp"
+# include "../../src/validators/WorldReplicationValidator.hpp"
+# include "../../src/validators/RendererPublicationValidator.hpp"
 
 class ApplicationValidator
 {
@@ -23,6 +26,7 @@ class ApplicationValidator
 	static int validate_camera_speed();
 	static int validate_collision();
 	static int validate_block_edit();
+	static int validate_camera_interaction();
 	static int validate_visible_distance();
 	static int validate_voxel_determinism();
 	static int validate_world_scale();
@@ -30,6 +34,8 @@ class ApplicationValidator
 	static int validate_voxel_configuration();
 	static int validate_world_revision();
 	static int validate_async_generation();
+	static int validate_network_repair();
+	static int validate_renderer_publication();
 	static int validate_all();
 };
 

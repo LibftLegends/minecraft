@@ -199,6 +199,11 @@ bool GpuChunkMesh::has_geometry() const
 	return (_solid_index_count > 0 || _water_index_count > 0);
 }
 
+bool GpuChunkMesh::has_uploaded_geometry() const
+{
+	return (_has_uploaded_geometry && _solid_vao != 0);
+}
+
 bool GpuChunkMesh::has_solid_geometry() const
 {
 	return (_solid_index_count > 0);
@@ -216,6 +221,22 @@ bool GpuChunkMesh::needs_sync(uint64_t revision, int32_t chunk_x,
 		|| _uploaded_revision != revision
 		|| _uploaded_chunk_x != chunk_x || _uploaded_chunk_z != chunk_z
 		|| _uploaded_voxel_revision != voxel_revision);
+}
+
+bool GpuChunkMesh::identity_matches(uint64_t revision, int32_t chunk_x,
+	int32_t chunk_z, uint64_t voxel_revision) const
+{
+	return (_has_uploaded_geometry && _solid_vao != 0
+		&& _uploaded_revision == revision && _uploaded_chunk_x == chunk_x
+		&& _uploaded_chunk_z == chunk_z
+		&& _uploaded_voxel_revision == voxel_revision);
+}
+
+bool GpuChunkMesh::uploaded_coordinates_match(int32_t chunk_x,
+	int32_t chunk_z) const
+{
+	return (_has_uploaded_geometry && _solid_vao != 0
+		&& _uploaded_chunk_x == chunk_x && _uploaded_chunk_z == chunk_z);
 }
 
 size_t GpuChunkMesh::gpu_bytes() const

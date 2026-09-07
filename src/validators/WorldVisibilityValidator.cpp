@@ -2,6 +2,7 @@
 #include <cmath>
 #include <chrono>
 #include <cstdio>
+#include <thread>
 
 static void visibility_validation_phase(const char *phase,
 	const std::chrono::steady_clock::time_point &started) noexcept
@@ -11,6 +12,64 @@ static void visibility_validation_phase(const char *phase,
 			std::chrono::steady_clock::now() - started).count());
 	std::fprintf(stderr, "visible-distance: phase=%s elapsed_ms=%llu\n",
 		phase, static_cast<unsigned long long>(elapsed_ms));
+}
+
+static bool wait_for_required_visible_distance(World &world,
+	const Camera &camera) noexcept
+{
+	const std::chrono::steady_clock::time_point deadline =
+		std::chrono::steady_clock::now() + std::chrono::seconds(30);
+	int32_t error_code;
+
+	while (std::chrono::steady_clock::now() < deadline)
+	{
+		error_code = world.update_around(camera.x, camera.z, 0,
+			WorldCoordinates::REQUIRED_VISIBLE_DISTANCE);
+		if (error_code != FT_ERR_SUCCESS)
+			return (false);
+		if (WorldVisibilityValidator::validate_visible_distance(world,
+				camera.x, camera.z, camera.yaw,
+				WorldCoordinates::REQUIRED_VISIBLE_DISTANCE))
+			return (true);
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	World::StreamDiagnostics diagnostics = world.stream_diagnostics();
+	std::fprintf(stderr,
+		"visible-distance: async stream timeout loaded=%d pending=%zu "
+		"ready=%zu active=%zu failed=%zu\n", world.loaded_chunk_count,
+		diagnostics.pending_count, diagnostics.ready_count,
+		diagnostics.active_generation_count, diagnostics.failed_count);
+	return (false);
+}
+
+static bool wait_for_chunk_state(World &world, double camera_x,
+	double camera_z, int32_t chunk_x, int32_t chunk_z, bool expected_present)
+	noexcept
+{
+	const std::chrono::steady_clock::time_point deadline =
+		std::chrono::steady_clock::now() + std::chrono::seconds(30);
+	int32_t error_code;
+
+	while (std::chrono::steady_clock::now() < deadline)
+	{
+		error_code = world.update_around(camera_x, camera_z, 0,
+			WorldCoordinates::REQUIRED_VISIBLE_DISTANCE);
+		if (error_code != FT_ERR_SUCCESS)
+			return (false);
+		if ((world.find_chunk(chunk_x, chunk_z) != nullptr)
+			== expected_present)
+			return (true);
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	World::StreamDiagnostics diagnostics = world.stream_diagnostics();
+	std::fprintf(stderr,
+		"slot-reuse: async state timeout chunk=(%d,%d) expected=%s "
+		"loaded=%d pending=%zu ready=%zu active=%zu failed=%zu\n", chunk_x,
+		chunk_z, expected_present ? "present" : "absent",
+		world.loaded_chunk_count, diagnostics.pending_count,
+		diagnostics.ready_count, diagnostics.active_generation_count,
+		diagnostics.failed_count);
+	return (false);
 }
 
 WorldVisibilityValidator::WorldVisibilityValidator()
@@ -49,14 +108,12 @@ int WorldVisibilityValidator::validate() const
 	validation_camera.initialize();
 	PlayerController::spawn_player_on_ground(&validation_camera, world);
 	visibility_validation_phase("full-stream-start", validation_started);
-	error_code = world.update_around(validation_camera.x, validation_camera.z,
-		WorldCoordinates::CHUNK_COUNT);
-	visibility_validation_phase("full-stream-complete", validation_started);
-	if (error_code != FT_ERR_SUCCESS)
+	if (!wait_for_required_visible_distance(world, validation_camera))
 	{
 		world.destroy();
 		return (1);
 	}
+	visibility_validation_phase("async-stream-complete", validation_started);
 	if (validate_visible_distance(world, validation_camera.x,
 			validation_camera.z, validation_camera.yaw,
 			WorldCoordinates::REQUIRED_VISIBLE_DISTANCE) == false)
@@ -95,12 +152,15 @@ int WorldVisibilityValidator::validate() const
 		return (1);
 	}
 	visibility_validation_phase("slot-reuse-complete", validation_started);
-	/* Move the stream center by one chunk and rebuild it synchronously. This
+	/* Move the stream center by one chunk and rebuild it through the bounded
+	 * asynchronous path. This
 	 * exercises storage-slot reuse and verifies that newly assigned chunks keep
 	 * their coordinates, mesh bounds, and solid/water index partitions. */
-	error_code = world.update_around(validation_camera.x
-		+ static_cast<double>(GAME_VOXEL_CHUNK_WIDTH), validation_camera.z,
-		WorldCoordinates::CHUNK_COUNT);
+	validation_camera.x += static_cast<double>(GAME_VOXEL_CHUNK_WIDTH);
+	if (wait_for_required_visible_distance(world, validation_camera))
+		error_code = FT_ERR_SUCCESS;
+	else
+		error_code = FT_ERR_TIMEOUT;
 	visibility_validation_phase("recenter-complete", validation_started);
 	if (error_code != FT_ERR_SUCCESS
 		|| validate_height_invariant(world) == false
@@ -298,7 +358,6 @@ bool WorldVisibilityValidator::validate_same_coordinate_slot_reuse(
 	const WorldChunk *after;
 	const uint64_t before_revision = world.find_chunk(0, 0) != nullptr
 		? world.find_chunk(0, 0)->mesh_revision : 0U;
-	int32_t error_code;
 
 	before = world.find_chunk(0, 0);
 	if (before == nullptr || before_revision == 0U)
@@ -307,25 +366,28 @@ bool WorldVisibilityValidator::validate_same_coordinate_slot_reuse(
 			"slot-reuse: initial origin chunk is unavailable\n");
 		return (false);
 	}
-	error_code = world.update_around(
-		camera.x + static_cast<double>(GAME_VOXEL_CHUNK_WIDTH * 13),
-		camera.z, WorldCoordinates::CHUNK_COUNT);
-	if (error_code != FT_ERR_SUCCESS || world.find_chunk(0, 0) != nullptr)
+	if (!wait_for_chunk_state(world,
+			camera.x + static_cast<double>(GAME_VOXEL_CHUNK_WIDTH * 13),
+			camera.z, 0, 0, false))
 	{
 		std::fprintf(stderr,
-			"slot-reuse: origin chunk was not evicted error=%d\n", error_code);
+			"slot-reuse: origin chunk was not evicted\n");
 		return (false);
 	}
-	error_code = world.update_around(camera.x, camera.z,
-		WorldCoordinates::CHUNK_COUNT);
+	if (!wait_for_chunk_state(world, camera.x, camera.z, 0, 0, true))
+	{
+		std::fprintf(stderr,
+			"slot-reuse: origin chunk was not regenerated\n");
+		return (false);
+	}
 	after = world.find_chunk(0, 0);
-	if (error_code != FT_ERR_SUCCESS || after == nullptr
+	if (after == nullptr
 		|| after->mesh_revision == before_revision
 		|| after->mesh.has_occupied_bounds == FT_FALSE)
 	{
 		std::fprintf(stderr,
-			"slot-reuse: regenerated origin identity invalid error=%d "
-			"before=%llu after=%llu present=%d occupied=%d\n", error_code,
+			"slot-reuse: regenerated origin identity invalid "
+			"before=%llu after=%llu present=%d occupied=%d\n",
 			static_cast<unsigned long long>(before_revision),
 			after == nullptr ? 0ULL
 				: static_cast<unsigned long long>(after->mesh_revision),

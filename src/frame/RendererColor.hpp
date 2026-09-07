@@ -18,6 +18,7 @@ class RendererColor
 	static uint32_t block_color(uint32_t block_id, uint8_t face);
 	static uint32_t shade_color(uint32_t color, double shade);
 	static double face_shade(uint8_t face);
+	static double light_shade(uint8_t packed_light);
 
   private:
 	struct					BlockColor

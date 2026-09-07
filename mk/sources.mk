@@ -33,12 +33,15 @@ SRC = \
     src/validators/CollisionValidator.cpp \
     src/validators/CollisionTerrainScenarios.cpp \
     src/validators/BlockEditValidator.cpp \
+	src/validators/CameraInteractionValidator.cpp \
+    src/validators/RendererPublicationValidator.cpp \
     src/validators/WorldVisibilityValidator.cpp \
     src/validators/TerrainDeterminismValidator.cpp \
     src/validators/TerrainCaveValidator.cpp \
     src/validators/TerrainConfigValidator.cpp \
     src/validators/WorldRevisionValidator.cpp \
     src/validators/WorldAsyncGenerationValidator.cpp \
+    src/validators/WorldReplicationValidator.cpp \
     src/validators/WorldScaleValidator.cpp \
     src/policy/RenderDistanceStrategy.cpp \
     src/policy/AdaptiveRenderStrategy.cpp \
@@ -105,8 +108,31 @@ SRC = \
     src/network/ProtocolJoinMessage.cpp \
     src/network/ProtocolLeaveMessage.cpp \
     src/network/ProtocolChunkRequestMessage.cpp \
+    src/network/ProtocolChunkSyncRequestMessage.cpp \
     src/network/ProtocolChunkResponseMessage.cpp \
+    src/network/ProtocolChunkBlockDeltaMessage.cpp \
+    src/network/ProtocolChunkAcknowledgementMessage.cpp \
+    src/network/ProtocolChunkInterestMessage.cpp \
+    src/network/ProtocolChunkHashManifestMessage.cpp \
+    src/network/ProtocolChunkRepairRequestMessage.cpp \
+    src/network/ProtocolChunkRepairResponseMessage.cpp \
+    src/network/ProtocolChunkLightDeltaMessage.cpp \
+    src/network/ProtocolChunkSnapshotMessage.cpp \
     src/network/ProtocolEditBroadcastMessage.cpp \
+    src/network/ProtocolEditIntentMessage.cpp \
+    src/network/ProtocolEditResultMessage.cpp \
+    src/network/WorldReplicationService.cpp \
+    src/network/WorldReplicationClient.cpp \
+    src/network/WorldReplicationBlockReplica.cpp \
+    src/network/WorldReplicationReplicaStore.cpp \
+    src/network/WorldReplicationServerSession.cpp \
+    src/network/WorldReplicationServer.cpp \
+    src/network/WorldReplicationDeltaJournal.cpp \
+    src/network/WorldReplicationLightJournal.cpp \
+    src/network/WorldReplicationTransportPump.cpp \
+    src/network/WorldReplicationServerRuntime.cpp \
+    src/network/WorldReplicationClientRuntime.cpp \
+    src/network/WorldReplicationCursorStore.cpp \
     src/network/ProtocolEntityUpdateMessage.cpp \
     src/network/ProtocolChatMessage.cpp \
     src/network/ProtocolPingMessage.cpp \

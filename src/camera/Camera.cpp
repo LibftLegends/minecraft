@@ -48,6 +48,11 @@ double Camera::clamp(double value, double minimum, double maximum)
 	return (value);
 }
 
+double Camera::max_pitch()
+{
+	return (Camera::PITCH_LIMIT);
+}
+
 void Camera::initialize()
 {
 	this->x = 0.0;

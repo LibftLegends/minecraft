@@ -19,7 +19,7 @@ class PerspectiveTriangleRasterizer : public TriangleRasterizer
 
 	void draw_triangle(ft_render_framebuffer &framebuffer,
 		std::vector<double> &depth_buffer, const ScreenVertex vertices[3],
-		uint32_t block_id, uint8_t face) const override;
+		uint32_t block_id, uint8_t face, uint8_t packed_light) const override;
 
   private:
 	struct		Interpolants

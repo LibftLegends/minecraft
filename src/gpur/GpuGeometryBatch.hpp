@@ -32,6 +32,8 @@ class GpuGeometryBatch
 	void flush_water(GLuint world_shader_prog, GLint u_mvp,
 		GLint u_chunk_offset, const float mvp[16], GpuTextureAtlas &atlas);
 	size_t gpu_bytes() const;
+	bool uploaded_identity_matches(int32_t slot, uint64_t revision,
+		int32_t chunk_x, int32_t chunk_z, uint64_t voxel_revision) const;
 
 	private:
 	void sync_pending_visible_meshes(const Camera &camera, const World &world,

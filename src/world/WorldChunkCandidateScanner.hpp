@@ -25,8 +25,6 @@ class WorldChunkCandidateScanner
   private:
 	static bool candidate_less(const WorldChunkStreamer::StreamCandidate &a,
 		const WorldChunkStreamer::StreamCandidate &b) noexcept;
-	static void remesh_loaded_neighbor(WorldChunkStreamer &streamer,
-		int32_t chunk_x, int32_t chunk_z) noexcept;
 	static bool process_sync_candidate(WorldChunkStreamer &streamer,
 		WorldChunkStreamer::StreamCandidate &candidate, int32_t budget,
 		int32_t *generated) noexcept;

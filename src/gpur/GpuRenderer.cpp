@@ -121,3 +121,10 @@ uint32_t GpuRenderer::gpu_mb_approx() const
 {
 	return (static_cast<uint32_t>(_world.gpu_bytes() / (1024UL * 1024UL)));
 }
+
+bool GpuRenderer::uploaded_identity_matches(int32_t slot, uint64_t revision,
+	int32_t chunk_x, int32_t chunk_z, uint64_t voxel_revision) const
+{
+	return (_ready && _world.uploaded_identity_matches(slot, revision,
+		chunk_x, chunk_z, voxel_revision));
+}

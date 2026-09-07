@@ -39,7 +39,13 @@ void MeshCuller::face_normal(uint8_t face, double &nx, double &ny, double &nz)
 bool MeshCuller::triangle_faces_camera(const Camera &camera,
 	const WorldChunk &world_chunk, const chunk_mesh_vertex triangle_vertices[3])
 {
-	const chunk_mesh_vertex &vertex = triangle_vertices[0];
+	return (MeshCuller::triangle_faces_camera(camera, world_chunk,
+		triangle_vertices[0]));
+}
+
+bool MeshCuller::triangle_faces_camera(const Camera &camera,
+	const WorldChunk &world_chunk, const chunk_mesh_vertex &vertex)
+{
 	if (vertex.face == CHUNK_MESH_FACE_WEST)
 		return (camera.x < static_cast<double>(world_chunk.world_x
 				+ vertex.coordinate_x));
