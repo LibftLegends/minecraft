@@ -1,5 +1,6 @@
 #include "../../src/world/WorldGenerationResultCommitter.hpp"
 #include "../../src/diagnostics/RuntimeAnalytics.hpp"
+#include "../../Libft/Modules/Basic/limits.hpp"
 #include <cstdio>
 #if defined(LIBFT_ENABLE_ANALYTICS)
 # include <chrono>
@@ -91,12 +92,13 @@ int32_t WorldGenerationResultCommitter::commit_remesh_result(World &world,
 		if (chunk != nullptr && chunk->initialized
 			&& chunk->light_revision != result.light_revision)
 			std::fprintf(stderr,
-				"[WorldGen] stale light result request=%llu chunk=(%d,%d) "
-				"result_light=%llu current_light=%llu\n",
-				static_cast<unsigned long long>(result.request_id),
+				"[WorldGen] stale light result request="
+				FT_UINT64_DECIMAL_FORMAT " chunk=(%d,%d) result_light="
+				FT_UINT64_DECIMAL_FORMAT " current_light="
+				FT_UINT64_DECIMAL_FORMAT "\n",
+				result.request_id,
 				result.chunk_x, result.chunk_z,
-				static_cast<unsigned long long>(result.light_revision),
-				static_cast<unsigned long long>(chunk->light_revision));
+				result.light_revision, chunk->light_revision);
 #endif
 		if (chunk != nullptr && chunk->initialized
 			&& chunk->pending_mesh_request_id == result.request_id)
@@ -191,17 +193,17 @@ int32_t WorldGenerationResultCommitter::commit_remesh_result(World &world,
 		+ destination_move_us + light_move_us >= 8000U)
 		std::fprintf(stderr,
 			"[Analytics][World] remesh_commit_parts chunk=(%d,%d) "
-			"total_us=%llu replacement_move_us=%llu retired_move_us=%llu "
-			"destination_initialize_us=%llu destination_move_us=%llu "
-			"light_move_us=%llu\n", result.chunk_x, result.chunk_z,
-			static_cast<unsigned long long>(std::chrono::duration_cast<
+			"total_us=" FT_UINT64_DECIMAL_FORMAT " replacement_move_us="
+			FT_UINT64_DECIMAL_FORMAT " retired_move_us="
+			FT_UINT64_DECIMAL_FORMAT " destination_initialize_us="
+			FT_UINT64_DECIMAL_FORMAT " destination_move_us="
+			FT_UINT64_DECIMAL_FORMAT " light_move_us="
+			FT_UINT64_DECIMAL_FORMAT "\n", result.chunk_x, result.chunk_z,
+			static_cast<uint64_t>(std::chrono::duration_cast<
 				std::chrono::microseconds>(std::chrono::steady_clock::now()
 					- commit_start).count()),
-			static_cast<unsigned long long>(replacement_move_us),
-			static_cast<unsigned long long>(retired_move_us),
-			static_cast<unsigned long long>(destination_initialize_us),
-			static_cast<unsigned long long>(destination_move_us),
-			static_cast<unsigned long long>(light_move_us));
+			replacement_move_us, retired_move_us, destination_initialize_us,
+			destination_move_us, light_move_us);
 	#endif
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
@@ -211,11 +213,11 @@ int32_t WorldGenerationResultCommitter::commit_remesh_result(World &world,
 	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
 	if (chunk->voxel_revision > 1U)
 		std::fprintf(stderr,
-			"[RendererTrace] remesh committed chunk=(%d,%d) voxel=%llu mesh=%llu light=%llu\n",
+			"[RendererTrace] remesh committed chunk=(%d,%d) voxel="
+			FT_UINT64_DECIMAL_FORMAT " mesh=" FT_UINT64_DECIMAL_FORMAT
+			" light=" FT_UINT64_DECIMAL_FORMAT "\n",
 			chunk->chunk_x, chunk->chunk_z,
-			static_cast<unsigned long long>(chunk->voxel_revision),
-			static_cast<unsigned long long>(chunk->mesh_revision),
-			static_cast<unsigned long long>(chunk->light_revision));
+			chunk->voxel_revision, chunk->mesh_revision, chunk->light_revision);
 	#endif
 	return (FT_ERR_SUCCESS);
 }
@@ -332,13 +334,12 @@ int32_t WorldGenerationResultCommitter::create_chunk_from_stream_result(WorldChu
 			- phase_start).count());
 	if (transfer_us + index_us + deferred_us + neighbor_us >= 8000U)
 		std::fprintf(stderr,
-			"[Analytics][World] commit_parts chunk=(%d,%d) transfer_us=%llu "
-			"index_us=%llu deferred_us=%llu neighbor_us=%llu\n",
+			"[Analytics][World] commit_parts chunk=(%d,%d) transfer_us="
+			FT_UINT64_DECIMAL_FORMAT " index_us=" FT_UINT64_DECIMAL_FORMAT
+			" deferred_us=" FT_UINT64_DECIMAL_FORMAT " neighbor_us="
+			FT_UINT64_DECIMAL_FORMAT "\n",
 			result.chunk_x, result.chunk_z,
-			static_cast<unsigned long long>(transfer_us),
-			static_cast<unsigned long long>(index_us),
-			static_cast<unsigned long long>(deferred_us),
-			static_cast<unsigned long long>(neighbor_us));
+			transfer_us, index_us, deferred_us, neighbor_us);
 	#endif
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
@@ -360,16 +361,17 @@ int32_t WorldGenerationResultCommitter::commit_stream_result(WorldChunkStreamer 
 		streamer.stale_stream_result_count_ += 1U;
 #if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
 		std::fprintf(stderr,
-			"[WorldGen] stale result request=%llu chunk=(%d,%d) "
-			"candidate=%s candidate_request=%llu result_epoch=%llu "
-			"candidate_epoch=%llu result_revision=%u candidate_revision=%u\n",
-			static_cast<unsigned long long>(result.request_id), result.chunk_x,
+			"[WorldGen] stale result request=" FT_UINT64_DECIMAL_FORMAT
+			" chunk=(%d,%d) candidate=%s candidate_request="
+			FT_UINT64_DECIMAL_FORMAT " result_epoch="
+			FT_UINT64_DECIMAL_FORMAT " candidate_epoch="
+			FT_UINT64_DECIMAL_FORMAT
+			" result_revision=%u candidate_revision=%u\n",
+			result.request_id, result.chunk_x,
 			result.chunk_z, candidate == nullptr ? "missing" : "mismatch",
-			candidate == nullptr ? 0ULL
-				: static_cast<unsigned long long>(candidate->request_id),
-			static_cast<unsigned long long>(result.relevance_epoch),
-			candidate == nullptr ? 0ULL
-				: static_cast<unsigned long long>(candidate->relevance_epoch),
+			candidate == nullptr ? UINT64_C(0) : candidate->request_id,
+			result.relevance_epoch,
+			candidate == nullptr ? UINT64_C(0) : candidate->relevance_epoch,
 			result.generation_revision,
 			candidate == nullptr ? 0U : candidate->generation_revision);
 #endif
@@ -493,19 +495,23 @@ int32_t WorldGenerationResultCommitter::drain(WorldChunkStreamer &streamer,
 				std::chrono::steady_clock::now() - commit_start).count());
 		if (commit_us >= 8000U)
 			std::fprintf(stderr,
-				"[Analytics][World] slow commit request=%llu operation=%u "
-				"chunk=(%d,%d) deferred_edits=%zu duration_us=%llu\n",
-				static_cast<unsigned long long>(result_request_id),
+				"[Analytics][World] slow commit request="
+				FT_UINT64_DECIMAL_FORMAT " operation=%u chunk=(%d,%d) "
+				"deferred_edits=%zu duration_us="
+				FT_UINT64_DECIMAL_FORMAT "\n",
+				result_request_id,
 				static_cast<unsigned int>(result_operation), result_chunk_x,
 				result_chunk_z, result_deferred_count,
-				static_cast<unsigned long long>(commit_us));
+				commit_us);
 		last_commit_us = commit_us;
 		if (result_generation_ns + result_mesh_ns >= 8000000U
 			&& result_request_id % 32U == 0U)
 			std::fprintf(stderr,
-				"[Analytics][World] slow worker request=%llu chunk=(%d,%d) "
-				"generation_us=%llu mesh_us=%llu\n",
-				static_cast<unsigned long long>(result_request_id),
+				"[Analytics][World] slow worker request="
+				FT_UINT64_DECIMAL_FORMAT " chunk=(%d,%d) generation_us="
+				FT_UINT64_DECIMAL_FORMAT " mesh_us="
+				FT_UINT64_DECIMAL_FORMAT "\n",
+				result_request_id,
 				result_chunk_x, result_chunk_z,
 				result_generation_ns / 1000U,
 				result_mesh_ns / 1000U);
@@ -548,22 +554,21 @@ int32_t WorldGenerationResultCommitter::drain(WorldChunkStreamer &streamer,
 	if (deferred_us >= 8000U)
 		std::fprintf(stderr,
 			"[Analytics][World] slow deferred edits before=%zu after=%zu "
-			"duration_us=%llu\n", deferred_before,
-			streamer.deferred_edits_.size(),
-			static_cast<unsigned long long>(deferred_us));
+			"duration_us=" FT_UINT64_DECIMAL_FORMAT "\n", deferred_before,
+			streamer.deferred_edits_.size(), deferred_us);
 	const uint64_t drain_us = static_cast<uint64_t>(
 		std::chrono::duration_cast<std::chrono::microseconds>(
 			std::chrono::steady_clock::now().time_since_epoch()).count())
 		- drain_start_us;
 	if (drain_us >= 8000U)
 		std::fprintf(stderr,
-			"[Analytics][World] drain_parts total_us=%llu poll_us=%llu "
-			"commit_us=%llu cleanup_us=%llu deferred_us=%llu processed=%d\n",
-			static_cast<unsigned long long>(drain_us),
-			static_cast<unsigned long long>(last_poll_us),
-			static_cast<unsigned long long>(last_commit_us),
-			static_cast<unsigned long long>(last_cleanup_us),
-			static_cast<unsigned long long>(deferred_us), processed);
+			"[Analytics][World] drain_parts total_us="
+			FT_UINT64_DECIMAL_FORMAT " poll_us=" FT_UINT64_DECIMAL_FORMAT
+			" commit_us=" FT_UINT64_DECIMAL_FORMAT " cleanup_us="
+			FT_UINT64_DECIMAL_FORMAT " deferred_us="
+			FT_UINT64_DECIMAL_FORMAT " processed=%d\n", drain_us,
+			last_poll_us, last_commit_us, last_cleanup_us, deferred_us,
+			processed);
 #endif
 #if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
 	queued_after = streamer.generation_pipeline_.queued_count();
@@ -572,9 +577,10 @@ int32_t WorldGenerationResultCommitter::drain(WorldChunkStreamer &streamer,
 		&& (queued_before != 0U || completed_before != 0U
 			|| queued_after != 0U || completed_after != 0U))
 		std::fprintf(stderr,
-			"[WorldGen] commit frame=%llu queued=%zu->%zu "
-			"completed=%zu->%zu processed=%d oldest_result_ns=%llu\n",
-			static_cast<unsigned long long>(streamer.stream_frame_),
+			"[WorldGen] commit frame=" FT_UINT64_DECIMAL_FORMAT
+			" queued=%zu->%zu completed=%zu->%zu processed=%d "
+			"oldest_result_ns=" FT_UINT64_DECIMAL_FORMAT "\n",
+			streamer.stream_frame_,
 			queued_before, queued_after, completed_before, completed_after,
 			processed,
 			streamer.generation_pipeline_.oldest_completed_result_age_nanoseconds());
