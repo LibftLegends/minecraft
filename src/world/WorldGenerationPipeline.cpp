@@ -2,6 +2,13 @@
 #include <chrono>
 #include <cstdio>
 
+namespace
+{
+	/* Arrival remeshes share the request queue with generation. Reserve room
+	 * so a burst of neighbour relights cannot starve the playable ring. */
+	static const std::size_t GENERATION_QUEUE_RESERVATION = 4U;
+}
+
 WorldGenerationPipeline::WorldGenerationPipeline() noexcept : requests_(),
 	results_(), retired_results_(), mutex_(), results_mutex_(), condition_(), pipeline_epoch_(1U),
 	remesh_in_flight_(0U), active_requests_(0U), stopping_(false), workers_(), maximum_queued_(0U),
@@ -221,9 +228,13 @@ int32_t WorldGenerationPipeline::submit_remesh(uint64_t request_id,
 		}
 		if (this->remesh_in_flight_.load() >= 2U)
 			return (FT_ERR_FULL);
-		/* Keep capacity available for the bounded remesh window. Interactive
-		 * edits must not wait behind the initial generation burst. */
-		if (this->requests_.size() >= this->maximum_queued_ + 1U)
+		/* Keep capacity available for generation candidates. Interactive edits
+		 * remain asynchronous, but arrival remeshes must not consume the whole
+		 * shared queue. */
+		const std::size_t remesh_queue_limit =
+			this->maximum_queued_ > GENERATION_QUEUE_RESERVATION
+			? this->maximum_queued_ - GENERATION_QUEUE_RESERVATION : 1U;
+		if (this->requests_.size() >= remesh_queue_limit)
 			return (FT_ERR_FULL);
 		this->remesh_in_flight_.fetch_add(1U);
 		this->requests_.push_front(std::move(request));

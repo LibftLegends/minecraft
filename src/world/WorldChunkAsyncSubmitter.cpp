@@ -3,6 +3,23 @@
 
 namespace
 {
+	static bool playable_ring_is_ready(
+		const WorldChunkStreamer &streamer) noexcept
+	{
+		const int32_t radius = WorldCoordinates::render_distance_to_chunk_radius(
+			WorldCoordinates::MIN_RENDER_DISTANCE);
+		const int32_t radius_squared = radius * radius;
+
+		for (const WorldChunkStreamer::StreamCandidate &candidate
+			: streamer.stream_candidates_)
+		{
+			if (candidate.dist_sq <= radius_squared
+				&& candidate.state != WorldChunkStreamer::CANDIDATE_READY)
+				return (false);
+		}
+		return (true);
+	}
+
 	static bool remesh_candidate_is_better(const WorldChunk &candidate,
 		const WorldChunk *best, int32_t center_chunk_x,
 		int32_t center_chunk_z) noexcept
@@ -142,6 +159,11 @@ int32_t WorldChunkAsyncSubmitter::submit_dirty_remeshes(
 		queue_budget = 1;
 
 	if (streamer.world_.chunk_count <= 0)
+		return (FT_ERR_SUCCESS);
+	/* Initial generation owns the shared workers until every required
+	 * playable candidate is published. Initial meshes already contain local
+	 * light; border relights can safely follow once the ring exists. */
+	if (playable_ring_is_ready(streamer) == false)
 		return (FT_ERR_SUCCESS);
 	if (streamer.stream_frame_ < streamer.next_remesh_submission_frame_)
 		return (FT_ERR_SUCCESS);
