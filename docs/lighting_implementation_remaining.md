@@ -265,6 +265,56 @@ aggregate suite.
     graphics-context runtime test. Do not claim performance success without
     before/after measurements from repeated block-breaking workloads.
 
+### Blob-shadow integration audit: 2026-09-08
+
+The current branch was audited directly rather than inferred from the design
+claims above. The result is intentionally split by ownership and renderer:
+
+| Area | Current implementation | Design status |
+| --- | --- | --- |
+| Libft receiver query | `Modules/Voxel/voxel_shadow.hpp/.cpp` exposes `voxel_shadow_find_receiver(...)` with a caller-owned solid-block callback and a bounded downward search. | Implemented as the reusable primitive. |
+| Libft height fade | `voxel_shadow_height_fade(...)` clamps the entity-to-receiver fade to `0..1` and handles non-positive maximum height. | Implemented as the reusable primitive. |
+| Minecraft GPU player | `src/gpur/GpuWorldRenderer.cpp:231` submits one four-vertex quad (`GL_TRIANGLE_FAN`, two triangles) after solid geometry. It uses `World::solid_block_at`, an eight-block receiver search, a fixed radius of `0.38`, radial alpha in `shadow.frag.glsl`, and height fade. | Partial: player-only GPU coverage exists. |
+| Minecraft GPU mobs/entities | No entity render list or per-entity GPU submission exists. `EntityState` is only a serialized/network state contract; it is not consumed by `GpuWorldRenderer` or an entity renderer. | Missing. Adding it here would require inventing entity ownership/submission architecture, so it is not implemented in this audit. |
+| Minecraft software player | `VoxelRenderer::render_world_software(...)` submits only visible chunk meshes, post-processing, debug overlay, and crosshair. There is no blob-shadow geometry, receiver query, or shadow raster submission. | Missing. The current software path has no safe entity/shadow submission seam. |
+| Minecraft software mobs/entities | No software entity renderer or entity collection is present. | Missing and blocked on the same architecture gap. |
+| Receiver caching and eligibility | The GPU player path performs a fresh world lookup every frame, has no receiver/revision cache, and has no entity distance/population budget. The fixed player path is bounded and cheap, but does not satisfy the optional cache or entity-budget requirements. | Partial/optional work remains. |
+
+The only production-safe missing piece that can be completed without touching
+world generation or scheduling is focused contract coverage for the existing
+Libft helpers. `Libft/Test/Test/test_voxel_shadow.cpp` now verifies nearest
+receiver selection, maximum-distance behavior, invalid callback/output
+arguments, and bounded height fading. It does not claim renderer integration.
+
+#### Exact integration blockers
+
+1. There is no authoritative Minecraft entity collection passed into either
+   renderer. `src/entities/EntityState.hpp` contains position/type data for
+   serialization, but no active entity storage, visibility selection, model
+   geometry, or render submission API.
+2. The GPU path has a player-specific method rather than a generic shadow
+   submission interface. Reusing it for mobs would require defining entity
+   lifetime, footprint/radius, active/near-camera filtering, and a stable
+   per-frame submission contract first.
+3. The software renderer has no entity draw path and no established way to
+   project a receiver quad through its depth-tested rasterizer. Adding a
+   second ad-hoc path would violate the design's ownership and consistency
+   requirements.
+4. There is no headless graphics validator that can prove a GPU blob is
+   actually visible, correctly depth-tested, or faded. The new Libft tests
+   validate only the renderer-independent mathematical contract.
+
+#### Safe next implementation boundary
+
+The next implementation must first introduce or identify the existing
+Minecraft-owned active-entity/render-submission contract, then add one shared
+shadow submission list consumed by both backends. That work should define
+entity culling, footprint/radius, receiver-revision caching, and the fixed
+two-triangle budget before wiring mobs. It must remain separate from the
+lighting scheduler and world-generation files. Until that contract exists,
+the current player-only GPU shadow is the maximum defensible integration and
+the software/entity requirements remain open.
+
 ## Known issues and cautions
 
 - The last Valgrind report showed an invalid worker-thread read at address
