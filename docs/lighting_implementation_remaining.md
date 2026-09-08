@@ -116,6 +116,26 @@ Branches:
 
 ## Still required before calling the design complete
 
+### Verification update: 2026-09-08
+
+The current `agent/analytics-performance` checkout was rebuilt after the
+Libft submodule moved to `a9c66bdb` (`document voxel shadow APIs`). Both
+variants passed the graphics-context publication check:
+
+- `ft_vox.exe --validate-renderer-publication`
+- `ft_vox_analytics.exe --validate-renderer-publication --analytics-no-exporter`
+
+The normal `make validate-all` aggregate also passed with zero failures. Its
+async workload grew from two initial chunks to fourteen loaded chunks, reached
+the first visible mesh at frame 12, and completed the repeated edit workload.
+The analytics world-generation probe independently reached a playable area and
+expanded the stream before exiting successfully.
+
+The Voxel README now documents the public `voxel_shadow.hpp` receiver and
+height-fade APIs. The Voxel make graph and full Libft manifest already include
+`voxel_shadow.cpp` and `voxel_shadow.hpp`; no dependency-graph change was
+needed.
+
 ### Latest continuation result: edit-to-render publication
 
 The direct player placement/deletion path was found to bypass the shared
