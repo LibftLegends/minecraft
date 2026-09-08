@@ -216,6 +216,18 @@ const voxel_light_update_config &World::light_update_config() const noexcept
 	return (this->chunk_streamer.light_update_config());
 }
 
+int32_t World::set_interactive_light_update_config(
+	const voxel_light_update_config &config) noexcept
+{
+	return (this->chunk_streamer.set_interactive_light_update_config(config));
+}
+
+const voxel_light_update_config &World::interactive_light_update_config()
+	const noexcept
+{
+	return (this->chunk_streamer.interactive_light_update_config());
+}
+
 int32_t World::stream_last_error() const
 {
 	return (this->chunk_streamer.stream_last_error());
@@ -244,6 +256,10 @@ World::StreamDiagnostics World::stream_diagnostics() const
 	diagnostics.playable_drawable_count = source.playable_drawable_count;
 	diagnostics.active_generation_count = source.active_generation_count;
 	diagnostics.remesh_queue_peak = source.remesh_queue_peak;
+	diagnostics.remesh_priority_queue_depth = source.remesh_priority_queue_depth;
+	diagnostics.interactive_remesh_queue_depth =
+		source.interactive_remesh_queue_depth;
+	diagnostics.oldest_remesh_queue_age = source.oldest_remesh_queue_age;
 	diagnostics.remesh_snapshot_bytes = source.remesh_snapshot_bytes;
 	diagnostics.remesh_scanned_cells = source.remesh_scanned_cells;
 	diagnostics.remesh_propagated_cells = source.remesh_propagated_cells;

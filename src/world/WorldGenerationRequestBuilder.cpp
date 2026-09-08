@@ -64,6 +64,8 @@ int32_t WorldGenerationRequestBuilder::build(std::unique_ptr<WorldGenerationPipe
 	request->chunk_z = chunk_z;
 	request->operation = operation;
 	request->remesh_in_progress = FT_FALSE;
+	request->remesh_geometry_published = FT_FALSE;
+	request->remesh_interactive = FT_FALSE;
 	request->seed = seed == nullptr ? "" : seed;
 	if (request->config.initialize(config) != FT_ERR_SUCCESS)
 		return (FT_ERR_NO_MEMORY);
@@ -90,7 +92,8 @@ int32_t WorldGenerationRequestBuilder::build_remesh(std::unique_ptr<WorldGenerat
 	uint64_t relevance_epoch, uint32_t generation_revision, int32_t chunk_x,
 	int32_t chunk_z, uint64_t voxel_revision, uint64_t light_revision,
 	WorldGenerationPipeline::WorldChunkSnapshot &&snapshot,
-	const voxel_light_update_config &light_update_config) noexcept
+	const voxel_light_update_config &light_update_config,
+	ft_bool interactive) noexcept
 {
 	request.reset(new (std::nothrow) WorldGenerationPipeline::Request());
 	if (request == nullptr)
@@ -108,6 +111,8 @@ int32_t WorldGenerationRequestBuilder::build_remesh(std::unique_ptr<WorldGenerat
 	request->chunk_z = chunk_z;
 	request->operation = WorldGenerationPipeline::WorldGenerationOperation::REMESH;
 	request->remesh_in_progress = FT_FALSE;
+	request->remesh_geometry_published = FT_FALSE;
+	request->remesh_interactive = interactive;
 	request->light_update_config = light_update_config;
 	request->snapshot.reset(new (std::nothrow)
 		WorldGenerationPipeline::WorldChunkSnapshot(std::move(snapshot)));

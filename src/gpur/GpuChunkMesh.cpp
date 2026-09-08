@@ -239,6 +239,11 @@ bool GpuChunkMesh::uploaded_coordinates_match(int32_t chunk_x,
 		&& _uploaded_chunk_x == chunk_x && _uploaded_chunk_z == chunk_z);
 }
 
+uint64_t GpuChunkMesh::uploaded_revision() const
+{
+	return (this->_uploaded_revision);
+}
+
 size_t GpuChunkMesh::gpu_bytes() const
 {
 	return (_gpu_bytes);

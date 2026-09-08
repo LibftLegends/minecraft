@@ -23,7 +23,8 @@ class WorldGenerationRequestBuilder
 		uint64_t relevance_epoch, uint32_t generation_revision, int32_t chunk_x,
 		int32_t chunk_z, uint64_t voxel_revision, uint64_t light_revision,
 		WorldGenerationPipeline::WorldChunkSnapshot &&snapshot,
-		const voxel_light_update_config &light_update_config) noexcept;
+		const voxel_light_update_config &light_update_config,
+		ft_bool interactive) noexcept;
 
   private:
 	static int32_t deferred_writer(int32_t world_x, int32_t world_y,

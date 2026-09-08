@@ -90,6 +90,9 @@ class World
 		size_t						playable_drawable_count;
 		size_t						active_generation_count;
 		size_t						remesh_queue_peak;
+		size_t						remesh_priority_queue_depth;
+		size_t						interactive_remesh_queue_depth;
+		uint64_t					oldest_remesh_queue_age;
 		uint64_t					remesh_snapshot_bytes;
 		uint64_t					remesh_scanned_cells;
 		uint64_t					remesh_propagated_cells;
@@ -152,6 +155,9 @@ class World
 	int32_t set_light_update_config(
 		const voxel_light_update_config &config) noexcept;
 	const voxel_light_update_config &light_update_config() const noexcept;
+	int32_t set_interactive_light_update_config(
+		const voxel_light_update_config &config) noexcept;
+	const voxel_light_update_config &interactive_light_update_config() const noexcept;
 	int32_t stream_last_error() const;
 	int32_t stream_retryable_count() const;
 	StreamDiagnostics stream_diagnostics() const;

@@ -12,6 +12,78 @@ Branches:
 - Minecraft: `agent/analytics-performance`
 - Libft: `agent/compression-analytics-cardgame-scripting`
 
+## Required work priority order
+
+All implementation and runtime scheduling work must use this order. Do not
+start a lower-priority feature while the acceptance criteria for a higher
+priority item are still failing. At runtime, a lower-priority class may run
+only when the higher-priority class has no ready work, or when its bounded
+starvation allowance expires.
+
+### Priority 1 — loaded-chunk block changes and visible geometry
+
+Apply the authoritative block edit, invalidate the edited chunk and its visible
+border neighbours, and publish the replacement geometry as soon as possible.
+Do not wait for the complete lighting solve before the removed/placed block
+disappears from the renderer.
+
+This includes the edited chunk, face-sharing chunk-border geometry, stale-result
+rejection, geometry-only intermediate publication, and coalescing repeated
+edits before scheduling duplicate remeshes.
+
+**Exit criteria:** the edited block and affected visible border faces update
+before lighting completes, no old mesh is uploaded under the new voxel
+revision, and repeated edits do not synchronously block the render thread.
+
+### Priority 2 — lighting updates caused by those changes
+
+Process the bounded light frontier for the edited chunk and its cardinal
+neighbours, then publish the light-aware remesh results in edit-distance order.
+Coalesce repeated cells and sections, and keep each frame within the runtime
+lighting budget.
+
+This includes direct skylight and block-light invalidation, chunk-border
+propagation, incremental node/region work across frames, and light-aware
+remesh publication.
+
+**Exit criteria:** nearby light converges correctly after edits, chunk seams do
+not become black or falsely bright, stale lighting cannot overwrite newer
+state, and block-break latency remains within the measured budget.
+
+### Priority 3 — new-chunk generation and ordinary arrival remeshes
+
+Only after priorities 1 and 2 have no ready interactive work may the engine
+generate, light, and upload streamed chunks. New arrivals must not occupy the
+interactive edit queue.
+
+This includes terrain/biome generation, water and lake/river generation,
+arrival lighting, ordinary neighbour remeshes, and distant chunk uploads.
+
+**Exit criteria:** streaming continues without starving, new chunks do not delay
+an active edit or its lighting, and the bounded fairness escape is observable
+in analytics.
+
+### Required scheduler sequence
+
+For each frame, the scheduler must make this decision in order:
+
+```text
+1. apply/submit loaded-chunk block changes and visible border geometry
+2. process and publish pending edit-caused light work
+3. only then submit/process new chunk generation and arrival remeshes
+```
+
+The scheduler must expose queue depth, age, and starvation promotions for all
+three classes. A test that repeatedly breaks/places blocks while the camera
+streams new terrain must prove that the edited block is removed from the
+visible mesh first, the nearby light converges second, and new chunks make
+progress third without either starvation or an unbounded frame spike.
+
+The worker arbitration follows the same order: remesh/light requests are
+selected before generation requests, with one generation escape after at most
+eight consecutive remesh selections. This is starvation prevention, not a
+reversal of the priority order.
+
 ## Completed and committed
 
 - Libft owns packed sky/block light, light metadata, light sections, the
@@ -182,6 +254,13 @@ edit. It passed in both normal and analytics Windows builds. It remains
 separate from `--validate-all` so headless CI machines do not fail the
 aggregate suite.
 
+The remesh pipeline now has an explicit two-stage publication contract:
+geometry-only results publish the edited block mesh as soon as the immutable
+snapshot is available, while the same revision-checked request continues its
+bounded light solve and later publishes the final light-aware mesh. GPU upload
+accepts that intermediate mesh revision but still refuses to upload an old
+mesh under a new voxel revision.
+
 1. Finish the runtime lighting scheduler. The persistent bounded operation and
    queue-level slicing now exist, and dirty-remesh selection now ranks the
    bounded scan window by explicit edit priority and distance from the active
@@ -202,6 +281,10 @@ aggregate suite.
    face-sharing neighbors into that bounded interactive queue. Diagonal
    neighbors remain background work. This keeps an edit's lighting seam ahead
    of unrelated arrival remeshes without submitting all nine chunks at once.
+   Both the background and interactive node/time budgets are now exposed as
+   runtime `World` configuration APIs and reject invalid min/target/max
+   relationships; the async validator checks both round trips. Remaining
+   scheduler work is the queue-order and section-coalescing stress proof.
 2. Verify that neighbor arrival/removal enqueue bounded relighting as well as
    face remeshing, and that temporary conservative boundaries converge after
    the neighbor is published or evicted. Arrival and eviction invalidation are

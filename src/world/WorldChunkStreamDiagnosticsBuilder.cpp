@@ -61,6 +61,20 @@ WorldChunkStreamer::Diagnostics WorldChunkStreamDiagnosticsBuilder::build(const 
 	diagnostics.playable_drawable_count = 0U;
 	diagnostics.active_generation_count = streamer.generation_pipeline_.active_count();
 	diagnostics.remesh_queue_peak = streamer.remesh_queue_peak_;
+	diagnostics.remesh_priority_queue_depth = streamer.priority_remeshes_.size();
+	diagnostics.interactive_remesh_queue_depth = 0U;
+	diagnostics.oldest_remesh_queue_age = 0U;
+	for (const WorldChunkStreamer::RemeshPriority &priority
+		: streamer.priority_remeshes_)
+	{
+		if (priority.interactive)
+			diagnostics.interactive_remesh_queue_depth += 1U;
+		if (streamer.stream_frame_ >= priority.queued_frame
+			&& streamer.stream_frame_ - priority.queued_frame
+			> diagnostics.oldest_remesh_queue_age)
+			diagnostics.oldest_remesh_queue_age = streamer.stream_frame_
+				- priority.queued_frame;
+	}
 	diagnostics.remesh_snapshot_bytes = streamer.remesh_snapshot_bytes_;
 	diagnostics.remesh_scanned_cells = streamer.remesh_scanned_cells_;
 	diagnostics.remesh_propagated_cells = streamer.remesh_propagated_cells_;

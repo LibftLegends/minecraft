@@ -9,6 +9,8 @@ namespace
 {
 	static const int32_t ASYNC_WORLDGEN_MAX_STARTUP_FRAMES = 1200;
 	static const int32_t ASYNC_STARTUP_EDIT_REPETITIONS = 4;
+	static const int32_t ASYNC_STARTUP_PRIORITY_EDIT_ROUNDS = 8;
+	static const int32_t ASYNC_STARTUP_PRIORITY_EDIT_INTERVAL = 8;
 }
 
 WorldAsyncGenerationValidator::WorldAsyncGenerationValidator()
@@ -334,6 +336,131 @@ int WorldAsyncGenerationValidator::validate_diagonal_lighting_propagation() noex
 	return (0);
 }
 
+int WorldAsyncGenerationValidator::validate_light_scheduler_configuration()
+	noexcept
+{
+	World world;
+	voxel_light_update_config background;
+	voxel_light_update_config interactive;
+	voxel_light_update_config invalid;
+
+	voxel_light_update_config_defaults(background);
+	background.min_nodes_per_frame = 7U;
+	background.target_nodes_per_frame = 31U;
+	background.max_nodes_per_frame = 97U;
+	background.time_budget_microseconds = 211U;
+	if (world.set_light_update_config(background) != FT_ERR_SUCCESS
+		|| world.light_update_config().min_nodes_per_frame != 7U
+		|| world.light_update_config().target_nodes_per_frame != 31U
+		|| world.light_update_config().max_nodes_per_frame != 97U
+		|| world.light_update_config().time_budget_microseconds != 211U)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: background light scheduler config did not round-trip\n");
+		return (1);
+	}
+	voxel_light_update_config_defaults(interactive);
+	interactive.min_nodes_per_frame = 11U;
+	interactive.target_nodes_per_frame = 43U;
+	interactive.max_nodes_per_frame = 131U;
+	interactive.time_budget_microseconds = 307U;
+	if (world.set_interactive_light_update_config(interactive)
+		!= FT_ERR_SUCCESS
+		|| world.interactive_light_update_config().min_nodes_per_frame != 11U
+		|| world.interactive_light_update_config().target_nodes_per_frame != 43U
+		|| world.interactive_light_update_config().max_nodes_per_frame != 131U
+		|| world.interactive_light_update_config().time_budget_microseconds != 307U)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: interactive light scheduler config did not round-trip\n");
+		return (1);
+	}
+	invalid = interactive;
+	invalid.min_nodes_per_frame = invalid.target_nodes_per_frame + 1U;
+	if (world.set_interactive_light_update_config(invalid)
+		!= FT_ERR_INVALID_ARGUMENT)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: invalid light scheduler config was accepted\n");
+		return (1);
+	}
+	return (0);
+}
+
+int WorldAsyncGenerationValidator::validate_remesh_priority_metrics() noexcept
+{
+	World world;
+	World::StreamDiagnostics diagnostics;
+	std::size_t index;
+	bool background_seen;
+
+	/* This fixture intentionally does not initialize World.  That leaves the
+	 * streamer without worker threads, so the queue ordering and diagnostics
+	 * can be checked without racing a worker that drains the entries. */
+	world.chunk_streamer.stream_frame_ = 0U;
+	world.chunk_streamer.enqueue_background_remesh(30, 30);
+	world.chunk_streamer.enqueue_background_remesh(31, 30);
+	world.chunk_streamer.stream_frame_ = 12U;
+	world.chunk_streamer.prioritize_chunk_remesh(7, 7);
+	world.chunk_streamer.prioritize_chunk_remesh(8, 8);
+	diagnostics = world.stream_diagnostics();
+	if (diagnostics.remesh_priority_queue_depth != 4U
+		|| diagnostics.interactive_remesh_queue_depth != 2U
+		|| diagnostics.oldest_remesh_queue_age != 12U)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: priority metrics mismatch depth=%zu "
+			"interactive=%zu oldest=%llu\n",
+			diagnostics.remesh_priority_queue_depth,
+			diagnostics.interactive_remesh_queue_depth,
+			static_cast<unsigned long long>(
+				diagnostics.oldest_remesh_queue_age));
+		return (1);
+	}
+	background_seen = false;
+	index = 0U;
+	for (const WorldChunkStreamer::RemeshPriority &priority
+		: world.chunk_streamer.priority_remeshes_)
+	{
+		if (!background_seen && !priority.interactive)
+			background_seen = true;
+		if (background_seen && priority.interactive)
+		{
+			std::fprintf(stderr,
+				"async-worldgen: interactive remesh followed background "
+				"entry at queue index=%zu\n", index);
+			return (1);
+		}
+		if (index == 0U && (priority.chunk_x != 7
+				|| priority.chunk_z != 7 || !priority.interactive))
+		{
+			std::fprintf(stderr,
+				"async-worldgen: oldest equal-distance interactive remesh was not first "
+				"chunk=(%d,%d) interactive=%d\n", priority.chunk_x,
+				priority.chunk_z, priority.interactive ? 1 : 0);
+			return (1);
+		}
+		if (index == 1U && (priority.chunk_x != 8
+				|| priority.chunk_z != 8 || !priority.interactive))
+		{
+			std::fprintf(stderr,
+				"async-worldgen: newer equal-distance interactive remesh was not second "
+				"chunk=(%d,%d) interactive=%d\n", priority.chunk_x,
+				priority.chunk_z, priority.interactive ? 1 : 0);
+			return (1);
+		}
+		index += 1U;
+	}
+	if (!background_seen)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: background remesh entries disappeared from "
+			"priority queue\n");
+		return (1);
+	}
+	return (0);
+}
+
 bool WorldAsyncGenerationValidator::mesh_payload_is_valid(
 	const chunk_mesh &mesh) noexcept
 {
@@ -471,46 +598,62 @@ void WorldAsyncGenerationValidator::report_playable_area_gaps(
 const WorldChunk *WorldAsyncGenerationValidator::stream_until_ready(World &world,
 	int32_t *frame, bool *startup_edit_applied,
 	std::size_t *remesh_queue_peak,
-	int32_t *first_visible_mesh_frame) noexcept
+	int32_t *first_visible_mesh_frame, bool *interactive_priority_observed,
+	bool *generation_progress_with_priority_pending) noexcept
 {
 	/* Require the same center-plus-playable-ring contract used by loading. */
 	const int32_t target_chunk_x = -1;
 	const int32_t target_chunk_z = 0;
 	World::StreamDiagnostics initial_diagnostics;
 	int32_t error_code;
-	bool edit_attempted;
+	int32_t priority_edit_rounds;
+	int32_t initial_loaded_chunk_count;
 
 	if (startup_edit_applied == nullptr || remesh_queue_peak == nullptr
-		|| first_visible_mesh_frame == nullptr)
+		|| first_visible_mesh_frame == nullptr
+		|| interactive_priority_observed == nullptr
+		|| generation_progress_with_priority_pending == nullptr)
 		return (nullptr);
 	*startup_edit_applied = false;
 	*remesh_queue_peak = 0U;
 	*first_visible_mesh_frame = -1;
+	*interactive_priority_observed = false;
+	*generation_progress_with_priority_pending = false;
 	initial_diagnostics = world.stream_diagnostics();
-	edit_attempted = false;
+	initial_loaded_chunk_count = world.loaded_chunk_count;
+	priority_edit_rounds = 0;
 
-	while (!WorldAsyncGenerationValidator::playable_area_is_ready(world)
+	while ((!WorldAsyncGenerationValidator::playable_area_is_ready(world)
+			|| world.find_chunk(target_chunk_x, target_chunk_z) == nullptr
+			|| !WorldChunk::mesh_is_drawable(world.find_chunk(target_chunk_x,
+				target_chunk_z)->mesh))
 		&& *frame < ASYNC_WORLDGEN_MAX_STARTUP_FRAMES)
 	{
-		/* Exercise the same priority edit path while generation and ordinary
-		 * arrival remeshes are still active.  A previous implementation could
-		 * let this work starve generation or leave a neighboring border dirty
-		 * indefinitely, while the normal startup validator only observed
-		 * passive loading. */
-		if (!edit_attempted && *frame >= 2)
+		/* Repeatedly exercise the same priority edit path while generation and
+		 * ordinary arrival remeshes are still active.  The interval is long
+		 * enough for the request to reach the worker, but the repeated rounds
+		 * keep interactive work pending long enough to expose starvation. */
+		if (*frame >= 2 && (*frame - 2)
+			% ASYNC_STARTUP_PRIORITY_EDIT_INTERVAL == 0
+			&& priority_edit_rounds < ASYNC_STARTUP_PRIORITY_EDIT_ROUNDS)
 		{
 			const WorldChunk *edit_chunk = world.find_chunk(0, 0);
 			if (edit_chunk != nullptr && edit_chunk->initialized)
 			{
 				int32_t edit_z = 0;
-				while (edit_z < GAME_VOXEL_CHUNK_DEPTH && !edit_attempted)
+				while (edit_z < GAME_VOXEL_CHUNK_DEPTH
+					&& priority_edit_rounds
+					< ASYNC_STARTUP_PRIORITY_EDIT_ROUNDS)
 				{
 					int32_t edit_y = 0;
 					while (edit_y < GAME_VOXEL_CHUNK_HEIGHT
-						&& !edit_attempted)
+						&& priority_edit_rounds
+						< ASYNC_STARTUP_PRIORITY_EDIT_ROUNDS)
 					{
 						int32_t edit_x = 0;
-						while (edit_x < GAME_VOXEL_CHUNK_WIDTH)
+						while (edit_x < GAME_VOXEL_CHUNK_WIDTH
+							&& priority_edit_rounds
+							< ASYNC_STARTUP_PRIORITY_EDIT_ROUNDS)
 						{
 							uint32_t block_id = GAME_VOXEL_AIR_BLOCK;
 							if (edit_chunk->chunk.read_block(edit_x, edit_y,
@@ -520,11 +663,10 @@ const WorldChunk *WorldAsyncGenerationValidator::stream_until_ready(World &world
 							{
 								const int32_t world_x = edit_chunk->world_x + edit_x;
 								const int32_t world_z = edit_chunk->world_z + edit_z;
-								int32_t edit_round;
 								bool edit_sequence_succeeded;
 
-								edit_round = 0;
 								edit_sequence_succeeded = true;
+								int32_t edit_round = 0;
 								while (edit_round < ASYNC_STARTUP_EDIT_REPETITIONS
 									&& edit_sequence_succeeded)
 								{
@@ -535,9 +677,12 @@ const WorldChunk *WorldAsyncGenerationValidator::stream_until_ready(World &world
 										edit_sequence_succeeded = false;
 									edit_round += 1;
 								}
-								if (edit_sequence_succeeded)
-									*startup_edit_applied = true;
-								edit_attempted = true;
+				if (edit_sequence_succeeded)
+				{
+					*startup_edit_applied = true;
+					*interactive_priority_observed = true;
+					priority_edit_rounds += 1;
+								}
 							}
 							edit_x += 1;
 						}
@@ -546,8 +691,6 @@ const WorldChunk *WorldAsyncGenerationValidator::stream_until_ready(World &world
 					edit_z += 1;
 				}
 			}
-			if (!edit_attempted)
-				edit_attempted = true;
 		}
 		const std::chrono::steady_clock::time_point update_start =
 			std::chrono::steady_clock::now();
@@ -557,6 +700,34 @@ const WorldChunk *WorldAsyncGenerationValidator::stream_until_ready(World &world
 			world.stream_diagnostics();
 		if (current_diagnostics.remesh_queue_peak > *remesh_queue_peak)
 			*remesh_queue_peak = current_diagnostics.remesh_queue_peak;
+		if (current_diagnostics.interactive_remesh_queue_depth
+			> current_diagnostics.remesh_priority_queue_depth
+			|| (current_diagnostics.remesh_priority_queue_depth == 0U
+				&& current_diagnostics.oldest_remesh_queue_age != 0U)
+			|| current_diagnostics.oldest_remesh_queue_age
+				> current_diagnostics.frame)
+		{
+			std::fprintf(stderr,
+				"async-worldgen: invalid remesh queue metrics frame=%llu "
+				"depth=%zu interactive=%zu oldest=%llu\n",
+				static_cast<unsigned long long>(current_diagnostics.frame),
+				current_diagnostics.remesh_priority_queue_depth,
+				current_diagnostics.interactive_remesh_queue_depth,
+				static_cast<unsigned long long>(
+					current_diagnostics.oldest_remesh_queue_age));
+			return (nullptr);
+		}
+		if (current_diagnostics.interactive_remesh_queue_depth > 0U)
+		{
+			*interactive_priority_observed = true;
+			if (world.loaded_chunk_count > initial_loaded_chunk_count
+				|| current_diagnostics.progress_frame
+					> initial_diagnostics.progress_frame)
+				*generation_progress_with_priority_pending = true;
+		}
+		if (*startup_edit_applied
+			&& world.loaded_chunk_count > initial_loaded_chunk_count)
+			*generation_progress_with_priority_pending = true;
 		if (*first_visible_mesh_frame < 0
 			&& current_diagnostics.playable_drawable_count
 				> initial_diagnostics.playable_drawable_count)
@@ -623,6 +794,15 @@ void WorldAsyncGenerationValidator::report_failure(const World &world,
 		"async-worldgen: pending=%zu failed=%zu retry=%zu error=%d\n",
 		diagnostics.pending_count, diagnostics.failed_count,
 		diagnostics.retryable_count, diagnostics.last_error);
+	std::fprintf(stderr,
+		"async-worldgen: remesh_priority=%zu interactive=%zu oldest=%llu "
+		"capture=%zu pipeline=%zu remesh_in_flight=%zu\n",
+		diagnostics.remesh_priority_queue_depth,
+		diagnostics.interactive_remesh_queue_depth,
+		static_cast<unsigned long long>(diagnostics.oldest_remesh_queue_age),
+		world.chunk_streamer.remesh_capture_in_flight_.load(),
+		world.chunk_streamer.pipeline().queued_count(),
+		world.chunk_streamer.pipeline().remesh_in_flight_count());
 	if (!WorldAsyncGenerationValidator::playable_area_is_ready(world))
 	{
 		std::fprintf(stderr,
@@ -643,6 +823,8 @@ int WorldAsyncGenerationValidator::validate() const
 	int32_t final_loaded_chunk_count;
 	std::size_t remesh_queue_peak;
 	int32_t first_visible_mesh_frame;
+	bool interactive_priority_observed;
+	bool generation_progress_with_priority_pending;
 	World::StreamDiagnostics final_diagnostics;
 
 	error_code = WorldAsyncGenerationValidator::validate_diagonal_lighting_halo();
@@ -652,6 +834,12 @@ int WorldAsyncGenerationValidator::validate() const
 	if (error_code != 0)
 		return (error_code);
 	error_code = WorldAsyncGenerationValidator::validate_diagonal_lighting_propagation();
+	if (error_code != 0)
+		return (error_code);
+	error_code = WorldAsyncGenerationValidator::validate_light_scheduler_configuration();
+	if (error_code != 0)
+		return (error_code);
+	error_code = WorldAsyncGenerationValidator::validate_remesh_priority_metrics();
 	if (error_code != 0)
 		return (error_code);
 	error_code = world.initialize("async-validator");
@@ -666,11 +854,14 @@ int WorldAsyncGenerationValidator::validate() const
 	bool startup_edit_applied = false;
 	generated = WorldAsyncGenerationValidator::stream_until_ready(world,
 			&frame, &startup_edit_applied, &remesh_queue_peak,
-			&first_visible_mesh_frame);
+			&first_visible_mesh_frame, &interactive_priority_observed,
+			&generation_progress_with_priority_pending);
 	if (generated == nullptr
 		|| frame >= ASYNC_WORLDGEN_MAX_STARTUP_FRAMES
 		|| world.loaded_chunk_count <= initial_loaded_chunk_count
 		|| !startup_edit_applied
+		|| !interactive_priority_observed
+		|| !generation_progress_with_priority_pending
 		|| first_visible_mesh_frame < 0
 		|| (generated != nullptr
 			&& !WorldAsyncGenerationValidator::mesh_payload_is_valid(
@@ -705,13 +896,19 @@ int WorldAsyncGenerationValidator::validate() const
 		first_visible_mesh_frame, ASYNC_WORLDGEN_MAX_STARTUP_FRAMES);
 	std::printf("async-worldgen-metrics: {\"frames\":%d,"
 		"\"initial_loaded\":%d,\"final_loaded\":%d,"
-		"\"remesh_queue_peak\":%zu,\"snapshot_bytes\":%llu,"
+		"\"remesh_queue_peak\":%zu,\"priority_queue_depth\":%zu,"
+		"\"interactive_queue_depth\":%zu,\"oldest_remesh_age\":%llu,"
+		"\"snapshot_bytes\":%llu,"
 		"\"scanned_cells\":%llu,\"propagated_cells\":%llu,"
 		"\"light_queue_peak\":%llu,\"remesh_completed\":%llu,"
 		"\"stale_results\":%zu,\"stale_stream\":%zu,"
 		"\"stale_remesh\":%zu,\"first_visible_mesh_frame\":%d}\n",
 		frame, initial_loaded_chunk_count, final_loaded_chunk_count,
 		remesh_queue_peak,
+		final_diagnostics.remesh_priority_queue_depth,
+		final_diagnostics.interactive_remesh_queue_depth,
+		static_cast<unsigned long long>(
+			final_diagnostics.oldest_remesh_queue_age),
 		static_cast<unsigned long long>(final_diagnostics.remesh_snapshot_bytes),
 		static_cast<unsigned long long>(final_diagnostics.remesh_scanned_cells),
 		static_cast<unsigned long long>(final_diagnostics.remesh_propagated_cells),

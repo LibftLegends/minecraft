@@ -64,6 +64,7 @@ int32_t WorldGenerationResultCommitter::commit_remesh_result(World &world,
 	chunk_mesh replacement_mesh;
 	std::unique_ptr<chunk_mesh> retired_mesh;
 	int32_t error_code;
+	bool geometry_only;
 #if defined(LIBFT_ENABLE_ANALYTICS)
 	const auto commit_start = std::chrono::steady_clock::now();
 	std::chrono::steady_clock::time_point phase_start;
@@ -79,6 +80,8 @@ int32_t WorldGenerationResultCommitter::commit_remesh_result(World &world,
 	if (result.light_queue_peak > world.chunk_streamer.remesh_light_queue_peak_)
 		world.chunk_streamer.remesh_light_queue_peak_ = result.light_queue_peak;
 	world.chunk_streamer.remesh_completed_count_ += 1U;
+	geometry_only = (result.stage_mask
+		& WorldGenerationPipeline::Result::STAGE_GEOMETRY_ONLY) != 0U;
 
 	chunk = world.find_chunk_mutable(result.chunk_x, result.chunk_z);
 	if (chunk == nullptr || !chunk->initialized
@@ -108,10 +111,10 @@ int32_t WorldGenerationResultCommitter::commit_remesh_result(World &world,
 		}
 		return (FT_ERR_SUCCESS);
 	}
-	chunk->pending_mesh_request_id = 0U;
 	if (result.error_code != FT_ERR_SUCCESS || result.mesh == nullptr
-		|| result.light == nullptr)
+		|| (!geometry_only && result.light == nullptr))
 	{
+		chunk->pending_mesh_request_id = 0U;
 		chunk->mesh_dirty = true;
 		return (FT_ERR_SUCCESS);
 	}
@@ -181,9 +184,13 @@ int32_t WorldGenerationResultCommitter::commit_remesh_result(World &world,
 	#endif
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
-	error_code = chunk->light.move(*result.light);
-	if (error_code != FT_ERR_SUCCESS)
-		return (error_code);
+	if (!geometry_only)
+	{
+		chunk->pending_mesh_request_id = 0U;
+		error_code = chunk->light.move(*result.light);
+		if (error_code != FT_ERR_SUCCESS)
+			return (error_code);
+	}
 	result.retired_mesh = std::move(retired_mesh);
 	#if defined(LIBFT_ENABLE_ANALYTICS)
 	light_move_us = static_cast<uint64_t>(std::chrono::duration_cast<
@@ -208,7 +215,9 @@ int32_t WorldGenerationResultCommitter::commit_remesh_result(World &world,
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
 	chunk->mesh_revision += 1U;
-	chunk->mesh_dirty = false;
+	chunk->mesh_dirty = geometry_only;
+	if (!geometry_only)
+		chunk->pending_mesh_request_id = 0U;
 	world.mark_geometry_changed();
 	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
 	if (chunk->voxel_revision > 1U)

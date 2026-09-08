@@ -1,5 +1,6 @@
 #include "../../src/world/WorldChunkStreamer.hpp"
 #include "../../src/diagnostics/RuntimeAnalytics.hpp"
+#include <cstdlib>
 #include <cstdio>
 #if defined(LIBFT_ENABLE_ANALYTICS)
 # include <chrono>
@@ -77,6 +78,7 @@ int32_t WorldChunkStreamer::initialize_pipeline() noexcept
 void WorldChunkStreamer::reset() noexcept
 {
 	this->world_epoch_ += 1U;
+	this->remesh_capture_relevance_epoch_.store(this->stream_relevance_epoch_);
 	this->stop_remesh_capture_worker();
 	(void)this->generation_pipeline_.destroy();
 	this->stream_candidates_radius_ = -1;
@@ -159,6 +161,7 @@ void WorldChunkStreamer::run_remesh_capture_worker() noexcept
 		WorldGenerationPipeline::WorldChunkSnapshot snapshot;
 		int32_t error_code;
 		bool should_stop;
+		bool stale_capture;
 
 		{
 			std::unique_lock<std::mutex> lock(this->remesh_capture_mutex_);
@@ -174,8 +177,15 @@ void WorldChunkStreamer::run_remesh_capture_worker() noexcept
 			task = this->remesh_capture_tasks_.front();
 			this->remesh_capture_tasks_.pop_front();
 		}
-		error_code = this->world_.capture_remesh_snapshot(task.chunk_x,
-			task.chunk_z, snapshot);
+		stale_capture = task.relevance_epoch
+			!= this->remesh_capture_relevance_epoch_.load();
+		error_code = stale_capture ? FT_ERR_INVALID_STATE
+			: this->world_.capture_remesh_snapshot(task.chunk_x,
+				task.chunk_z, snapshot);
+		if (error_code == FT_ERR_SUCCESS
+			&& task.relevance_epoch
+			!= this->remesh_capture_relevance_epoch_.load())
+			error_code = FT_ERR_INVALID_STATE;
 		if (error_code == FT_ERR_SUCCESS)
 		{
 			uint64_t snapshot_element_count;
@@ -193,7 +203,7 @@ void WorldChunkStreamer::run_remesh_capture_worker() noexcept
 				task.request_id, task.world_epoch, task.relevance_epoch,
 				task.generation_revision, task.chunk_x, task.chunk_z,
 				task.voxel_revision, task.light_revision, std::move(snapshot),
-				&task.light_update_config);
+				&task.light_update_config, task.interactive);
 		}
 		if (error_code != FT_ERR_SUCCESS)
 			this->world_.clear_pending_remesh(task.chunk_x, task.chunk_z,
@@ -225,9 +235,32 @@ int32_t WorldChunkStreamer::seed_initial_stream(int32_t stream_radius,
 
 void WorldChunkStreamer::handle_recenter() noexcept
 {
+	std::deque<RemeshCaptureTask> cancelled_capture_tasks;
+	std::size_t cancelled_capture_count;
 	int32_t index;
 
 	this->generation_pipeline_.cancel_queued();
+	{
+		std::lock_guard<std::mutex> lock(this->remesh_capture_mutex_);
+		cancelled_capture_tasks.swap(this->remesh_capture_tasks_);
+	}
+	cancelled_capture_count = cancelled_capture_tasks.size();
+	while (!cancelled_capture_tasks.empty())
+	{
+		WorldChunk *cancelled_chunk = this->world_.find_chunk_mutable(
+			cancelled_capture_tasks.front().chunk_x,
+			cancelled_capture_tasks.front().chunk_z);
+		if (cancelled_chunk != nullptr
+			&& cancelled_chunk->pending_mesh_request_id
+				== cancelled_capture_tasks.front().request_id)
+		{
+			cancelled_chunk->pending_mesh_request_id = 0U;
+			cancelled_chunk->mesh_dirty = true;
+		}
+		cancelled_capture_tasks.pop_front();
+	}
+	if (cancelled_capture_count != 0U)
+		this->remesh_capture_in_flight_.fetch_sub(cancelled_capture_count);
 	/* Recentring cancels queued generation work, including remesh requests.
 	 * Clear the chunk-side ownership markers for those requests as well; if a
 	 * marker survives cancellation, the scheduler treats the chunk as already
@@ -246,6 +279,8 @@ void WorldChunkStreamer::handle_recenter() noexcept
 		index += 1;
 	}
 	this->stream_relevance_epoch_ += 1U;
+	this->remesh_capture_relevance_epoch_.store(
+		this->stream_relevance_epoch_);
 	this->remesh_priority_anchor_valid_ = true;
 	this->remesh_priority_anchor_x_ = this->world_.center_chunk_x;
 	this->remesh_priority_anchor_z_ = this->world_.center_chunk_z;
@@ -403,6 +438,21 @@ const voxel_light_update_config &WorldChunkStreamer::light_update_config()
 	return (this->light_update_config_);
 }
 
+int32_t WorldChunkStreamer::set_interactive_light_update_config(
+	const voxel_light_update_config &config) noexcept
+{
+	if (voxel_light_update_config_is_valid(config) == FT_FALSE)
+		return (FT_ERR_INVALID_ARGUMENT);
+	this->interactive_light_update_config_ = config;
+	return (FT_ERR_SUCCESS);
+}
+
+const voxel_light_update_config &
+	WorldChunkStreamer::interactive_light_update_config() const noexcept
+{
+	return (this->interactive_light_update_config_);
+}
+
 void WorldChunkStreamer::bump_generation_revision() noexcept
 {
 	this->generation_revision_ += 1U;
@@ -452,9 +502,12 @@ int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk) noexcept
 	resolved_light_config = &this->light_update_config_;
 	if (this->priority_remesh_pending_
 		&& !this->priority_remeshes_.empty()
+		&& this->priority_remeshes_.front().interactive
 		&& this->priority_remeshes_.front().chunk_x == chunk.chunk_x
 		&& this->priority_remeshes_.front().chunk_z == chunk.chunk_z)
+	{
 		resolved_light_config = &this->interactive_light_update_config_;
+	}
 	if (this->generation_pipeline_.remesh_in_flight_count()
 		+ this->remesh_capture_in_flight_.load()
 		>= WORLD_STREAM_MAX_REMESH_IN_FLIGHT)
@@ -469,6 +522,12 @@ int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk) noexcept
 	task.chunk_z = chunk.chunk_z;
 	task.voxel_revision = chunk.voxel_revision;
 	task.light_revision = chunk.light_revision;
+	task.interactive = FT_FALSE;
+	if (this->priority_remesh_pending_ && !this->priority_remeshes_.empty()
+		&& this->priority_remeshes_.front().interactive
+		&& this->priority_remeshes_.front().chunk_x == chunk.chunk_x
+		&& this->priority_remeshes_.front().chunk_z == chunk.chunk_z)
+		task.interactive = FT_TRUE;
 	task.light_update_config = *resolved_light_config;
 	try
 	{
@@ -478,6 +537,13 @@ int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk) noexcept
 		chunk.pending_mesh_request_id = request_id;
 		this->remesh_capture_tasks_.push_back(task);
 		this->remesh_capture_in_flight_.fetch_add(1U);
+		{
+			const std::size_t pending_remeshes =
+				this->priority_remeshes_.size()
+				+ this->remesh_capture_in_flight_.load();
+			if (pending_remeshes > this->remesh_queue_peak_)
+				this->remesh_queue_peak_ = pending_remeshes;
+		}
 	}
 	catch (...)
 	{
@@ -524,22 +590,53 @@ void WorldChunkStreamer::mark_neighbor_remeshes(int32_t chunk_x,
 void WorldChunkStreamer::prioritize_chunk_remesh(int32_t chunk_x,
 	int32_t chunk_z) noexcept
 {
-	bool already_queued;
+	this->prioritize_chunk_remesh_from_origin(chunk_x, chunk_z, chunk_x,
+		chunk_z);
+	return ;
+}
 
-	already_queued = false;
-	for (const RemeshPriority &priority : this->priority_remeshes_)
+void WorldChunkStreamer::prioritize_chunk_remesh_from_origin(int32_t chunk_x,
+	int32_t chunk_z, int32_t origin_chunk_x, int32_t origin_chunk_z) noexcept
+{
+	bool existing;
+	RemeshPriority promoted;
+	std::deque<RemeshPriority>::iterator insert_position;
+
+	existing = false;
+	for (auto iterator = this->priority_remeshes_.begin();
+		iterator != this->priority_remeshes_.end(); ++iterator)
 	{
-		if (priority.chunk_x == chunk_x && priority.chunk_z == chunk_z)
+		if (iterator->chunk_x == chunk_x && iterator->chunk_z == chunk_z)
 		{
-			already_queued = true;
+			promoted = *iterator;
+			this->priority_remeshes_.erase(iterator);
+			existing = true;
 			break ;
 		}
 	}
-	if (!already_queued)
-		/* New explicit edits must be serviced before older arrival/removal
-		 * relight requests. The older entries remain queued and are still
-		 * drained after the interactive request commits. */
-		this->priority_remeshes_.push_front({chunk_x, chunk_z});
+	if (!existing)
+	{
+		promoted.chunk_x = chunk_x;
+		promoted.chunk_z = chunk_z;
+	}
+	/* An explicit edit re-anchors an existing background notification.  The
+	 * queue then remains ordered by propagation distance, with stable FIFO
+	 * ordering for equal-distance cells. */
+	promoted.origin_chunk_x = origin_chunk_x;
+	promoted.origin_chunk_z = origin_chunk_z;
+	promoted.origin_distance = static_cast<uint32_t>(
+		std::abs(chunk_x - origin_chunk_x)
+		+ std::abs(chunk_z - origin_chunk_z));
+	promoted.queued_frame = this->stream_frame_;
+	promoted.interactive = true;
+	insert_position = this->priority_remeshes_.begin();
+	while (insert_position != this->priority_remeshes_.end()
+		&& insert_position->interactive
+		&& insert_position->origin_distance <= promoted.origin_distance)
+		++insert_position;
+	this->priority_remeshes_.insert(insert_position, promoted);
+	if (this->priority_remeshes_.size() > this->remesh_queue_peak_)
+		this->remesh_queue_peak_ = this->priority_remeshes_.size();
 	this->priority_remesh_pending_ = !this->priority_remeshes_.empty();
 	if (this->priority_remesh_pending_)
 	{
@@ -575,11 +672,12 @@ void WorldChunkStreamer::prioritize_edit_border_remeshes(int32_t chunk_x,
 	{
 		if (this->world_.find_chunk(coordinates[index][0],
 				coordinates[index][1]) != nullptr)
-			this->prioritize_chunk_remesh(coordinates[index][0],
-				coordinates[index][1]);
+			this->prioritize_chunk_remesh_from_origin(coordinates[index][0],
+				coordinates[index][1], chunk_x, chunk_z);
 		index += 1;
 	}
-	this->prioritize_chunk_remesh(chunk_x, chunk_z);
+	this->prioritize_chunk_remesh_from_origin(chunk_x, chunk_z, chunk_x,
+		chunk_z);
 	return ;
 }
 
@@ -598,7 +696,12 @@ void WorldChunkStreamer::enqueue_background_remesh(int32_t chunk_x,
 		}
 	}
 	if (!already_queued)
-		this->priority_remeshes_.push_back({chunk_x, chunk_z});
+	{
+		this->priority_remeshes_.push_back({chunk_x, chunk_z, chunk_x, chunk_z,
+			0U, this->stream_frame_, false});
+	}
+	if (this->priority_remeshes_.size() > this->remesh_queue_peak_)
+		this->remesh_queue_peak_ = this->priority_remeshes_.size();
 	this->priority_remesh_pending_ = !this->priority_remeshes_.empty();
 	if (this->priority_remesh_pending_)
 	{

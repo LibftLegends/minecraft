@@ -195,7 +195,8 @@ int32_t WorldGenerationPipeline::submit_remesh(uint64_t request_id,
 	uint32_t generation_revision, int32_t chunk_x, int32_t chunk_z,
 	uint64_t voxel_revision, uint64_t light_revision,
 	WorldChunkSnapshot &&snapshot,
-	const voxel_light_update_config *light_update_config) noexcept
+	const voxel_light_update_config *light_update_config,
+	ft_bool interactive) noexcept
 {
 	std::unique_ptr<Request> request;
 	int32_t error_code;
@@ -208,7 +209,7 @@ int32_t WorldGenerationPipeline::submit_remesh(uint64_t request_id,
 			request_id, this->pipeline_epoch_.load(), world_epoch,
 			relevance_epoch, generation_revision, chunk_x, chunk_z,
 			voxel_revision, light_revision, std::move(snapshot),
-			resolved_light_config);
+			resolved_light_config, interactive);
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
 	{

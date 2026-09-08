@@ -29,6 +29,9 @@ class WorldChunkStreamer
 		std::size_t playable_drawable_count;
 		std::size_t active_generation_count;
 		std::size_t remesh_queue_peak;
+		std::size_t remesh_priority_queue_depth;
+		std::size_t interactive_remesh_queue_depth;
+		uint64_t oldest_remesh_queue_age;
 		uint64_t remesh_snapshot_bytes;
 		uint64_t remesh_scanned_cells;
 		uint64_t remesh_propagated_cells;
@@ -87,6 +90,11 @@ class WorldChunkStreamer
 	{
 		int32_t chunk_x;
 		int32_t chunk_z;
+		int32_t origin_chunk_x;
+		int32_t origin_chunk_z;
+		uint32_t origin_distance;
+		uint64_t queued_frame;
+		bool interactive;
 	};
 
 	std::atomic<uint64_t> remesh_snapshot_bytes_ = 0U;
@@ -122,6 +130,7 @@ class WorldChunkStreamer
 		int32_t chunk_z;
 		uint64_t voxel_revision;
 		uint64_t light_revision;
+		ft_bool interactive;
 		voxel_light_update_config light_update_config;
 	};
 	std::deque<RemeshCaptureTask> remesh_capture_tasks_;
@@ -130,6 +139,7 @@ class WorldChunkStreamer
 	std::thread remesh_capture_thread_;
 	bool remesh_capture_stopping_ = false;
 	std::atomic<std::size_t> remesh_capture_in_flight_ = 0U;
+	std::atomic<uint64_t> remesh_capture_relevance_epoch_ = 1U;
 
 	WorldChunkStreamer(World &world);
 	WorldChunkStreamer(const WorldChunkStreamer &other);
@@ -147,6 +157,9 @@ class WorldChunkStreamer
 	int32_t set_light_update_config(
 		const voxel_light_update_config &config) noexcept;
 	const voxel_light_update_config &light_update_config() const noexcept;
+	int32_t set_interactive_light_update_config(
+		const voxel_light_update_config &config) noexcept;
+	const voxel_light_update_config &interactive_light_update_config() const noexcept;
 	Diagnostics diagnostics() const noexcept;
 
 	uint64_t allocate_request_id() noexcept;
@@ -162,6 +175,8 @@ class WorldChunkStreamer
 	void mark_neighbor_remeshes(int32_t chunk_x, int32_t chunk_z) noexcept;
 	int32_t queue_neighbor_remeshes(int32_t chunk_x, int32_t chunk_z) noexcept;
 	void prioritize_chunk_remesh(int32_t chunk_x, int32_t chunk_z) noexcept;
+	void prioritize_chunk_remesh_from_origin(int32_t chunk_x,
+		int32_t chunk_z, int32_t origin_chunk_x, int32_t origin_chunk_z) noexcept;
 	void prioritize_edit_border_remeshes(int32_t chunk_x, int32_t chunk_z) noexcept;
 	void enqueue_background_remesh(int32_t chunk_x, int32_t chunk_z) noexcept;
 

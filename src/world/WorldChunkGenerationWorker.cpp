@@ -250,6 +250,30 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 			return (result);
 		}
 	}
+	if (request.remesh_geometry_published == FT_FALSE)
+	{
+		result->mesh.reset(new (std::nothrow) chunk_mesh());
+		if (result->mesh == nullptr)
+		{
+			result->error_code = FT_ERR_NO_MEMORY;
+			return (result);
+		}
+		error_code = chunk_mesh_initialize(*result->mesh);
+		if (error_code == FT_ERR_SUCCESS)
+			error_code = chunk_mesh_generate_from_chunk_with_neighbors(
+				*result->mesh, *request.remesh_target, request.chunk_x,
+				request.chunk_z, &WorldChunkSnapshotReader::lookup_snapshot_block,
+				request.snapshot.get());
+		if (error_code != FT_ERR_SUCCESS)
+		{
+			result->error_code = error_code;
+			return (result);
+		}
+		result->stage_mask = WorldGenerationPipeline::Result::STAGE_GEOMETRY_ONLY;
+		request.remesh_geometry_published = FT_TRUE;
+		request.remesh_in_progress = FT_TRUE;
+		return (result);
+	}
 	voxel_light_update_config_defaults(light_config);
 	light_config = request.light_update_config;
 	if (voxel_light_update_config_is_valid(light_config) == FT_FALSE)

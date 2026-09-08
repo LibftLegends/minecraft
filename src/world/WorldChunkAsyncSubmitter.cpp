@@ -163,7 +163,8 @@ int32_t WorldChunkAsyncSubmitter::submit_dirty_remeshes(
 	/* Initial generation owns the shared workers until every required
 	 * playable candidate is published. Initial meshes already contain local
 	 * light; border relights can safely follow once the ring exists. */
-	if (playable_ring_is_ready(streamer) == false)
+	if (playable_ring_is_ready(streamer) == false
+		&& !streamer.priority_remesh_pending_)
 		return (FT_ERR_SUCCESS);
 	if (streamer.stream_frame_ < streamer.next_remesh_submission_frame_)
 		return (FT_ERR_SUCCESS);
@@ -282,12 +283,48 @@ int32_t WorldChunkAsyncSubmitter::submit_dirty_remeshes(
 int32_t WorldChunkAsyncSubmitter::stream_chunks_async(WorldChunkStreamer &streamer,
 	int32_t stream_radius, int32_t budget, int32_t *generated) noexcept
 {
+	int32_t error_code;
 	int32_t submitted;
 	int32_t scanned;
 	int32_t candidate_count;
+	bool interactive_pending;
 
 	(void)generated;
 	(void)stream_radius;
+	/* Dirty edit/remesh work has priority over streaming new chunks.  This
+	 * submits the edited geometry and its bounded lighting work before the
+	 * candidate scanner can consume the frame's worker capacity. */
+	error_code = WorldChunkAsyncSubmitter::submit_dirty_remeshes(streamer);
+	if (error_code != FT_ERR_SUCCESS)
+		return (error_code);
+	/* A priority request may still be in immutable snapshot capture even after
+	 * this pass has submitted it. Do not let a new generation request overtake
+	 * that edit/light work before it reaches the worker pipeline. */
+	interactive_pending = false;
+	for (const WorldChunkStreamer::RemeshPriority &priority
+		: streamer.priority_remeshes_)
+	{
+		if (priority.interactive)
+		{
+			interactive_pending = true;
+			break ;
+		}
+	}
+	if (!interactive_pending)
+	{
+		std::lock_guard<std::mutex> lock(streamer.remesh_capture_mutex_);
+		for (const WorldChunkStreamer::RemeshCaptureTask &task
+			: streamer.remesh_capture_tasks_)
+		{
+			if (task.interactive != FT_FALSE)
+			{
+				interactive_pending = true;
+				break ;
+			}
+		}
+	}
+	if (interactive_pending)
+		return (FT_ERR_SUCCESS);
 	submitted = 0;
 	scanned = 0;
 	candidate_count = static_cast<int32_t>(streamer.stream_candidates_.size());
@@ -302,5 +339,5 @@ int32_t WorldChunkAsyncSubmitter::stream_chunks_async(WorldChunkStreamer &stream
 				candidate, &submitted, budget))
 			break ;
 	}
-	return (WorldChunkAsyncSubmitter::submit_dirty_remeshes(streamer));
+	return (FT_ERR_SUCCESS);
 }

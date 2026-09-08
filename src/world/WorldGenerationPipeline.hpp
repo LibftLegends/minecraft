@@ -51,6 +51,7 @@ class WorldGenerationPipeline
 
 	struct							Result
 	{
+		static constexpr uint32_t STAGE_GEOMETRY_ONLY = 1U << 0;
 		uint64_t					request_id;
 		uint64_t					world_epoch;
 		uint64_t					relevance_epoch;
@@ -100,6 +101,8 @@ class WorldGenerationPipeline
 		std::unique_ptr<voxel_light_chunk> remesh_light;
 		std::unique_ptr<game_voxel_chunk> remesh_target;
 		ft_bool remesh_in_progress;
+		ft_bool remesh_geometry_published;
+		ft_bool remesh_interactive;
 		std::unique_ptr<WorldChunkSnapshot> snapshot;
 		std::vector<WorldDeferredBlockEdit> deferred_edits;
 	};
@@ -122,7 +125,8 @@ class WorldGenerationPipeline
 		uint64_t relevance_epoch, uint32_t generation_revision, int32_t chunk_x,
 		int32_t chunk_z, uint64_t voxel_revision, uint64_t light_revision,
 		WorldChunkSnapshot &&snapshot,
-		const voxel_light_update_config *light_update_config = nullptr) noexcept;
+		const voxel_light_update_config *light_update_config = nullptr,
+		ft_bool interactive = FT_FALSE) noexcept;
 	int32_t poll(std::unique_ptr<Result> &result) noexcept;
 	void retire_result(std::unique_ptr<Result> result) noexcept;
 	int32_t retire_chunk(std::unique_ptr<WorldChunk> chunk) noexcept;

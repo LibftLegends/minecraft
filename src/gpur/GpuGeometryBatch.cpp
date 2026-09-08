@@ -214,6 +214,8 @@ void GpuGeometryBatch::sync_pending_visible_meshes(const Camera &camera,
 				 * remesh result is published. Never upload that old mesh under the new
 				 * revision. */
 				if (chunk.mesh_dirty && chunk.voxel_revision > 1U
+					&& chunk.mesh_revision
+						<= _chunk_meshes[slot].uploaded_revision()
 					&& _chunk_meshes[slot].uploaded_coordinates_match(
 						chunk.chunk_x, chunk.chunk_z))
 				{
