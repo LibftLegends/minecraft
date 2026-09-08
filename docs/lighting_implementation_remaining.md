@@ -600,9 +600,11 @@ human-readable diagnostics.
 
 Current branch checkpoints:
 
-- Minecraft `agent/analytics-performance`: `a533ea5` (with scheduler
-  reservation checkpoint `da7ff4b`), with Libft pointer update `4eef4d8`.
-- Libft `agent/compression-analytics-cardgame-scripting`: `33f8fdfb`.
+- Minecraft `agent/analytics-performance`: `98fa312787233e1894de91f3009e36f6204f680a`.
+- The Minecraft `Libft` gitlink resolves to
+  `33f8fdfb7fd987b4b34f78c2d047b2ca7311cfb`.
+- Libft `agent/compression-analytics-cardgame-scripting` is checked out at
+  `33f8fdfb7fd987b4b34f78c2d047b2ca7311cfb`.
 
 Implemented in these checkpoints:
 
@@ -656,3 +658,58 @@ bounded-region mesh coalescing, and bounded main-thread mesh publication.
 Re-run the JSONL workload and full validator after each scheduler change. Do
 not mark the design complete until both failures are resolved and matched
 normal/analytics measurements are recorded.
+
+### State reconciliation after the latest branch verification
+
+The earlier Windows-oriented notes in this document are historical handoff
+evidence and must not be read as proof that the current Linux checkout has
+validated Windows. The current checkout was verified as follows:
+
+- Minecraft is on `agent/analytics-performance` at
+  `98fa312787233e1894de91f3009e36f6204f680a`.
+- Its `Libft` gitlink resolves to
+  `33f8fdfb7fd987b4b34f78c2d047b2ca7311cfb9`.
+- Libft is on `agent/compression-analytics-cardgame-scripting` at that same
+  commit, with no tracked changes.
+- The only Minecraft working-tree item is the pre-existing untracked
+  `ft_vox.rsp`; it is not part of this implementation and must not be folded
+  into a feature commit.
+- The redirected Linux analytics build produced a fresh
+  `/tmp/ft_vox_analytics`. This confirms that the current source and
+  submodule pointer link together, but it is not Windows executable
+  validation.
+
+The compact Linux aggregate log at
+`/tmp/validate-all-after-startup-fix.log` reports
+`validate-all: passed failures=0`. It also reports:
+
+```text
+block-edit repeated: p50=115 ms p95=137 ms p99=137 ms max=138 ms
+async-worldgen: ok frame=126 initial_loaded=2 final_loaded=13
+first_visible_mesh_frame=62
+```
+
+The dedicated analytics workload is the more demanding repeated-edit sample
+and remains the performance gate for the unresolved scheduler work. Its latest
+result is:
+
+```text
+frames=7190 edits=64
+p50=137284 us p95=162049 us p99=172337 us
+light_nodes=343305110 snapshot_bytes=641077248
+queue_peak=392705 dirty_peak=13 stale_results=252 remesh_completed=391
+```
+
+These results are not contradictory: the aggregate validator performs a
+shorter 16-sample workload, while the dedicated analytics validator performs
+64 repeated edits and exposes queue accumulation and large snapshot copies.
+The aggregate pass proves that the current committed state is runnable; it
+does not close the incremental-lighting performance requirement.
+
+The next Windows implementation pass must reproduce both workloads with a
+freshly compiled normal executable and analytics executable, recording the
+branch, Minecraft commit, Libft commit, build variant, and configuration in
+each report. Compare normal and analytics runs separately before attributing
+latency to instrumentation. Keep the current high p99, snapshot total, queue
+peak, and stale-result count as the baseline; do not replace them with the
+shorter aggregate numbers.
