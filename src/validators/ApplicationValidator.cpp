@@ -36,6 +36,11 @@ int ApplicationValidator::validate_block_edit()
 	return (BlockEditValidator().validate());
 }
 
+int ApplicationValidator::validate_block_edit_performance()
+{
+	return (BlockEditPerformanceValidator().validate());
+}
+
 int ApplicationValidator::validate_camera_interaction()
 {
 	return (CameraInteractionValidator().validate());

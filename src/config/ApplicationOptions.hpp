@@ -18,6 +18,7 @@ class ApplicationOptions
 	bool validate_camera_speed_mode;
 	bool validate_collision_mode;
 	bool validate_block_edit_mode;
+	bool validate_block_edit_performance_mode;
 	bool validate_camera_interaction_mode;
 	bool validate_visible_distance_mode;
 	bool validate_voxel_determinism_mode;

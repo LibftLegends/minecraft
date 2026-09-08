@@ -2,6 +2,7 @@
 # define APPLICATION_VALIDATOR_HPP
 
 # include "../../src/validators/BlockEditValidator.hpp"
+# include "../../src/validators/BlockEditPerformanceValidator.hpp"
 # include "../../src/validators/CameraInteractionValidator.hpp"
 # include "../../src/validators/CameraSpeedValidator.hpp"
 # include "../../src/validators/CollisionValidator.hpp"
@@ -26,6 +27,7 @@ class ApplicationValidator
 	static int validate_camera_speed();
 	static int validate_collision();
 	static int validate_block_edit();
+	static int validate_block_edit_performance();
 	static int validate_camera_interaction();
 	static int validate_visible_distance();
 	static int validate_voxel_determinism();

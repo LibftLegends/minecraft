@@ -18,6 +18,7 @@ SRC = \
     src/diagnostics/FramebufferHasher.cpp \
     src/diagnostics/SystemMemoryInfo.cpp \
     src/diagnostics/RuntimeAnalytics.cpp \
+    src/diagnostics/BlockEditWorkloadAnalytics.cpp \
     src/camera/CameraInput.cpp \
     src/camera/Camera.cpp \
     src/player/PlayerController.cpp \
@@ -33,6 +34,7 @@ SRC = \
     src/validators/CollisionValidator.cpp \
     src/validators/CollisionTerrainScenarios.cpp \
     src/validators/BlockEditValidator.cpp \
+    src/validators/BlockEditPerformanceValidator.cpp \
 	src/validators/CameraInteractionValidator.cpp \
     src/validators/RendererPublicationValidator.cpp \
     src/validators/WorldVisibilityValidator.cpp \

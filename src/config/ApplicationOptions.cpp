@@ -6,7 +6,8 @@ ApplicationOptions::ApplicationOptions() : perf_test_mode(false),
 	auto_start(false),
 	worldgen_probe_mode(false),
 	validate_camera_speed_mode(false), validate_collision_mode(false),
-	validate_block_edit_mode(false), validate_camera_interaction_mode(false),
+	validate_block_edit_mode(false), validate_block_edit_performance_mode(false),
+	validate_camera_interaction_mode(false),
 	validate_visible_distance_mode(false),
 	validate_voxel_determinism_mode(false), validate_world_scale_mode(false),
 	validate_caves_mode(false), validate_voxel_configuration_mode(false),
@@ -24,7 +25,8 @@ ApplicationOptions::ApplicationOptions(const ApplicationOptions &other) : perf_t
 	auto_start(false),
 	worldgen_probe_mode(false),
 	validate_camera_speed_mode(false), validate_collision_mode(false),
-	validate_block_edit_mode(false), validate_camera_interaction_mode(false),
+	validate_block_edit_mode(false), validate_block_edit_performance_mode(false),
+	validate_camera_interaction_mode(false),
 	validate_visible_distance_mode(false),
 	validate_voxel_determinism_mode(false), validate_world_scale_mode(false),
 	validate_caves_mode(false), validate_voxel_configuration_mode(false),
@@ -55,6 +57,8 @@ ApplicationOptions &ApplicationOptions::operator=(const ApplicationOptions &othe
 		validate_camera_speed_mode = other.validate_camera_speed_mode;
 		validate_collision_mode = other.validate_collision_mode;
 		validate_block_edit_mode = other.validate_block_edit_mode;
+		validate_block_edit_performance_mode =
+			other.validate_block_edit_performance_mode;
 		validate_camera_interaction_mode = other.validate_camera_interaction_mode;
 		validate_visible_distance_mode = other.validate_visible_distance_mode;
 		validate_voxel_determinism_mode = other.validate_voxel_determinism_mode;
@@ -94,6 +98,8 @@ int ApplicationOptions::parse(int argc, char **argv)
 			"--validate-collision");
 	validate_block_edit_mode = CommandLine::has_flag(argc, argv,
 			"--validate-block-edit");
+	validate_block_edit_performance_mode = CommandLine::has_flag(argc, argv,
+			"--validate-block-edit-performance");
 	validate_camera_interaction_mode = CommandLine::has_flag(argc, argv,
 			"--validate-camera-interaction");
 	validate_visible_distance_mode = CommandLine::has_flag(argc, argv,

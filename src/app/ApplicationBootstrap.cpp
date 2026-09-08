@@ -33,6 +33,8 @@ int ApplicationBootstrap::run_validators(const ApplicationOptions &options)
 		return (ApplicationValidator::validate_collision());
 	if (options.validate_block_edit_mode)
 		return (ApplicationValidator::validate_block_edit());
+	if (options.validate_block_edit_performance_mode)
+		return (ApplicationValidator::validate_block_edit_performance());
 	if (options.validate_camera_interaction_mode)
 		return (ApplicationValidator::validate_camera_interaction());
 	if (options.validate_visible_distance_mode)
