@@ -8,7 +8,7 @@
 
 namespace
 {
-	static const uint64_t MAX_WORKLOAD_FRAMES = 4096U;
+	static const uint64_t MAX_WORKLOAD_FRAMES = 65536U;
 	static const uint64_t DEFAULT_EDIT_COUNT = 64U;
 	static const int32_t EDIT_X = 2;
 	static const int32_t EDIT_Z = -6;
