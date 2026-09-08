@@ -318,10 +318,12 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
 	mesh_start = std::chrono::steady_clock::now();
 	#endif
-	result->error_code = chunk_mesh_generate_from_chunk_with_neighbors(
+	result->error_code =
+		chunk_mesh_generate_from_chunk_with_neighbors_and_light_lookup(
 		*result->mesh, *request.remesh_target, request.chunk_x, request.chunk_z,
 		&WorldChunkSnapshotReader::lookup_snapshot_block, request.snapshot.get(),
-		result->light.get());
+		result->light.get(), &voxel_light_build_operation_lookup,
+		request.remesh_light_operation.get());
 	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
 	{
 		const uint64_t mesh_us = static_cast<uint64_t>(
