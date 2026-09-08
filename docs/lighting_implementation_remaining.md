@@ -595,3 +595,52 @@ JSON line containing frames, loaded chunks, snapshot bytes, scanned/propagated
 cells, light queue peak, completed remeshes, stale results, and first-visible-
 mesh frame. A CI wrapper can retain this line as an artifact without parsing
 human-readable diagnostics.
+
+## Continuation checkpoint: 2026-09-08
+
+Current branch checkpoints:
+
+- Minecraft `agent/analytics-performance`: `b33016c`, with Libft pointer
+  update `4eef4d8`.
+- Libft `agent/compression-analytics-cardgame-scripting`: `33f8fdfb`.
+
+Implemented in these checkpoints:
+
+- Remesh meshing can query completed lighting in world coordinates. Chunk-edge
+  face samples no longer wrap back into the target chunk, fixing a direct
+  cause of black side faces. The packed-light vertex stride remains 16 bytes,
+  with focused tests for cardinal edge samples, emissive faces, and greedy
+  light boundaries.
+- Surface water no longer reshapes terrain to a fixed deep bed. Runtime river
+  and lake depth limits are serialized, validated, and included in the
+  configuration signature. Water is emitted after terrain/caves and before
+  decoration; underground water checks headroom, roof bounds, and configured
+  depth. The connected-water regression's post-loop out-of-bounds index was
+  removed.
+- The camera validator exercises ordinary pitch clamping, ray targeting,
+  deletion, receiving-face selection, collision validation, and placement.
+- `--validate-block-edit-performance` records repeated edit latency, world
+  drain time, scanned plus propagated light nodes, snapshot bytes, queue peak,
+  dirty remesh count, stale results, and completed remeshes in JSONL.
+- Analytics diagnostics use Basic's `FT_UINT64_DECIMAL_FORMAT` for portable
+  Linux/Windows formatting.
+
+The fresh analytics build and focused camera validator pass. The full
+analytics `--validate-all` run still exposes two unresolved issues:
+
+1. Startup generation reached 111--112 loaded chunks but timed out at frame
+   1200 with playable chunks `(2,0)` and `(0,2)` missing. Two persistent
+   remesh jobs repeatedly caused priority submissions to return `FT_ERR_BUSY`;
+   generation/remesh fairness and candidate reservation still need correction.
+2. The repeated-break workload records successful edits but can outrun the
+   current two-job remesh window. A 64-edit analytics run reached its frame
+   cap with a pending remesh request. This is a required performance failure
+   to fix, not a reason to lower the workload.
+
+The next implementation must preserve immutable snapshots and revision
+guards while adding explicit playable-ring generation reservation, a
+persistent per-frame lighting budget that cannot be starved, dirty-section or
+bounded-region mesh coalescing, and bounded main-thread mesh publication.
+Re-run the JSONL workload and full validator after each scheduler change. Do
+not mark the design complete until both failures are resolved and matched
+normal/analytics measurements are recorded.
