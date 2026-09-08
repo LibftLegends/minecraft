@@ -178,14 +178,17 @@ void WorldChunkStreamer::run_remesh_capture_worker() noexcept
 			task.chunk_z, snapshot);
 		if (error_code == FT_ERR_SUCCESS)
 		{
+			uint64_t snapshot_element_count;
+
+			snapshot_element_count = snapshot.blocks.size()
+				+ snapshot.lighting_blocks.size()
+				+ snapshot.west_border.size()
+				+ snapshot.east_border.size()
+				+ snapshot.north_border.size()
+				+ snapshot.south_border.size();
 			this->remesh_snapshot_bytes_.fetch_add(
-				(static_cast<uint64_t>(snapshot.blocks.size())
-					+ static_cast<uint64_t>(snapshot.lighting_blocks.size())
-					+ static_cast<uint64_t>(snapshot.west_border.size())
-					+ static_cast<uint64_t>(snapshot.east_border.size())
-					+ static_cast<uint64_t>(snapshot.north_border.size())
-					+ static_cast<uint64_t>(snapshot.south_border.size()))
-					* sizeof(uint32_t));
+				(snapshot_element_count)
+				* sizeof(uint32_t));
 			error_code = this->generation_pipeline_.submit_remesh(
 				task.request_id, task.world_epoch, task.relevance_epoch,
 				task.generation_revision, task.chunk_x, task.chunk_z,
@@ -440,7 +443,6 @@ void WorldChunkStreamer::reset_candidates_after_regeneration() noexcept
 
 int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk) noexcept
 {
-	int32_t error_code;
 	uint64_t request_id;
 	const voxel_light_update_config *resolved_light_config;
 
