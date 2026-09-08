@@ -114,6 +114,14 @@ int ApplicationValidator::validate_all()
 		std::fprintf(stderr, "[Validator] block-edit failed: %d\n", error_code);
 		failure_count += 1;
 	}
+	std::fprintf(stderr, "[Validator] camera-interaction: begin\n");
+	error_code = ApplicationValidator::validate_camera_interaction();
+	if (error_code != 0)
+	{
+		std::fprintf(stderr, "[Validator] camera-interaction failed: %d\n",
+			error_code);
+		failure_count += 1;
+	}
 	std::fprintf(stderr, "[Validator] visible-distance: begin\n");
 	error_code = ApplicationValidator::validate_visible_distance();
 	if (error_code != 0)
