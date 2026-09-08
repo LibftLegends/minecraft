@@ -600,8 +600,8 @@ human-readable diagnostics.
 
 Current branch checkpoints:
 
-- Minecraft `agent/analytics-performance`: `b33016c`, with Libft pointer
-  update `4eef4d8`.
+- Minecraft `agent/analytics-performance`: `a533ea5` (with scheduler
+  reservation checkpoint `da7ff4b`), with Libft pointer update `4eef4d8`.
 - Libft `agent/compression-analytics-cardgame-scripting`: `33f8fdfb`.
 
 Implemented in these checkpoints:
@@ -625,17 +625,29 @@ Implemented in these checkpoints:
 - Analytics diagnostics use Basic's `FT_UINT64_DECIMAL_FORMAT` for portable
   Linux/Windows formatting.
 
-The fresh analytics build and focused camera validator pass. The full
-analytics `--validate-all` run still exposes two unresolved issues:
+The focused async-startup validator now passes at frame 210 with 13 playable
+chunks. A generation-queue reservation and a startup gate prevent arrival
+relights from consuming the shared queue before the playable ring exists.
+The repeated-break workload also completes all 64 edits after extending its
+observation window to 65,536 frames. Its latest analytics result was:
 
-1. Startup generation reached 111--112 loaded chunks but timed out at frame
-   1200 with playable chunks `(2,0)` and `(0,2)` missing. Two persistent
-   remesh jobs repeatedly caused priority submissions to return `FT_ERR_BUSY`;
-   generation/remesh fairness and candidate reservation still need correction.
-2. The repeated-break workload records successful edits but can outrun the
-   current two-job remesh window. A 64-edit analytics run reached its frame
-   cap with a pending remesh request. This is a required performance failure
-   to fix, not a reason to lower the workload.
+```text
+frames=7190 edits=64 p50=137284us p95=162049us p99=172337us
+light_nodes=343305110 snapshot_bytes=641077248 stale=252
+```
+
+The full analytics `--validate-all` run and workload still expose unresolved
+performance work:
+
+1. The aggregate run remains expensive because visible-distance and startup
+   validation share the same two-worker remesh window. Priority submissions
+   can return `FT_ERR_BUSY` while background work drains, even though focused
+   startup now converges.
+2. A 64-edit run completes, but p99 edit-to-mesh latency is approximately
+   172 ms and the workload copies approximately 641 MB of snapshots. The
+   current solver still scans large halo regions and publishes whole-chunk
+   meshes; this is measured performance work to fix, not a reason to lower
+   the workload.
 
 The next implementation must preserve immutable snapshots and revision
 guards while adding explicit playable-ring generation reservation, a
