@@ -6,6 +6,12 @@
 class WorldChunkGenerationWorker
 {
   public:
+	/*
+	 * These functions are pure request consumers.  They may run on a long-
+	 * lived worker thread and must never acquire World::world_data_mutex_,
+	 * query World, or retain a live WorldChunk pointer.  World access belongs
+	 * to the snapshot-capture/commit boundaries outside this class.
+	 */
 	WorldChunkGenerationWorker();
 	WorldChunkGenerationWorker(const WorldChunkGenerationWorker &other);
 	~WorldChunkGenerationWorker();

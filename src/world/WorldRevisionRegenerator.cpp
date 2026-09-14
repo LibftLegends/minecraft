@@ -75,7 +75,7 @@ int32_t WorldRevisionRegenerator::submit_chunk_regeneration(WorldRevisionManager
 	{
 		manager.progress_.record_error(error_code);
 		manager.progress_.finish();
-		world.chunk_streamer.pipeline().cancel_queued();
+		world.chunk_streamer.cancel_pending_remeshes();
 		return (error_code);
 	}
 	manager.progress_.set_job_count(manager.progress_.job_count() + 1U);
@@ -144,7 +144,7 @@ int32_t WorldRevisionRegenerator::finish(WorldRevisionManager &manager,
 	manager.revision_id_ += 1U;
 	manager.pending_ = false;
 	manager.selected_.clear();
-	world.chunk_streamer.pipeline().cancel_queued();
+	world.chunk_streamer.cancel_pending_remeshes();
 	world.chunk_streamer.bump_generation_revision();
 	world.chunk_streamer.reset_candidates_after_regeneration();
 	return (FT_ERR_SUCCESS);

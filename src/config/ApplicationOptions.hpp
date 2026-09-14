@@ -29,6 +29,10 @@ class ApplicationOptions
 	bool validate_async_generation_mode;
 	bool validate_network_repair_mode;
 	bool validate_renderer_publication_mode;
+	bool validate_lighting_harness_mode;
+	bool validate_lighting_stress_mode;
+	bool validate_lighting_scheduled_stress_mode;
+	bool validate_lighting_lifecycle_mode;
 	bool validate_all_mode;
 	double perf_seconds_limit;
 

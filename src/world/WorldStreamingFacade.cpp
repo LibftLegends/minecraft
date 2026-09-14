@@ -29,12 +29,13 @@ int32_t World::capture_remesh_snapshot(int32_t chunk_x, int32_t chunk_z,
 	WorldGenerationPipeline::WorldChunkSnapshot &snapshot) const noexcept
 {
 	const WorldChunk *target;
+	int32_t error_code;
 	std::shared_lock<std::shared_mutex> read_lock(this->world_data_mutex_);
 
 	target = this->find_chunk(chunk_x, chunk_z);
 	if (target == nullptr || !target->initialized)
 		return (FT_ERR_NOT_FOUND);
-	return (this->chunk_streamer.pipeline().capture_snapshot(*target,
+	error_code = this->chunk_streamer.pipeline().capture_snapshot(*target,
 		this->find_chunk(chunk_x - 1, chunk_z),
 		this->find_chunk(chunk_x + 1, chunk_z),
 		this->find_chunk(chunk_x, chunk_z - 1),
@@ -42,18 +43,54 @@ int32_t World::capture_remesh_snapshot(int32_t chunk_x, int32_t chunk_z,
 		this->find_chunk(chunk_x - 1, chunk_z - 1),
 		this->find_chunk(chunk_x + 1, chunk_z - 1),
 		this->find_chunk(chunk_x - 1, chunk_z + 1),
-		this->find_chunk(chunk_x + 1, chunk_z + 1), snapshot));
+		this->find_chunk(chunk_x + 1, chunk_z + 1), snapshot);
+#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	if (error_code != FT_ERR_SUCCESS)
+		std::fprintf(stderr,
+			"[WorldGen] capture_remesh_snapshot result chunk=(%d,%d) error=%d\n",
+			chunk_x, chunk_z, error_code);
+#endif
+	return (error_code);
+}
+
+bool World::remesh_capture_is_current(int32_t chunk_x, int32_t chunk_z,
+	uint64_t request_id, uint64_t voxel_revision,
+	uint64_t light_revision, uint16_t content_version,
+	uint16_t light_input_version) const noexcept
+{
+	const WorldChunk *chunk;
+	std::shared_lock<std::shared_mutex> read_lock(this->world_data_mutex_);
+
+	chunk = this->find_chunk(chunk_x, chunk_z);
+	if (chunk == nullptr || !chunk->initialized)
+		return (false);
+	if (chunk->pending_mesh_request_id != request_id)
+		return (false);
+	if (chunk->voxel_revision != voxel_revision)
+		return (false);
+	if (chunk->light_revision != light_revision)
+		return (false);
+	if (chunk->content_version != content_version
+		|| chunk->light_input_version != light_input_version)
+		return (false);
+	return (true);
 }
 
 void World::clear_pending_remesh(int32_t chunk_x, int32_t chunk_z,
 	uint64_t request_id) noexcept
 {
 	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
+	this->clear_pending_remesh_unlocked(chunk_x, chunk_z, request_id);
+}
+
+void World::clear_pending_remesh_unlocked(int32_t chunk_x, int32_t chunk_z,
+	uint64_t request_id) noexcept
+{
 	WorldChunk *chunk = this->find_chunk_mutable(chunk_x, chunk_z);
 
 	if (chunk != nullptr && chunk->pending_mesh_request_id == request_id)
 	{
-		chunk->pending_mesh_request_id = 0U;
+		chunk->clear_pending_remesh_request();
 		chunk->mesh_dirty = true;
 	}
 }
@@ -165,7 +202,7 @@ int32_t World::update_around(double camera_x, double camera_z,
 			(void)this->chunk_streamer.pipeline().retire_chunk(std::move(retired));
 		for (std::size_t index = 0U; index < evicted_chunk_x.size(); ++index)
 			this->chunk_streamer.mark_neighbor_remeshes(evicted_chunk_x[index],
-				evicted_chunk_z[index]);
+				evicted_chunk_z[index], false, true);
 		this->rebuild_chunk_index();
 #if defined(LIBFT_ENABLE_ANALYTICS)
 		loaded_after_recenter = this->loaded_chunk_count;
@@ -256,18 +293,36 @@ World::StreamDiagnostics World::stream_diagnostics() const
 	diagnostics.playable_drawable_count = source.playable_drawable_count;
 	diagnostics.active_generation_count = source.active_generation_count;
 	diagnostics.remesh_queue_peak = source.remesh_queue_peak;
+	diagnostics.remesh_starvation_promotions =
+		source.remesh_starvation_promotions;
 	diagnostics.remesh_priority_queue_depth = source.remesh_priority_queue_depth;
 	diagnostics.interactive_remesh_queue_depth =
 		source.interactive_remesh_queue_depth;
 	diagnostics.oldest_remesh_queue_age = source.oldest_remesh_queue_age;
 	diagnostics.remesh_snapshot_bytes = source.remesh_snapshot_bytes;
+	diagnostics.remesh_capture_duration_nanoseconds =
+		source.remesh_capture_duration_nanoseconds;
+	diagnostics.remesh_capture_count = source.remesh_capture_count;
 	diagnostics.remesh_scanned_cells = source.remesh_scanned_cells;
 	diagnostics.remesh_propagated_cells = source.remesh_propagated_cells;
 	diagnostics.remesh_light_queue_peak = source.remesh_light_queue_peak;
 	diagnostics.remesh_completed_count = source.remesh_completed_count;
+	diagnostics.remesh_incremental_completed_count =
+		source.remesh_incremental_completed_count;
+	diagnostics.remesh_full_completed_count = source.remesh_full_completed_count;
+	diagnostics.remesh_geometry_only_count = source.remesh_geometry_only_count;
+	diagnostics.remesh_canceled_count = source.remesh_canceled_count;
 	diagnostics.stale_result_count = source.stale_result_count;
 	diagnostics.stale_stream_result_count = source.stale_stream_result_count;
 	diagnostics.stale_remesh_result_count = source.stale_remesh_result_count;
+	diagnostics.stale_remesh_capture_count =
+		source.stale_remesh_capture_count;
+	diagnostics.stale_remesh_dependency_count =
+		source.stale_remesh_dependency_count;
+	diagnostics.stale_remesh_pending_count =
+		source.stale_remesh_pending_count;
+	diagnostics.stale_remesh_revision_count =
+		source.stale_remesh_revision_count;
 	diagnostics.oldest_result_age_nanoseconds =
 		source.oldest_result_age_nanoseconds;
 	diagnostics.oldest_pending_age = source.oldest_pending_age;
@@ -330,6 +385,10 @@ int32_t World::apply_authoritative_block_change(
 	WorldChunk *world_chunk;
 	uint64_t previous_revision;
 	uint64_t current_revision;
+	uint32_t existing_block_id;
+	uint8_t existing_light;
+	ft_bool incremental_additive_light;
+	ft_bool incremental_removal_light;
 	game_block_edit_op edit;
 	WorldEditHistory::Record record;
 	int32_t error_code;
@@ -341,6 +400,12 @@ int32_t World::apply_authoritative_block_change(
 	world_chunk = this->find_chunk_mutable(request.chunk_x, request.chunk_z);
 	if (world_chunk == nullptr)
 		return (FT_ERR_NOT_FOUND);
+	error_code = world_chunk->chunk.read_block(request.local_x,
+		request.local_y, request.local_z, &existing_block_id);
+	if (error_code != FT_ERR_SUCCESS)
+		return (error_code);
+	existing_light = world_chunk->light.get(request.local_x, request.local_y,
+		request.local_z);
 	previous_revision = world_chunk->chunk.get_revision();
 	error_code = world_chunk->chunk.apply_authoritative_block_change(request,
 		delta_out);
@@ -350,9 +415,22 @@ int32_t World::apply_authoritative_block_change(
 	if (current_revision == previous_revision)
 		return (FT_ERR_SUCCESS);
 	world_chunk->voxel_revision = current_revision;
+	world_chunk->content_version = world_light_version::next(
+		world_chunk->content_version);
+	world_chunk->mark_light_input_changed();
 	this->mark_geometry_changed();
 	this->chunk_streamer.mark_remesh_dirty(*world_chunk);
-	world_chunk->pending_mesh_request_id = 0U;
+	error_code = world_chunk->publish_read_state_after_block_edit(
+		static_cast<int32_t>(request.local_x),
+		static_cast<int32_t>(request.local_y),
+		static_cast<int32_t>(request.local_z), request.requested_block_id);
+	if (error_code != FT_ERR_SUCCESS)
+		return (error_code);
+	/* An accepted authoritative edit supersedes any capture or light solve
+	 * based on the previous voxel revision.  Cancel it before submitting the
+	 * new incremental request so its result cannot consume worker time or
+	 * compete with the edit publication. */
+	world_chunk->cancel_remesh_work();
 	edit.world_x = request.chunk_x * GAME_VOXEL_CHUNK_WIDTH
 		+ static_cast<int32_t>(request.local_x);
 	edit.world_y = static_cast<int32_t>(request.local_y);
@@ -363,16 +441,44 @@ int32_t World::apply_authoritative_block_change(
 	record.edit = edit;
 	record.previous_block_id = request.expected_block_id;
 	this->edit_history.record(record);
-	this->chunk_streamer.mark_neighbor_remeshes(request.chunk_x,
-		request.chunk_z);
+	this->chunk_streamer.mark_edit_remeshes(request.chunk_x,
+		request.chunk_z, static_cast<int32_t>(request.local_x),
+		static_cast<int32_t>(request.local_y),
+		static_cast<int32_t>(request.local_z));
+	incremental_additive_light = FT_FALSE;
+	incremental_removal_light = FT_FALSE;
+	if (request.requested_block_id == GAME_VOXEL_AIR_BLOCK)
+	{
+		if (voxel_block_emitted_light_level(existing_block_id) == 0U)
+			incremental_additive_light = FT_TRUE;
+		else
+			/* Removing an emitter is always a removal solve.  The old light
+			 * value may contain sky light as well as block light; that must not
+			 * downgrade this to a full rebuild (or leave the edit without an
+			 * incremental path).  The removal frontier preserves/restores the
+			 * sky channel independently while subtracting the emitter's block
+			 * contribution. */
+			incremental_removal_light = FT_TRUE;
+	}
+	else
+		incremental_removal_light = FT_TRUE;
 	this->chunk_streamer.prioritize_edit_border_remeshes(request.chunk_x,
-		request.chunk_z);
+		request.chunk_z, static_cast<int32_t>(request.local_x),
+		static_cast<int32_t>(request.local_y),
+		static_cast<int32_t>(request.local_z), incremental_additive_light,
+		incremental_removal_light, existing_block_id,
+		request.requested_block_id, existing_light);
 	/* Authoritative edits follow the same immediate publication path as local
 	 * edits. If the single remesh slot is occupied, the priority queue retries
 	 * the request without losing the edit notification. */
-	if (this->chunk_streamer.queue_chunk_remesh(*world_chunk) != FT_ERR_SUCCESS
+	if (this->chunk_streamer.queue_chunk_remesh(*world_chunk,
+		incremental_additive_light, incremental_removal_light,
+		static_cast<int32_t>(request.local_x),
+		static_cast<int32_t>(request.local_y),
+		static_cast<int32_t>(request.local_z), existing_block_id,
+		request.requested_block_id) != FT_ERR_SUCCESS
 		&& world_chunk->pending_mesh_request_id == 0U)
-		this->chunk_streamer.prioritize_edit_border_remeshes(request.chunk_x,
+		this->chunk_streamer.prioritize_chunk_remesh(request.chunk_x,
 			request.chunk_z);
 	return (FT_ERR_SUCCESS);
 }

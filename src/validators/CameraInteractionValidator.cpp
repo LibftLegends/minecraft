@@ -2,6 +2,8 @@
 #include "../../src/interaction/BlockInteractor.hpp"
 #include <cmath>
 #include <cstdio>
+#include <memory>
+#include <new>
 
 namespace
 {
@@ -78,7 +80,11 @@ CameraInteractionValidator &CameraInteractionValidator::operator=(
 
 int CameraInteractionValidator::validate() const
 {
-	World world;
+	std::unique_ptr<World> world_storage(new (std::nothrow) World());
+	if (world_storage == nullptr)
+		return (ApplicationError::fail("camera interaction world allocation",
+			FT_ERR_NO_MEMORY));
+	World &world = *world_storage;
 	Camera camera;
 	CameraInput input;
 	const double epsilon = 1.0e-9;

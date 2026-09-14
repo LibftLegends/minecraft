@@ -36,7 +36,14 @@ namespace
 			|| chunk->chunk_z != chunk_z)
 			chunk = WorldChunkStore::find_chunk(context->chunks,
 				context->chunk_count, chunk_x, chunk_z);
-		if (chunk == nullptr || chunk->initialized == false)
+		/* The target has already been generated when this callback is used by
+		 * initialize_chunk(), but it is deliberately not marked initialized
+		 * until lighting and the first mesh have completed.  Treating that target
+		 * as an unknown solid chunk suppresses sky light for the entire initial
+		 * mesh.  Neighbours still require the published/initialized state so an
+		 * in-flight chunk cannot be read as open air. */
+		if (chunk == nullptr || (chunk != context->target
+			&& chunk->initialized == false))
 		{
 			/* Unknown streamed space is a conservative solid boundary. It must
 			 * never become an accidental opening into the sky. */
@@ -177,8 +184,16 @@ int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk,
 	world_chunk->mesh_revision += 1U;
 	world_chunk->voxel_revision += 1U;
 	world_chunk->light_revision += 1U;
-	world_chunk->pending_mesh_request_id = 0U;
+	world_chunk->content_version = 1U;
+	world_chunk->light_version = 1U;
+	world_chunk->light_input_version = 1U;
+	world_chunk->computed_light_input_version = 1U;
+	world_chunk->light_ready_for_render = true;
+	world_chunk->clear_pending_remesh_request();
 	world_chunk->mesh_dirty = false;
+	err = world_chunk->publish_read_state();
+	if (err != FT_ERR_SUCCESS)
+		return (err);
 	return (FT_ERR_SUCCESS);
 }
 
@@ -202,8 +217,16 @@ int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk,
 	world_chunk->mesh_revision += 1U;
 	world_chunk->voxel_revision += 1U;
 	world_chunk->light_revision += 1U;
-	world_chunk->pending_mesh_request_id = 0U;
+	world_chunk->content_version = 1U;
+	world_chunk->light_version = 1U;
+	world_chunk->light_input_version = 1U;
+	world_chunk->computed_light_input_version = 1U;
+	world_chunk->light_ready_for_render = true;
+	world_chunk->clear_pending_remesh_request();
 	world_chunk->mesh_dirty = false;
+	err = world_chunk->publish_read_state();
+	if (err != FT_ERR_SUCCESS)
+		return (err);
 	return (FT_ERR_SUCCESS);
 }
 
@@ -227,8 +250,16 @@ int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk,
 	world_chunk->mesh_revision += 1U;
 	world_chunk->voxel_revision += 1U;
 	world_chunk->light_revision += 1U;
-	world_chunk->pending_mesh_request_id = 0U;
+	world_chunk->content_version = 1U;
+	world_chunk->light_version = 1U;
+	world_chunk->light_input_version = 1U;
+	world_chunk->computed_light_input_version = 1U;
+	world_chunk->light_ready_for_render = true;
+	world_chunk->clear_pending_remesh_request();
 	world_chunk->mesh_dirty = false;
+	err = world_chunk->publish_read_state();
+	if (err != FT_ERR_SUCCESS)
+		return (err);
 	return (FT_ERR_SUCCESS);
 }
 
@@ -261,7 +292,7 @@ int32_t WorldChunkLoader::remesh_chunk(WorldChunk *chunks, int32_t chunk_count,
 			chunk_z);
 	if (!wc)
 		return (FT_ERR_SUCCESS);
-	wc->pending_mesh_request_id = 0U;
+	wc->clear_pending_remesh_request();
 	wc->mesh_dirty = true;
 	light_context.chunks = chunks;
 	light_context.chunk_count = chunk_count;
@@ -279,6 +310,7 @@ int32_t WorldChunkLoader::remesh_chunk(WorldChunk *chunks, int32_t chunk_count,
 	{
 		wc->mesh_revision += 1U;
 		wc->mesh_dirty = false;
+		err = wc->publish_read_state();
 	}
 	return (err);
 }
@@ -294,7 +326,7 @@ int32_t WorldChunkLoader::remesh_chunk(WorldChunk *chunks, int32_t chunk_count,
 			chunk_z);
 	if (!wc)
 		return (FT_ERR_SUCCESS);
-	wc->pending_mesh_request_id = 0U;
+	wc->clear_pending_remesh_request();
 	wc->mesh_dirty = true;
 	light_context.chunks = chunks;
 	light_context.chunk_count = chunk_count;
@@ -315,6 +347,7 @@ int32_t WorldChunkLoader::remesh_chunk(WorldChunk *chunks, int32_t chunk_count,
 		{
 			wc->mesh_revision += 1U;
 			wc->mesh_dirty = false;
+			err = wc->publish_read_state();
 		}
 		return (err);
 	}
@@ -324,6 +357,7 @@ int32_t WorldChunkLoader::remesh_chunk(WorldChunk *chunks, int32_t chunk_count,
 	{
 		wc->mesh_revision += 1U;
 		wc->mesh_dirty = false;
+		err = wc->publish_read_state();
 	}
 	return (err);
 }

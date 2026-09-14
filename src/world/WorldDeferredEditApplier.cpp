@@ -63,7 +63,9 @@ int32_t WorldDeferredEditApplier::apply_single_edit(
 	if (chunk->chunk.write_generated_block(local_x, edit.world_y, local_z,
 			edit.block_id) != FT_ERR_SUCCESS)
 		return (FT_ERR_INVALID_OPERATION);
-	chunk->voxel_revision += 1U;
+	chunk->mark_content_changed();
+	if (chunk->publish_read_state() != FT_ERR_SUCCESS)
+		return (FT_ERR_NO_MEMORY);
 	/* A deferred edit can change both the edited chunk's lighting and the
 	 * border faces of every adjacent chunk.  Updating only the edited chunk
 	 * leaves a neighboring mesh with the old border occupancy, which can make
@@ -71,7 +73,7 @@ int32_t WorldDeferredEditApplier::apply_single_edit(
 	 * remesh happens.  Use the same 3x3 invalidation policy as authoritative
 	 * edits; the immediate queue below prioritizes the cardinal meshes whose
 	 * border faces are directly affected. */
-	streamer.mark_neighbor_remeshes(chunk->chunk_x, chunk->chunk_z);
+	streamer.mark_neighbor_remeshes(chunk->chunk_x, chunk->chunk_z, true);
 	world.mark_geometry_changed();
 	for (std::size_t touched_index = 0U;
 		touched_index < touched_chunks.size(); ++touched_index)

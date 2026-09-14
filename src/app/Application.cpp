@@ -1,5 +1,7 @@
 #include "../../src/app/Application.hpp"
 #include <cstdio>
+#include <memory>
+#include <new>
 
 namespace
 {
@@ -16,7 +18,10 @@ namespace
 
 int Application::run_worldgen_probe()
 {
-	World world;
+	std::unique_ptr<World> world_storage(new (std::nothrow) World());
+	if (world_storage == nullptr)
+		return (1);
+	World &world = *world_storage;
 	const int32_t max_iterations = 5000;
 	int32_t iteration = 0;
 	bool candidate_expanded = false;
@@ -272,7 +277,15 @@ int Application::run_game(ApplicationOptions &options,
 	ApplicationWindow	window;
 	VoxelRenderer		renderer;
 	MenuController		menu_ctl;
-	GameSession			game_session;
+	/* GameSession owns the complete world chunk cache.  Keeping it as a local
+	 * object puts that cache on the Windows main-thread stack; the analytics
+	 * build adds enough instrumentation frames to turn that into a stack
+	 * overflow during world startup.  Keep the heavyweight session on the
+	 * heap so stack usage is independent of the build instrumentation. */
+	std::unique_ptr<GameSession> game_session(
+		new (std::nothrow) GameSession());
+	if (game_session == nullptr)
+		return (1);
 
 	if (ApplicationBootstrap::setup_window(window, renderer,
 			launch_settings) != 0)
@@ -280,9 +293,9 @@ int Application::run_game(ApplicationOptions &options,
 	menu_ctl.show_main_menu();
 	if (options.auto_start)
 		menu_ctl.request_start("");
-	run_game_loop(window, menu_ctl, game_session, renderer, strategy);
-	if (game_session.is_active())
-		game_session.stop();
+	run_game_loop(window, menu_ctl, *game_session, renderer, strategy);
+	if (game_session->is_active())
+		game_session->stop();
 	window.set_cursor_visible(true);
 	window.destroy();
 	return (0);

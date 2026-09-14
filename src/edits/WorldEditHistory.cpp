@@ -76,7 +76,7 @@ int32_t WorldEditHistory::apply(World &world, const Record &entry,
 			block_id_to_write);
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
-	wc->voxel_revision += 1U;
+	wc->mark_content_changed();
 	world.mark_geometry_changed();
 	world.chunk_streamer.mark_remesh_dirty(*wc);
 	recorded_edit.world_x = entry.edit.world_x;
@@ -85,7 +85,7 @@ int32_t WorldEditHistory::apply(World &world, const Record &entry,
 	recorded_edit.block_type = block_id_to_write;
 	recorded_edit.tick = world.current_tick;
 	(void)wc->chunk.record_dirty_edit(recorded_edit);
-	world.chunk_streamer.mark_neighbor_remeshes(chunk_x, chunk_z);
+	world.chunk_streamer.mark_neighbor_remeshes(chunk_x, chunk_z, true);
 	return (FT_ERR_SUCCESS);
 }
 

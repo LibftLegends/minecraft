@@ -15,6 +15,7 @@ World::World() : chunk_streamer_storage_(new WorldChunkStreamer(*this)),
 	this->seed[0] = '\0';
 	voxel_default_generation_config(this->voxel_config);
 	this->voxel_generation_started = false;
+	this->lifecycle_active_ = false;
 	this->current_tick = 0U;
 	this->geometry_revision = 1U;
 	this->clear_chunk_index();
@@ -25,6 +26,8 @@ World::World(const World &other) : chunk_streamer_storage_(new WorldChunkStreame
 	revision_manager(*revision_manager_storage_.get())
 {
 	this->geometry_revision = 1U;
+	this->voxel_generation_started = false;
+	this->lifecycle_active_ = false;
 	(void)other;
 }
 
@@ -133,11 +136,12 @@ int32_t World::seed_first_chunk_and_stream()
 	this->chunks[0].mesh_revision = this->geometry_revision;
 	this->loaded_chunk_count = 1;
 	this->rebuild_chunk_index();
-	/* Startup must seed only the playable envelope. The first foreground update
-	 * expands the stream after loading, so initializing the full render-distance
-	 * ring here only floods the worker queue and delays the playable chunks. */
+	/* Seed a small warm baseline around the playable envelope.  The worker builds
+	 * each chunk's local light field before publishing its mesh, so this gives
+	 * the renderer several already-lit rings to work from without synchronously
+	 * generating the entire render distance during startup. */
 	initial_radius = WorldCoordinates::render_distance_to_chunk_radius(
-		WorldCoordinates::MIN_RENDER_DISTANCE);
+		WorldCoordinates::MIN_RENDER_DISTANCE + GAME_VOXEL_CHUNK_WIDTH * 2);
 	initial_generated = 0;
 	/* The center chunk is already synchronously initialized above. Keep the
 	 * rest of the first visible ring on the persistent generation workers so
@@ -156,6 +160,7 @@ int32_t World::initialize(const char *seed_value,
 	std::fprintf(stderr, "World initialize: reset\n");
 	#endif
 	this->destroy();
+	this->lifecycle_active_ = true;
 	this->chunk_count = WorldCoordinates::CHUNK_COUNT;
 	this->loaded_chunk_count = 0;
 	this->center_chunk_x = 0;
@@ -230,6 +235,9 @@ int32_t World::save_voxel_config(const char *file_path) const
 
 void World::destroy()
 {
+	if (!this->lifecycle_active_)
+		return ;
+	this->lifecycle_active_ = false;
     {
         std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
         this->world_epoch_ += 1U;

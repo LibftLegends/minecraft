@@ -70,6 +70,43 @@ GpuGeometryBatch &GpuGeometryBatch::operator=(const GpuGeometryBatch &other)
 	return (*this);
 }
 
+bool GpuGeometryBatch::border_neighbors_are_published(const World &world,
+	const WorldChunk &chunk) const
+{
+	static const int32_t OFFSETS[4][2] = {
+		{-1, 0}, {1, 0}, {0, -1}, {0, 1}
+	};
+	int32_t offset_index;
+
+	offset_index = 0;
+	while (offset_index < 4)
+	{
+		const WorldChunk *neighbor = world.find_chunk(
+			chunk.chunk_x + OFFSETS[offset_index][0],
+			chunk.chunk_z + OFFSETS[offset_index][1]);
+		if (neighbor != nullptr && neighbor->initialized)
+		{
+			if (neighbor->mesh_dirty
+				|| neighbor->pending_mesh_request_id != 0U)
+				return (false);
+			/* An empty neighbor has no GPU surface that can hide the boundary.
+			 * A populated neighbor must have its current mesh uploaded before the
+			 * changed chunk is allowed to publish a hole-facing replacement. */
+			if (neighbor->mesh.has_occupied_bounds != FT_FALSE)
+			{
+				int32_t slot = static_cast<int32_t>(neighbor - world.chunks);
+				if (slot < 0 || slot >= WorldCoordinates::CHUNK_COUNT
+					|| !_chunk_meshes[slot].identity_matches(
+						neighbor->mesh_revision, neighbor->chunk_x,
+						neighbor->chunk_z, neighbor->voxel_revision))
+					return (false);
+			}
+		}
+		offset_index += 1;
+	}
+	return (true);
+}
+
 bool GpuGeometryBatch::initialize()
 {
 	destroy();
@@ -168,7 +205,12 @@ void GpuGeometryBatch::sync_pending_visible_meshes(const Camera &camera,
 					 * publication.  Initial generated chunks use voxel revision 1;
 					 * a higher revision means the player/world changed this chunk
 					 * after that initial publication. */
-					if (pending_chunk.voxel_revision > 1U
+					const bool current_interactive_publication =
+						pending_chunk.last_mesh_publication_interactive != FT_FALSE
+						&& pending_chunk.last_mesh_publication_voxel_revision
+							== pending_chunk.voxel_revision;
+					if ((pending_chunk.owns_current_interactive_remesh()
+						|| current_interactive_publication)
 						&& (priority_pending_index < 0
 							|| pending_distance < priority_pending_distance))
 					{
@@ -200,20 +242,51 @@ void GpuGeometryBatch::sync_pending_visible_meshes(const Camera &camera,
 		else
 		{
 			const WorldChunk &chunk = world.chunks[slot];
-			if (!chunk.initialized
-				|| chunk.mesh.has_occupied_bounds == FT_FALSE)
+			const bool retain_previous_mesh = chunk.initialized
+				&& chunk.mesh_dirty
+				&& _chunk_meshes[slot].has_uploaded_geometry()
+				&& _chunk_meshes[slot].uploaded_coordinates_match(
+					chunk.chunk_x, chunk.chunk_z);
+			if (!chunk.initialized)
 			{
 				_chunk_meshes[slot].invalidate();
+			}
+			else if ((!chunk.light_ready_for_render
+				|| chunk.mesh.has_occupied_bounds == FT_FALSE)
+				&& !retain_previous_mesh)
+			{
+				_chunk_meshes[slot].invalidate();
+			}
+			else if ((!chunk.light_ready_for_render
+				|| chunk.mesh.has_occupied_bounds == FT_FALSE)
+				&& retain_previous_mesh)
+			{
+				/* A delete/remesh may temporarily have no drawable CPU payload.
+				 * Keep the last complete GPU publication until the replacement
+				 * result is committed; publishing an empty intermediate creates a
+				 * visible dark/flickering frame. */
+				visible_offset += 1;
+				continue ;
 			}
 			else if (_chunk_meshes[slot].needs_sync(chunk.mesh_revision,
 				chunk.chunk_x, chunk.chunk_z, chunk.voxel_revision))
 			{
+				if (chunk.border_mesh_publication_is_current()
+					&& !border_neighbors_are_published(world, chunk))
+				{
+					/* Do not publish a newly changed border while a loaded neighbor
+					 * still has the old occluding mesh.  Otherwise the target chunk
+					 * disappears first and exposes a one-frame hole until the neighbor
+					 * face upload catches up. */
+					visible_offset += 1;
+					continue ;
+				}
 				/* Keep the last committed GPU mesh visible while an edited chunk's
 				 * replacement is being built. The CPU chunk already has the new voxel
 				 * revision, but its mesh is still the old committed geometry until the
 				 * remesh result is published. Never upload that old mesh under the new
 				 * revision. */
-				if (chunk.mesh_dirty && chunk.voxel_revision > 1U
+				if (chunk.mesh_dirty
 					&& chunk.mesh_revision
 						<= _chunk_meshes[slot].uploaded_revision()
 					&& _chunk_meshes[slot].uploaded_coordinates_match(
@@ -222,10 +295,15 @@ void GpuGeometryBatch::sync_pending_visible_meshes(const Camera &camera,
 					visible_offset += 1;
 					continue ;
 				}
-				/* A storage slot can be reused after recentering. Do not draw the
-				 * previous chunk's GPU geometry at the new chunk's coordinates while
-				 * the replacement upload is waiting for its frame budget. */
-				_chunk_meshes[slot].invalidate();
+				/* Keep the last GPU publication visible while the replacement waits
+				 * for this frame's upload budget.  Invalidating here made every
+				 * remesh briefly disappear (and made a light publication look like
+				 * a black/flickering chunk) whenever the upload was deferred.  A
+				 * coordinate change is the one exception: old geometry must not be
+				 * drawn in a recycled storage slot at a different location. */
+				if (!_chunk_meshes[slot].uploaded_coordinates_match(
+					chunk.chunk_x, chunk.chunk_z))
+					_chunk_meshes[slot].invalidate();
 				const size_t mesh_bytes = chunk.mesh.vertices.size()
 					* sizeof(chunk_mesh_vertex)
 					+ chunk.mesh.solid_indices.size() * sizeof(uint32_t)
@@ -243,11 +321,43 @@ void GpuGeometryBatch::sync_pending_visible_meshes(const Camera &camera,
 							"Analytics: scheduled mesh upload scope start failed (%d)\n",
 							analytics_error);
 					const auto upload_start = std::chrono::steady_clock::now();
+					static uint32_t light_upload_diagnostics = 0U;
+					if (light_upload_diagnostics < 16U)
+					{
+						uint8_t minimum_light = 255U;
+						uint8_t maximum_light = 0U;
+						std::size_t nonzero_light = 0U;
+						for (std::size_t vertex_index = 0U;
+							vertex_index < chunk.mesh.vertices.size();
+							++vertex_index)
+						{
+							const uint8_t value = chunk.mesh.vertices[
+								vertex_index].packed_light;
+							if (value < minimum_light)
+								minimum_light = value;
+							if (value > maximum_light)
+								maximum_light = value;
+							if (value != 0U)
+								nonzero_light += 1U;
+						}
+						if (chunk.mesh.vertices.empty())
+							minimum_light = 0U;
+						std::fprintf(stderr,
+							"[Analytics][Render] upload_light chunk=(%d,%d) "
+							"vertices=%zu min=%u max=%u nonzero=%zu\n",
+							chunk.chunk_x, chunk.chunk_z,
+							chunk.mesh.vertices.size(),
+							static_cast<unsigned int>(minimum_light),
+							static_cast<unsigned int>(maximum_light),
+							nonzero_light);
+						light_upload_diagnostics += 1U;
+					}
 #endif
 					_chunk_meshes[slot].sync(chunk.mesh, chunk.mesh_revision,
 						chunk.chunk_x, chunk.chunk_z, chunk.voxel_revision);
-				#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
-					if (chunk.voxel_revision > 1U)
+				#if defined(DEBUG)
+					if (chunk.last_mesh_publication_interactive != FT_FALSE
+						|| chunk.owns_current_interactive_remesh())
 						std::fprintf(stderr,
 							"[RendererTrace] GPU upload slot=%d chunk=(%d,%d) voxel=%llu mesh=%llu\n",
 							slot, chunk.chunk_x, chunk.chunk_z,
@@ -321,8 +431,10 @@ void GpuGeometryBatch::collect(const Camera &camera, const World &world,
 #if defined(LIBFT_ENABLE_ANALYTICS)
 	int32_t		analytics_error;
 	const bool collect_diagnostics = (++_analytics_collect_frame % 120U == 0U);
-	static bool startup_collect_reported = false;
 	_analytics_collect_diagnostics = false;
+#endif
+#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	static bool startup_collect_reported = false;
 #endif
 #if defined(LIBFT_ENABLE_ANALYTICS)
 	if (collect_diagnostics)
@@ -445,7 +557,13 @@ void GpuGeometryBatch::collect(const Camera &camera, const World &world,
 			continue ;
 		}
 		const WorldChunk &wc = *scan_chunk;
-		if (!wc.initialized || wc.mesh.has_occupied_bounds == FT_FALSE)
+		const bool retain_previous_mesh = wc.initialized
+			&& wc.mesh_dirty
+			&& _chunk_meshes[slot].has_uploaded_geometry()
+			&& _chunk_meshes[slot].uploaded_coordinates_match(
+				wc.chunk_x, wc.chunk_z);
+		if (!wc.initialized || (wc.mesh.has_occupied_bounds == FT_FALSE
+			&& !retain_previous_mesh))
 		{
 			_chunk_meshes[slot].invalidate();
 			scanned_count += 1;
@@ -520,7 +638,8 @@ void GpuGeometryBatch::collect(const Camera &camera, const World &world,
 			 * deferred by the frame budget. The cache-sync path must be able to
 			 * revisit those chunks on the next frame; otherwise a cache miss can
 			 * permanently hide part of the world until the camera moves again. */
-			if (wc.mesh.has_occupied_bounds == FT_TRUE)
+			if (wc.mesh.has_occupied_bounds == FT_TRUE
+				|| retain_previous_mesh)
 			{
 				_chunk_world_x[slot] = wc.world_x;
 				_chunk_world_z[slot] = wc.world_z;

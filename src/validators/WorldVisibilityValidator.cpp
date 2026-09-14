@@ -2,6 +2,8 @@
 #include <cmath>
 #include <chrono>
 #include <cstdio>
+#include <memory>
+#include <new>
 #include <thread>
 
 static void visibility_validation_phase(const char *phase,
@@ -12,6 +14,7 @@ static void visibility_validation_phase(const char *phase,
 			std::chrono::steady_clock::now() - started).count());
 	std::fprintf(stderr, "visible-distance: phase=%s elapsed_ms=%llu\n",
 		phase, static_cast<unsigned long long>(elapsed_ms));
+	std::fflush(stderr);
 }
 
 static bool wait_for_required_visible_distance(World &world,
@@ -34,11 +37,34 @@ static bool wait_for_required_visible_distance(World &world,
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
 	World::StreamDiagnostics diagnostics = world.stream_diagnostics();
+	std::size_t absent_count = 0U;
+	std::size_t queued_count = 0U;
+	std::size_t generating_count = 0U;
+	std::size_t failed_count = 0U;
+	std::size_t ready_candidate_count = 0U;
+	for (const WorldChunkStreamer::StreamCandidate &candidate
+		: world.chunk_streamer.stream_candidates_)
+	{
+		if (candidate.state == WorldChunkStreamer::CANDIDATE_ABSENT)
+			absent_count += 1U;
+		else if (candidate.state == WorldChunkStreamer::CANDIDATE_QUEUED)
+			queued_count += 1U;
+		else if (candidate.state == WorldChunkStreamer::CANDIDATE_GENERATING)
+			generating_count += 1U;
+		else if (candidate.state == WorldChunkStreamer::CANDIDATE_FAILED_RETRYABLE)
+			failed_count += 1U;
+		else if (candidate.state == WorldChunkStreamer::CANDIDATE_READY)
+			ready_candidate_count += 1U;
+	}
 	std::fprintf(stderr,
 		"visible-distance: async stream timeout loaded=%d pending=%zu "
-		"ready=%zu active=%zu failed=%zu\n", world.loaded_chunk_count,
+		"ready=%zu active=%zu failed=%zu candidates={absent=%zu queued=%zu "
+		"generating=%zu failed=%zu ready=%zu cursor=%zu}\n",
+		world.loaded_chunk_count,
 		diagnostics.pending_count, diagnostics.ready_count,
-		diagnostics.active_generation_count, diagnostics.failed_count);
+		diagnostics.active_generation_count, diagnostics.failed_count,
+		absent_count, queued_count, generating_count, failed_count,
+		ready_candidate_count, world.chunk_streamer.stream_candidate_cursor_);
 	return (false);
 }
 
@@ -116,14 +142,52 @@ static bool wait_for_required_light_convergence(World &world,
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
 	World::StreamDiagnostics diagnostics = world.stream_diagnostics();
+	std::size_t capture_task_count;
+	{
+		std::lock_guard<std::mutex> capture_lock(
+			world.chunk_streamer.remesh_capture_mutex_);
+		capture_task_count = world.chunk_streamer.remesh_capture_tasks_.size();
+	}
 	std::fprintf(stderr,
 		"visible-distance: light convergence timeout pending=%zu active=%zu "
 		"stale=%zu pipeline_queued=%zu pipeline_active=%zu "
-		"remesh_in_flight=%zu\n", diagnostics.pending_count,
+		"remesh_in_flight=%zu capture_tasks=%zu capture_in_flight=%zu "
+		"priority=%zu next_submit=%llu frame=%llu\n",
+		diagnostics.pending_count,
 		diagnostics.active_generation_count, diagnostics.stale_result_count,
 		world.chunk_streamer.pipeline().queued_count(),
 		world.chunk_streamer.pipeline().active_count(),
-		world.chunk_streamer.pipeline().remesh_in_flight_count());
+		world.chunk_streamer.pipeline().remesh_in_flight_count(),
+		capture_task_count,
+		world.chunk_streamer.remesh_capture_in_flight_.load(),
+		world.chunk_streamer.priority_remeshes_.size(),
+		static_cast<unsigned long long>(
+			world.chunk_streamer.next_remesh_submission_frame_),
+		static_cast<unsigned long long>(world.chunk_streamer.stream_frame_));
+	{
+		std::size_t priority_index = 0U;
+		for (const WorldChunkStreamer::RemeshPriority &priority
+			: world.chunk_streamer.priority_remeshes_)
+		{
+			const WorldChunk *priority_chunk = world.find_chunk(
+				priority.chunk_x, priority.chunk_z);
+			std::fprintf(stderr,
+				"visible-distance: priority[%zu] chunk=(%d,%d) interactive=%d "
+				"dirty=%d pending=%llu waits=%d dependency=(%d,%d)\n",
+				priority_index, priority.chunk_x, priority.chunk_z,
+				priority.interactive ? 1 : 0,
+				priority_chunk != nullptr && priority_chunk->mesh_dirty ? 1 : 0,
+				priority_chunk == nullptr ? 0ULL : static_cast<unsigned long long>(
+					priority_chunk->pending_mesh_request_id),
+				priority_chunk != nullptr && priority_chunk->waits_for_neighbor_light
+					? 1 : 0,
+				priority_chunk == nullptr ? 0 : priority_chunk->light_dependency_chunk_x,
+				priority_chunk == nullptr ? 0 : priority_chunk->light_dependency_chunk_z);
+			priority_index += 1U;
+			if (priority_index >= 12U)
+				break ;
+		}
+	}
 	{
 		const int32_t radius = 1;
 		const int32_t center_chunk_x = WorldCoordinates::floor_divide(
@@ -143,12 +207,16 @@ static bool wait_for_required_light_convergence(World &world,
 					|| chunk.light_revision == 0U))
 				std::fprintf(stderr,
 					"visible-distance: light gap chunk=(%d,%d) dirty=%d "
-					"pending=%llu light_revision=%llu mesh_revision=%llu\n",
+					"pending=%llu light_revision=%llu mesh_revision=%llu "
+					"waits_for_neighbor=%d dependency=(%d,%d)\n",
 					chunk.chunk_x, chunk.chunk_z, chunk.mesh_dirty ? 1 : 0,
 					static_cast<unsigned long long>(
 						chunk.pending_mesh_request_id),
 					static_cast<unsigned long long>(chunk.light_revision),
-					static_cast<unsigned long long>(chunk.mesh_revision));
+					static_cast<unsigned long long>(chunk.mesh_revision),
+					chunk.waits_for_neighbor_light ? 1 : 0,
+					chunk.light_dependency_chunk_x,
+					chunk.light_dependency_chunk_z);
 			index += 1;
 		}
 	}
@@ -177,7 +245,10 @@ WorldVisibilityValidator &WorldVisibilityValidator::operator=(const WorldVisibil
 
 int WorldVisibilityValidator::validate() const
 {
-	World world;
+	std::unique_ptr<World> world_storage(new (std::nothrow) World());
+	if (world_storage == nullptr)
+		return (1);
+	World &world = *world_storage;
 	Camera validation_camera;
 	int32_t error_code;
 	const std::chrono::steady_clock::time_point validation_started =

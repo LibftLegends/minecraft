@@ -15,6 +15,7 @@
 # include "../../src/validators/WorldVisibilityValidator.hpp"
 # include "../../src/validators/WorldReplicationValidator.hpp"
 # include "../../src/validators/RendererPublicationValidator.hpp"
+# include "../../src/validators/LightingTestHarness.hpp"
 
 class ApplicationValidator
 {
@@ -38,6 +39,10 @@ class ApplicationValidator
 	static int validate_async_generation();
 	static int validate_network_repair();
 	static int validate_renderer_publication();
+	static int validate_lighting_harness();
+	static int validate_lighting_stress();
+	static int validate_lighting_scheduled_stress();
+	static int validate_lighting_lifecycle();
 	static int validate_all();
 };
 

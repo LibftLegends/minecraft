@@ -59,8 +59,11 @@ WorldChunkStreamer::Diagnostics WorldChunkStreamDiagnosticsBuilder::build(const 
 	diagnostics.playable_failed_count = 0U;
 	diagnostics.playable_required_count = 0U;
 	diagnostics.playable_drawable_count = 0U;
-	diagnostics.active_generation_count = streamer.generation_pipeline_.active_count();
+	diagnostics.active_generation_count = streamer.generation_pipeline_
+		.active_generation_count();
 	diagnostics.remesh_queue_peak = streamer.remesh_queue_peak_;
+	diagnostics.remesh_starvation_promotions =
+		streamer.remesh_starvation_promotions_;
 	diagnostics.remesh_priority_queue_depth = streamer.priority_remeshes_.size();
 	diagnostics.interactive_remesh_queue_depth = 0U;
 	diagnostics.oldest_remesh_queue_age = 0U;
@@ -76,13 +79,30 @@ WorldChunkStreamer::Diagnostics WorldChunkStreamDiagnosticsBuilder::build(const 
 				- priority.queued_frame;
 	}
 	diagnostics.remesh_snapshot_bytes = streamer.remesh_snapshot_bytes_;
+	diagnostics.remesh_capture_duration_nanoseconds =
+		streamer.remesh_capture_duration_nanoseconds_;
+	diagnostics.remesh_capture_count = streamer.remesh_capture_count_;
 	diagnostics.remesh_scanned_cells = streamer.remesh_scanned_cells_;
 	diagnostics.remesh_propagated_cells = streamer.remesh_propagated_cells_;
 	diagnostics.remesh_light_queue_peak = streamer.remesh_light_queue_peak_;
 	diagnostics.remesh_completed_count = streamer.remesh_completed_count_;
+	diagnostics.remesh_incremental_completed_count =
+		streamer.remesh_incremental_completed_count_;
+	diagnostics.remesh_full_completed_count =
+		streamer.remesh_full_completed_count_;
+	diagnostics.remesh_geometry_only_count = streamer.remesh_geometry_only_count_;
+	diagnostics.remesh_canceled_count = streamer.remesh_canceled_count_;
 	diagnostics.stale_result_count = streamer.stale_result_count_;
 	diagnostics.stale_stream_result_count = streamer.stale_stream_result_count_;
 	diagnostics.stale_remesh_result_count = streamer.stale_remesh_result_count_;
+	diagnostics.stale_remesh_capture_count =
+		streamer.stale_remesh_capture_count_;
+	diagnostics.stale_remesh_dependency_count =
+		streamer.stale_remesh_dependency_count_;
+	diagnostics.stale_remesh_pending_count =
+		streamer.stale_remesh_pending_count_;
+	diagnostics.stale_remesh_revision_count =
+		streamer.stale_remesh_revision_count_;
 	diagnostics.oldest_result_age_nanoseconds = streamer.generation_pipeline_
 		.oldest_completed_result_age_nanoseconds();
 	diagnostics.oldest_pending_age = 0U;

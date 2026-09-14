@@ -152,15 +152,14 @@ void GameSession::set_voxel_generation_config(const voxel_generation_config &con
 void GameSession::stop()
 {
 	if (active_)
-		world_.destroy();
-	player_character_.destroy();
-	if (active_)
 	{
 		int32_t analytics_error = RuntimeAnalytics::end_world_session();
 		if (analytics_error != FT_ERR_SUCCESS)
 			std::fprintf(stderr, "Analytics: world report close failed (%d)\n",
 				analytics_error);
+		world_.destroy();
 	}
+	player_character_.destroy();
 	active_ = false;
 }
 
@@ -229,16 +228,36 @@ int GameSession::loading_tick(const RenderDistanceStrategy &strategy)
 	error_code_ = world_.update_around(static_cast<double>(player_character_.get_x()),
 			static_cast<double>(player_character_.get_z()), gen,
 			active_render_distance_);
-	if (error_code_ == FT_ERR_SUCCESS
-		&& world_.stream_diagnostics().playable_failed_count != 0U)
+	if (error_code_ != FT_ERR_SUCCESS)
 	{
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+		World::StreamDiagnostics failure = world_.stream_diagnostics();
 		std::fprintf(stderr,
-			"World loading failed in the playable area; last stream error=%d\n",
-			world_.stream_last_error());
-		return (FT_ERR_GAME_GENERAL_ERROR);
+			"[Session] loading stream update failed error=%d last_error=%d "
+			"frame=%llu pending=%zu retryable=%zu failed=%zu "
+			"playable_failed=%zu remesh_pending=%zu\n",
+			error_code_, world_.stream_last_error(),
+			static_cast<unsigned long long>(failure.frame), failure.pending_count,
+			failure.retryable_count, failure.failed_count,
+			failure.playable_failed_count,
+			failure.interactive_remesh_queue_depth);
+		/* Positive Libft errors are recoverable outcomes (for example a
+		 * temporarily full queue).  Keep the loading session alive and retry on
+		 * the next tick; only negative errors are fatal here. */
+	#endif
+		if (error_code_ > 0)
+			return (FT_ERR_SUCCESS);
 	}
 	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
 	diagnostics = world_.stream_diagnostics();
+	if (error_code_ == FT_ERR_SUCCESS
+		&& diagnostics.playable_failed_count != 0U
+		&& diagnostics.frame % 120U == 0U)
+	{
+		std::fprintf(stderr,
+			"World loading: playable retry pending last_error=%d retryable=%zu\n",
+			world_.stream_last_error(), diagnostics.retryable_count);
+	}
 	if (error_code_ == FT_ERR_SUCCESS && diagnostics.frame % 120U == 0U
 		&& !this->is_ready_to_play())
 	{
@@ -376,20 +395,67 @@ GameSession::Action GameSession::tick_world(double delta_seconds,
 		std::fprintf(stderr, "Analytics: stream scope end failed (%d)\n",
 			analytics_error);
 	if (error_code_ != FT_ERR_SUCCESS)
+	{
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+		World::StreamDiagnostics failure = world_.stream_diagnostics();
+		std::fprintf(stderr,
+			"[Session] in-game stream update failed error=%d last_error=%d "
+			"frame=%llu pending=%zu retryable=%zu failed=%zu "
+			"remesh_pending=%zu oldest_remesh_age=%llu\n",
+			error_code_, world_.stream_last_error(),
+			static_cast<unsigned long long>(failure.frame), failure.pending_count,
+			failure.retryable_count, failure.failed_count,
+			failure.interactive_remesh_queue_depth,
+			static_cast<unsigned long long>(failure.oldest_remesh_queue_age));
+	#endif
+		if (error_code_ > 0)
+		{
+			error_code_ = FT_ERR_SUCCESS;
+			return (Action::CONTINUE);
+		}
 		return (Action::FAILED);
+	}
 	analytics_error = RuntimeAnalytics::begin_scope(
 		RuntimeAnalyticsScope::BLOCK_INTERACTION);
 	if (analytics_error != FT_ERR_SUCCESS)
 		std::fprintf(stderr, "Analytics: interaction scope start failed (%d)\n",
 			analytics_error);
 	if (ft_dumb_control_was_pressed(FT_DUMB_CONTROL_MOUSE_PRIMARY) == FT_TRUE)
-		BlockInteractor::try_delete_target_block(&world_, camera_);
+	{
+		int32_t interaction_error = BlockInteractor::try_delete_target_block(
+			&world_, camera_);
+		if (interaction_error != FT_ERR_SUCCESS)
+		{
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+			std::fprintf(stderr, "[Session] delete interaction failed error=%d\n",
+				interaction_error);
+	#endif
+		}
+	}
 	if (ft_dumb_control_was_pressed(FT_DUMB_CONTROL_MOUSE_TERTIARY) == FT_TRUE)
-		BlockInteractor::try_pick_target_block(&world_, camera_,
-			&selected_block_id_);
+	{
+		int32_t interaction_error = BlockInteractor::try_pick_target_block(
+			&world_, camera_, &selected_block_id_);
+		if (interaction_error != FT_ERR_SUCCESS)
+		{
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+			std::fprintf(stderr, "[Session] pick interaction failed error=%d\n",
+				interaction_error);
+	#endif
+		}
+	}
 	if (ft_dumb_control_was_pressed(FT_DUMB_CONTROL_MOUSE_SECONDARY) == FT_TRUE)
-		BlockInteractor::try_place_selected_block(&world_, camera_,
-			selected_block_id_);
+	{
+		int32_t interaction_error = BlockInteractor::try_place_selected_block(
+			&world_, camera_, selected_block_id_);
+		if (interaction_error != FT_ERR_SUCCESS)
+		{
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+			std::fprintf(stderr, "[Session] place interaction failed error=%d\n",
+				interaction_error);
+	#endif
+		}
+	}
 	analytics_error = RuntimeAnalytics::end_scope();
 	if (analytics_error != FT_ERR_SUCCESS)
 		std::fprintf(stderr, "Analytics: interaction scope end failed (%d)\n",

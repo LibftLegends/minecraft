@@ -17,6 +17,17 @@ class WorldChunkSnapshotCapture
 		const WorldChunk *northeast, const WorldChunk *southwest,
 		const WorldChunk *southeast,
 		WorldGenerationPipeline::WorldChunkSnapshot &snapshot) noexcept;
+	static int32_t capture_read_states(
+		const std::shared_ptr<const WorldChunkReadState> &target,
+		const std::shared_ptr<const WorldChunkReadState> &west,
+		const std::shared_ptr<const WorldChunkReadState> &east,
+		const std::shared_ptr<const WorldChunkReadState> &north,
+		const std::shared_ptr<const WorldChunkReadState> &south,
+		const std::shared_ptr<const WorldChunkReadState> &northwest,
+		const std::shared_ptr<const WorldChunkReadState> &northeast,
+		const std::shared_ptr<const WorldChunkReadState> &southwest,
+		const std::shared_ptr<const WorldChunkReadState> &southeast,
+		WorldGenerationPipeline::WorldChunkSnapshot &snapshot) noexcept;
 
   private:
 	static int32_t capture_blocks(const WorldChunk &target,

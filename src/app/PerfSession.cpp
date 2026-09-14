@@ -1,6 +1,8 @@
 #include "../../src/app/PerfSession.hpp"
 #include "../../src/diagnostics/RuntimeAnalytics.hpp"
 #include <cstdio>
+#include <memory>
+#include <new>
 
 PerfSession::PerfSession()
 {
@@ -246,7 +248,11 @@ int PerfSession::run(const ApplicationOptions &options,
 	const RenderDistanceStrategy &strategy)
 {
 	Camera				camera;
-	World				world;
+	std::unique_ptr<World> world_storage(new (std::nothrow) World());
+	if (world_storage == nullptr)
+		return (ApplicationError::fail("performance world allocation",
+			FT_ERR_NO_MEMORY));
+	World				&world = *world_storage;
 	ApplicationWindow	window;
 	VoxelRenderer		renderer;
 	int32_t				init_err;

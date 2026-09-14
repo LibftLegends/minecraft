@@ -63,7 +63,7 @@ int32_t WorldRevisionValidator::quiesce_stream_pipeline(World &world) noexcept
 	std::unique_ptr<WorldGenerationPipeline::Result> discarded_result;
 	int32_t iteration;
 
-	world.chunk_streamer.pipeline().cancel_queued();
+	world.chunk_streamer.cancel_pending_remeshes();
 	iteration = 0;
 	while (iteration < 500)
 	{
@@ -189,6 +189,26 @@ int32_t WorldRevisionValidator::regenerate_and_check(World &world,
 						*skipped,
 						world.world_revision().pending ? 1 : 0);
 		return (1);
+	}
+	{
+		WorldChunk *regenerated_chunk = world.find_chunk_mutable(1, 0);
+		if (regenerated_chunk == nullptr
+			|| regenerated_chunk->light_buffer_is_valid() == false
+			|| regenerated_chunk->light_is_current() == false
+			|| regenerated_chunk->light_ready_for_render == false)
+		{
+			std::fprintf(stderr,
+				"world-revision: regenerated chunk lost valid light "
+				"chunk=%s valid=%d current=%d ready=%d\n",
+				regenerated_chunk == nullptr ? "missing" : "present",
+				regenerated_chunk != nullptr
+					&& regenerated_chunk->light_buffer_is_valid() ? 1 : 0,
+				regenerated_chunk != nullptr
+					&& regenerated_chunk->light_is_current() ? 1 : 0,
+				regenerated_chunk != nullptr
+					&& regenerated_chunk->light_ready_for_render ? 1 : 0);
+			return (1);
+		}
 	}
 	return (FT_ERR_SUCCESS);
 }

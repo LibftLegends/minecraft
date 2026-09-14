@@ -55,6 +55,14 @@ int ApplicationBootstrap::run_validators(const ApplicationOptions &options)
 		return (ApplicationValidator::validate_network_repair());
 	if (options.validate_renderer_publication_mode)
 		return (ApplicationValidator::validate_renderer_publication());
+	if (options.validate_lighting_harness_mode)
+		return (ApplicationValidator::validate_lighting_harness());
+	if (options.validate_lighting_stress_mode)
+		return (ApplicationValidator::validate_lighting_stress());
+	if (options.validate_lighting_scheduled_stress_mode)
+		return (ApplicationValidator::validate_lighting_scheduled_stress());
+	if (options.validate_lighting_lifecycle_mode)
+		return (ApplicationValidator::validate_lighting_lifecycle());
 	return (-1);
 }
 

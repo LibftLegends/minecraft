@@ -38,6 +38,8 @@ class GpuGeometryBatch
 	private:
 	void sync_pending_visible_meshes(const Camera &camera, const World &world,
 		int32_t &uploaded_count, size_t &uploaded_bytes);
+	bool border_neighbors_are_published(const World &world,
+		const WorldChunk &chunk) const;
 	GpuWaterBatch	_water;
 	bool			_visibility_cache_valid;
 	uint64_t		_visibility_geometry_signature;

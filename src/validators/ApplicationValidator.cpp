@@ -91,6 +91,27 @@ int ApplicationValidator::validate_renderer_publication()
 	return (RendererPublicationValidator().validate());
 }
 
+int ApplicationValidator::validate_lighting_harness()
+{
+	return (LightingTestHarness().validate());
+}
+
+int ApplicationValidator::validate_lighting_stress()
+{
+	return (LightingTestHarness::validate_stress(1000U, "stress"));
+}
+
+int ApplicationValidator::validate_lighting_scheduled_stress()
+{
+	return (LightingTestHarness::validate_stress(10000U,
+		"scheduled-stress"));
+}
+
+int ApplicationValidator::validate_lighting_lifecycle()
+{
+	return (LightingTestHarness::validate_lifecycle());
+}
+
 int ApplicationValidator::validate_all()
 {
 	int error_code;
@@ -174,6 +195,14 @@ int ApplicationValidator::validate_all()
 	if (error_code != 0)
 	{
 		std::fprintf(stderr, "[Validator] async-generation failed: %d\n", error_code);
+		failure_count += 1;
+	}
+	std::fprintf(stderr, "[Validator] lighting-harness: begin\n");
+	error_code = ApplicationValidator::validate_lighting_harness();
+	if (error_code != 0)
+	{
+		std::fprintf(stderr, "[Validator] lighting-harness failed: %d\n",
+			error_code);
 		failure_count += 1;
 	}
 	std::fprintf(stderr, "[Validator] validate-all: %s failures=%d\n",

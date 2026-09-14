@@ -1,5 +1,7 @@
 #include "../../src/validators/CollisionValidator.hpp"
 #include <cmath>
+#include <memory>
+#include <new>
 
 CollisionValidator::CollisionValidator()
 {
@@ -139,7 +141,11 @@ int CollisionValidator::test_raycast_tied_boundary(World &world)
 
 int CollisionValidator::validate() const
 {
-	World world;
+	std::unique_ptr<World> world_storage(new (std::nothrow) World());
+	if (world_storage == nullptr)
+		return (ApplicationError::fail("collision world allocation",
+			FT_ERR_NO_MEMORY));
+	World &world = *world_storage;
 	Camera camera;
 	Metrics m;
 	int32_t error_code;

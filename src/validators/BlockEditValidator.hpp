@@ -32,7 +32,18 @@ class BlockEditValidator : public IValidator
 		int32_t z, size_t &mesh_after);
 	static int validate_repeated_edits(World &world, int32_t x, int32_t y,
 		int32_t z) noexcept;
+	static int validate_rapid_edit_supersession(World &world, int32_t x,
+		int32_t y, int32_t z) noexcept;
+	static int validate_interior_emissive_edit(World &world) noexcept;
 	static int validate_boundary_edit(World &world) noexcept;
+	static int validate_boundary_face_matrix(World &world) noexcept;
+	static int validate_solid_neighbor_geometry(World &world) noexcept;
+	static int validate_rapid_border_supersession(World &world) noexcept;
+	static int validate_cross_chunk_light_publication(World &world) noexcept;
+	static int validate_simultaneous_border_edits(World &world) noexcept;
+	static int validate_neighbor_arrival_after_completed_edit(
+		World &world) noexcept;
+	static int validate_authoritative_edit(World &world) noexcept;
 	static int report_mesh_result(size_t before, size_t after_place,
 		size_t after_delete);
 

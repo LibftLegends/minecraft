@@ -91,6 +91,10 @@ int32_t ChunkNeighborMesher::lookup_block(void *user_data, int32_t world_x,
 	resolve_neighbor_read(*ctx, local_x, local_z, &wc, &read_x, &read_z);
 	if (!wc || !wc->initialized)
 	{
+		/* Geometry and lighting need different unknown-neighbour semantics.  A
+		 * geometry query must close the current chunk's world-facing boundary;
+		 * returning air makes the boundary face drawable while the neighbour is
+		 * absent.  Lighting uses its own conservative solid fallback. */
 		*block_id = GAME_VOXEL_AIR_BLOCK;
 		return (FT_ERR_SUCCESS);
 	}

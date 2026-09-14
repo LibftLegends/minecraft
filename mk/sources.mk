@@ -37,6 +37,7 @@ SRC = \
     src/validators/BlockEditPerformanceValidator.cpp \
 	src/validators/CameraInteractionValidator.cpp \
     src/validators/RendererPublicationValidator.cpp \
+    src/validators/LightingTestHarness.cpp \
     src/validators/WorldVisibilityValidator.cpp \
     src/validators/TerrainDeterminismValidator.cpp \
     src/validators/TerrainCaveValidator.cpp \

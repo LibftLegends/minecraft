@@ -62,6 +62,11 @@ ApplicationPhaseController::Phase ApplicationPhaseController::tick_menu(Phase ph
 	}
 	if (session.loading_tick(strategy) != FT_ERR_SUCCESS)
 	{
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+		std::fprintf(stderr,
+			"[Application] loading failed; returning to main menu error=%d\n",
+			session.error_code());
+	#endif
 		session.stop();
 		menu.show_main_menu();
 		return (Phase::MAIN_MENU);
@@ -93,6 +98,15 @@ ApplicationPhaseController::Phase ApplicationPhaseController::tick_in_game(Appli
 	if (action == GameSession::Action::EXIT_TO_MENU
 		|| action == GameSession::Action::FAILED)
 	{
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+		if (action == GameSession::Action::EXIT_TO_MENU)
+			std::fprintf(stderr,
+				"[Application] explicit back input; returning to main menu\n");
+		else
+			std::fprintf(stderr,
+				"[Application] session failed; returning to main menu error=%d\n",
+				session.error_code());
+	#endif
 		session.stop();
 		menu.show_main_menu();
 		window.set_cursor_visible(true);

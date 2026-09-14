@@ -14,6 +14,10 @@ ApplicationOptions::ApplicationOptions() : perf_test_mode(false),
 	validate_world_revision_mode(false), validate_async_generation_mode(false),
 	validate_network_repair_mode(false),
 	validate_renderer_publication_mode(false),
+	validate_lighting_harness_mode(false),
+	validate_lighting_stress_mode(false),
+	validate_lighting_scheduled_stress_mode(false),
+	validate_lighting_lifecycle_mode(false),
 	validate_all_mode(false),
 	perf_seconds_limit(10.0)
 {
@@ -32,6 +36,10 @@ ApplicationOptions::ApplicationOptions(const ApplicationOptions &other) : perf_t
 	validate_caves_mode(false), validate_voxel_configuration_mode(false),
 	validate_world_revision_mode(false), validate_async_generation_mode(false),
 	validate_network_repair_mode(false),
+	validate_lighting_harness_mode(false),
+	validate_lighting_stress_mode(false),
+	validate_lighting_scheduled_stress_mode(false),
+	validate_lighting_lifecycle_mode(false),
 	validate_all_mode(false),
 	perf_seconds_limit(10.0)
 {
@@ -69,6 +77,12 @@ ApplicationOptions &ApplicationOptions::operator=(const ApplicationOptions &othe
 		validate_async_generation_mode = other.validate_async_generation_mode;
 		validate_network_repair_mode = other.validate_network_repair_mode;
 		validate_renderer_publication_mode = other.validate_renderer_publication_mode;
+		validate_lighting_harness_mode = other.validate_lighting_harness_mode;
+		validate_lighting_stress_mode = other.validate_lighting_stress_mode;
+		validate_lighting_scheduled_stress_mode =
+			other.validate_lighting_scheduled_stress_mode;
+		validate_lighting_lifecycle_mode =
+			other.validate_lighting_lifecycle_mode;
 		validate_all_mode = other.validate_all_mode;
 		perf_seconds_limit = other.perf_seconds_limit;
 	}
@@ -119,6 +133,14 @@ int ApplicationOptions::parse(int argc, char **argv)
 			"--validate-network-repair");
 	validate_renderer_publication_mode = CommandLine::has_flag(argc, argv,
 			"--validate-renderer-publication");
+	validate_lighting_harness_mode = CommandLine::has_flag(argc, argv,
+			"--validate-lighting-harness");
+	validate_lighting_stress_mode = CommandLine::has_flag(argc, argv,
+			"--validate-lighting-stress");
+	validate_lighting_scheduled_stress_mode = CommandLine::has_flag(argc, argv,
+			"--validate-lighting-scheduled-stress");
+	validate_lighting_lifecycle_mode = CommandLine::has_flag(argc, argv,
+			"--validate-lighting-lifecycle");
 	validate_all_mode = CommandLine::has_flag(argc, argv, "--validate-all");
 	result = CommandLine::parse_perf_seconds(argc, argv, &perf_seconds_limit);
 	if (result < 0)

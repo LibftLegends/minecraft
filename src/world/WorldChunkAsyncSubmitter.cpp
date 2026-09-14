@@ -50,6 +50,19 @@ namespace
 			|| (candidate.chunk_x == best->chunk_x
 				&& candidate.chunk_z < best->chunk_z));
 	}
+
+	static bool has_prioritized_remesh(
+		const WorldChunkStreamer &streamer, int32_t chunk_x,
+		int32_t chunk_z) noexcept
+	{
+		for (const WorldChunkStreamer::RemeshPriority &priority
+			: streamer.priority_remeshes_)
+		{
+			if (priority.chunk_x == chunk_x && priority.chunk_z == chunk_z)
+				return (true);
+		}
+		return (false);
+	}
 }
 
 WorldChunkAsyncSubmitter::WorldChunkAsyncSubmitter()
@@ -147,6 +160,8 @@ int32_t WorldChunkAsyncSubmitter::submit_dirty_remeshes(
 	WorldChunk *best_dirty_chunk;
 	int32_t priority_center_x;
 	int32_t priority_center_z;
+	bool playable_ring_ready;
+	bool local_only;
 	const voxel_light_update_config &light_config =
 		streamer.light_update_config_;
 	scan_budget = static_cast<int32_t>(light_config.target_nodes_per_frame);
@@ -160,14 +175,20 @@ int32_t WorldChunkAsyncSubmitter::submit_dirty_remeshes(
 
 	if (streamer.world_.chunk_count <= 0)
 		return (FT_ERR_SUCCESS);
-	/* Initial generation owns the shared workers until every required
-	 * playable candidate is published. Initial meshes already contain local
-	 * light; border relights can safely follow once the ring exists. */
-	if (playable_ring_is_ready(streamer) == false
-		&& !streamer.priority_remesh_pending_)
-		return (FT_ERR_SUCCESS);
+	/* During startup/recenter, generation still owns most of the queue, but
+	 * loaded chunks in the camera's local 3x3 neighborhood must not wait for
+	 * the entire playable ring before their border lighting can converge. Keep
+	 * distant arrival remeshes gated until the ring is ready; local dirty work
+	 * is small, bounded, and remains subject to the worker's generation escape.
+	 */
+	playable_ring_ready = playable_ring_is_ready(streamer);
+	local_only = !playable_ring_ready;
 	if (streamer.stream_frame_ < streamer.next_remesh_submission_frame_)
 		return (FT_ERR_SUCCESS);
+	/* A background arrival must eventually receive service even when visible
+	 * edits keep producing interactive invalidations.  The worker's existing
+	 * generation escape still bounds this promotion's priority. */
+	streamer.promote_starved_remeshes();
 	if (streamer.remesh_priority_anchor_valid_
 		&& streamer.stream_frame_
 			>= streamer.remesh_priority_anchor_expiry_frame_)
@@ -207,7 +228,15 @@ int32_t WorldChunkAsyncSubmitter::submit_dirty_remeshes(
 		}
 		else
 		{
-			error_code = streamer.queue_chunk_remesh(*priority_chunk);
+			error_code = streamer.queue_chunk_remesh(*priority_chunk,
+				priority.incremental_additive_light,
+				priority.incremental_removal_light,
+				priority.incremental_local_x, priority.incremental_local_y,
+				priority.incremental_local_z,
+				priority.incremental_old_block_id,
+				priority.incremental_new_block_id,
+				&priority.incremental_light_seeds,
+				priority.geometry_only);
 		#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
 			if (error_code != FT_ERR_SUCCESS
 				&& (error_code != FT_ERR_FULL
@@ -234,6 +263,27 @@ int32_t WorldChunkAsyncSubmitter::submit_dirty_remeshes(
 				}
 				streamer.next_remesh_submission_frame_ = streamer.stream_frame_ + 2U;
 			}
+			else if (error_code == FT_ERR_FULL
+				&& streamer.priority_remeshes_.size() > 1U)
+			{
+				/* A dependency-gated entry must not hold the queue head forever.
+				 * FT_ERR_FULL also represents temporary pipeline capacity, so defer
+				 * exactly one entry and let the next affected chunk make progress on
+				 * the following frame.  The queue remains bounded and interactive
+				 * entries retain their relative order after the rotation. */
+				WorldChunkStreamer::RemeshPriority deferred =
+					std::move(streamer.priority_remeshes_.front());
+				streamer.priority_remeshes_.pop_front();
+				streamer.priority_remeshes_.push_back(std::move(deferred));
+				streamer.priority_remesh_pending_ = true;
+				streamer.priority_remesh_chunk_x_ =
+					streamer.priority_remeshes_.front().chunk_x;
+				streamer.priority_remesh_chunk_z_ =
+					streamer.priority_remeshes_.front().chunk_z;
+				streamer.next_remesh_submission_frame_ =
+					streamer.stream_frame_ + 1U;
+				return (FT_ERR_SUCCESS);
+			}
 			else if (error_code != FT_ERR_FULL)
 				return (error_code);
 		}
@@ -252,9 +302,23 @@ int32_t WorldChunkAsyncSubmitter::submit_dirty_remeshes(
 	while (scanned_count < scan_budget
 		&& scanned_count < streamer.world_.chunk_count)
 	{
-		if (streamer.world_.chunks[dirty_index].initialized
+		const WorldChunk &candidate = streamer.world_.chunks[dirty_index];
+		const int32_t candidate_dx = candidate.chunk_x
+			- streamer.world_.center_chunk_x;
+		const int32_t candidate_dz = candidate.chunk_z
+			- streamer.world_.center_chunk_z;
+		const bool candidate_is_local = candidate_dx >= -1
+			&& candidate_dx <= 1 && candidate_dz >= -1 && candidate_dz <= 1;
+		if ((!local_only || candidate_is_local)
+			&& candidate.initialized
 			&& streamer.world_.chunks[dirty_index].mesh_dirty
 			&& streamer.world_.chunks[dirty_index].pending_mesh_request_id == 0U
+			/* A prioritized edit carries immutable seed metadata.  Letting the
+			 * generic dirty scan submit the same chunk would erase that metadata
+			 * and turn an incremental edit into an unrelated full relight. */
+			&& !has_prioritized_remesh(streamer,
+				streamer.world_.chunks[dirty_index].chunk_x,
+				streamer.world_.chunks[dirty_index].chunk_z)
 			&& remesh_candidate_is_better(streamer.world_.chunks[dirty_index],
 				best_dirty_chunk, priority_center_x, priority_center_z))
 		{
@@ -287,7 +351,6 @@ int32_t WorldChunkAsyncSubmitter::stream_chunks_async(WorldChunkStreamer &stream
 	int32_t submitted;
 	int32_t scanned;
 	int32_t candidate_count;
-	bool interactive_pending;
 
 	(void)generated;
 	(void)stream_radius;
@@ -297,34 +360,12 @@ int32_t WorldChunkAsyncSubmitter::stream_chunks_async(WorldChunkStreamer &stream
 	error_code = WorldChunkAsyncSubmitter::submit_dirty_remeshes(streamer);
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
-	/* A priority request may still be in immutable snapshot capture even after
-	 * this pass has submitted it. Do not let a new generation request overtake
-	 * that edit/light work before it reaches the worker pipeline. */
-	interactive_pending = false;
-	for (const WorldChunkStreamer::RemeshPriority &priority
-		: streamer.priority_remeshes_)
-	{
-		if (priority.interactive)
-		{
-			interactive_pending = true;
-			break ;
-		}
-	}
-	if (!interactive_pending)
-	{
-		std::lock_guard<std::mutex> lock(streamer.remesh_capture_mutex_);
-		for (const WorldChunkStreamer::RemeshCaptureTask &task
-			: streamer.remesh_capture_tasks_)
-		{
-			if (task.interactive != FT_FALSE)
-			{
-				interactive_pending = true;
-				break ;
-			}
-		}
-	}
-	if (interactive_pending)
-		return (FT_ERR_SUCCESS);
+	/* Do not stop world streaming merely because an interactive remesh is
+	 * present.  Interactive work is already selected ahead of generation by
+	 * WorldGenerationWorkerLoop, and the pipeline reserves generation capacity.
+	 * Returning here globally stranded every still-absent candidate whenever a
+	 * background remesh was promoted, leaving the world with no active or
+	 * pending generation work. */
 	submitted = 0;
 	scanned = 0;
 	candidate_count = static_cast<int32_t>(streamer.stream_candidates_.size());

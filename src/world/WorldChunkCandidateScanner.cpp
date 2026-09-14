@@ -45,6 +45,12 @@ void WorldChunkCandidateScanner::prepare_stream_candidates(WorldChunkStreamer &s
 	if (streamer.stream_candidates_radius_ == stream_radius)
 		return ;
 	streamer.stream_relevance_epoch_ += 1U;
+	/* Candidate rebuilds invalidate queued remesh captures as well as stream
+	 * generation requests. Keep the capture worker's epoch in lockstep so new
+	 * requests are accepted after the rebuild instead of being rejected as
+	 * permanently stale. */
+	streamer.remesh_capture_relevance_epoch_.store(
+		streamer.stream_relevance_epoch_);
 	streamer.generation_revision_ += 1U;
 	streamer.stream_candidates_.clear();
 	streamer.stream_candidate_cursor_ = 0U;
@@ -145,7 +151,7 @@ int32_t WorldChunkCandidateScanner::try_load_chunk_at(WorldChunkStreamer &stream
 	 * renderer observes the old contents. */
 	slot->mesh_revision = streamer.world_.geometry_revision;
 	streamer.world_.register_chunk_index(*slot);
-	streamer.mark_neighbor_remeshes(chunk_x, chunk_z);
+	streamer.mark_neighbor_remeshes(chunk_x, chunk_z, false, true);
 	return (1);
 }
 

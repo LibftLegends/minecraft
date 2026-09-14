@@ -92,12 +92,19 @@ class World
 		size_t						remesh_queue_peak;
 		size_t						remesh_priority_queue_depth;
 		size_t						interactive_remesh_queue_depth;
+		uint64_t					remesh_starvation_promotions;
 		uint64_t					oldest_remesh_queue_age;
 		uint64_t					remesh_snapshot_bytes;
+		uint64_t					remesh_capture_duration_nanoseconds;
+		uint64_t					remesh_capture_count;
 		uint64_t					remesh_scanned_cells;
 		uint64_t					remesh_propagated_cells;
 		uint64_t					remesh_light_queue_peak;
 		uint64_t					remesh_completed_count;
+		uint64_t					remesh_incremental_completed_count;
+		uint64_t					remesh_full_completed_count;
+		uint64_t					remesh_geometry_only_count;
+		uint64_t					remesh_canceled_count;
 		size_t					deferred_edit_count;
 		size_t					deferred_edit_cursor;
 		uint64_t					frame;
@@ -107,6 +114,10 @@ class World
 		size_t						pending_count;
 		size_t						retryable_count;
 		size_t						failed_count;
+		size_t					stale_remesh_capture_count;
+		size_t					stale_remesh_dependency_count;
+		size_t					stale_remesh_pending_count;
+		size_t					stale_remesh_revision_count;
 		uint64_t					oldest_result_age_nanoseconds;
 		uint64_t					oldest_pending_age;
 		int32_t						last_error;
@@ -126,6 +137,7 @@ class World
 	voxel_generation_config		voxel_config;
 	voxel_generation_context		voxel_context;
 	bool							voxel_generation_started;
+	bool							lifecycle_active_;
 	uint64_t						current_tick;
 	uint64_t						geometry_revision;
 	WorldEditHistory				edit_history;
@@ -193,7 +205,15 @@ class World
 	void register_chunk_index(const WorldChunk &chunk);
 	int32_t capture_remesh_snapshot(int32_t chunk_x, int32_t chunk_z,
 		WorldGenerationPipeline::WorldChunkSnapshot &snapshot) const noexcept;
+	bool remesh_capture_is_current(int32_t chunk_x, int32_t chunk_z,
+		uint64_t request_id, uint64_t voxel_revision,
+		uint64_t light_revision, uint16_t content_version,
+		uint16_t light_input_version) const noexcept;
 	void clear_pending_remesh(int32_t chunk_x, int32_t chunk_z,
+		uint64_t request_id) noexcept;
+	/* WorldChunkStreamer::update() runs while World already owns the write
+	 * lock.  This helper is restricted to that call boundary. */
+	void clear_pending_remesh_unlocked(int32_t chunk_x, int32_t chunk_z,
 		uint64_t request_id) noexcept;
 
 	int32_t begin_world_revision(const voxel_generation_config &config,

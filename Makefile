@@ -100,11 +100,21 @@ else
 SUBMODULE_UPDATE_CMD = sh tools/update_libft.sh
 endif
 
-all: normal analytics
+all: normal
 
 normal:
 	@sh Libft/mk/run_build_with_progress.sh "$(MAKE)" internal-all
 	@test -f "$(TARGET)" && printf '\033[1;35m[MINECRAFT] Normal voxel ready: %s\033[0m\n' "$(TARGET)"
+	@if [ "$(FT_VOX_ANALYTICS)" != "1" ]; then \
+		$(MAKE) --no-print-directory analytics; \
+	fi
+
+ifeq ($(OS),Windows_NT)
+# Keep the documented executable name usable as a make target on Windows.
+# The real target includes .exe, while this alias also reaches the recursive
+# analytics build performed by the normal link recipe.
+ft_vox: normal
+endif
 
 analytics:
 	@$(MAKE) --no-print-directory FT_VOX_ANALYTICS=1 \
@@ -112,6 +122,40 @@ analytics:
 		LIBFT_BUILD_OUTPUT_SUFFIX=_analytics \
 		TARGET=ft_vox_analytics$(EXE_EXT) internal-all
 	@test -f "ft_vox_analytics$(EXE_EXT)" && printf '\033[1;35m[MINECRAFT][Analytics] Ready: %s\033[0m\n' "ft_vox_analytics$(EXE_EXT)"
+
+validate-lighting-harness: normal analytics
+	@status=0; analytics_status=0; ./ft_vox$(EXE_EXT) --validate-lighting-harness || status=$$?; \
+	./ft_vox_analytics$(EXE_EXT) --validate-lighting-harness || \
+	analytics_status=$$?; \
+	if [ $$analytics_status -ne 0 ] && [ $$status -eq 0 ]; then \
+		status=$$analytics_status; \
+	fi; exit $$status
+
+validate-lighting-stress: normal analytics
+	@status=0; analytics_status=0; ./ft_vox$(EXE_EXT) --validate-lighting-stress || status=$$?; \
+	./ft_vox_analytics$(EXE_EXT) --validate-lighting-stress || \
+	analytics_status=$$?; \
+	if [ $$analytics_status -ne 0 ] && [ $$status -eq 0 ]; then \
+		status=$$analytics_status; \
+	fi; exit $$status
+
+validate-lighting-scheduled-stress: normal analytics
+	@status=0; analytics_status=0; ./ft_vox$(EXE_EXT) --validate-lighting-scheduled-stress || \
+		status=$$?; \
+	./ft_vox_analytics$(EXE_EXT) --validate-lighting-scheduled-stress || \
+		analytics_status=$$?; \
+	if [ $$analytics_status -ne 0 ] && [ $$status -eq 0 ]; then \
+		status=$$analytics_status; \
+	fi; exit $$status
+
+validate-lighting-lifecycle: normal analytics
+	@status=0; analytics_status=0; ./ft_vox$(EXE_EXT) \
+		--validate-lighting-lifecycle || status=$$?; \
+	./ft_vox_analytics$(EXE_EXT) --validate-lighting-lifecycle || \
+		analytics_status=$$?; \
+	if [ $$analytics_status -ne 0 ] && [ $$status -eq 0 ]; then \
+		status=$$analytics_status; \
+	fi; exit $$status
 
 validate-worldgen-probe: normal
 	@./ft_vox$(EXE_EXT) --worldgen-probe
@@ -164,6 +208,20 @@ $(TARGET): $(OBJS) $(LIBFT_LINK_LIB) $(FT_VOX_BUILD_CONFIG_INPUTS)
 	$(file >$@.rsp,$(OBJS) $(LIBFT_LINK_FLAGS))
 	@$(CC) $(CFLAGS) -o $@ @$@.rsp $(LDFLAGS)
 	@printf '\033[1;35m[MINECRAFT] Link ready: %s\033[0m\n' "$@"
+	@if [ "$(FT_VOX_ANALYTICS)" != "1" ]; then \
+		$(MAKE) --no-print-directory FT_VOX_ANALYTICS=1 \
+			LIBFT_ARCHIVE_SUFFIX=_analytics \
+			LIBFT_BUILD_OUTPUT_SUFFIX=_analytics \
+			TARGET=ft_vox_analytics$(EXE_EXT) internal-all; \
+		analytics_status=$$?; \
+		if [ $$analytics_status -ne 0 ]; then exit $$analytics_status; fi; \
+		if [ ! -f "ft_vox_analytics$(EXE_EXT)" ]; then \
+			printf '%s\n' '[MINECRAFT][Analytics] output missing' >&2; \
+			exit 1; \
+		fi; \
+		printf '\033[1;35m[MINECRAFT][Analytics] Ready: %s\033[0m\n' \
+			"ft_vox_analytics$(EXE_EXT)"; \
+	fi
 
 $(TEST_NAME): $(TEST_OBJS) $(OBJS_NO_MAIN) $(TARGET) $(LIBFT_FULL_LIB) \
         $(FT_VOX_BUILD_CONFIG_INPUTS)
@@ -265,4 +323,7 @@ ci:
 .PHONY: all normal analytics plan internal-all dirs clean fclean re debug internal-debug both re_both tests internal-tests test lint coverage \
 	ci-build ci-test ci-lint ci-coverage ci submodule_init submodule_update \
 	validate-worldgen-probe validate-worldgen-probe-analytics \
+	validate-lighting-harness validate-lighting-stress \
+	validate-lighting-scheduled-stress \
+	validate-lighting-lifecycle \
 	ft_vox install_cobc tests_with_cobc

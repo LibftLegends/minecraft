@@ -69,7 +69,7 @@ int32_t WorldRevisionManager::cancel() noexcept
 		return (FT_ERR_INVALID_OPERATION);
 	if (this->progress_.active())
 	{
-		this->world_.chunk_streamer.pipeline().cancel_queued();
+		this->world_.chunk_streamer.cancel_pending_remeshes();
 		this->progress_.cancel(this->progress_.generation_epoch() + 1U);
 	}
 	this->pending_ = false;
