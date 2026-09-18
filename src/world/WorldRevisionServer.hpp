@@ -28,11 +28,11 @@ class WorldRevisionServer
 	int32_t handle_revision_message(const char *message);
 	int32_t handle_begin_action(json_group *revision);
 	int32_t apply_biome_config_overrides(json_group *revision,
-		terrain_generation_config &revision_config);
+		voxel_generation_config &revision_config);
 	int32_t apply_biome_size_range_override(json_group *revision,
-		terrain_generation_config &revision_config);
+		voxel_generation_config &revision_config);
 	int32_t apply_biome_specific_override(json_group *revision,
-		terrain_generation_config &revision_config);
+		voxel_generation_config &revision_config);
 	int32_t handle_select_or_protect_action(json_group *revision,
 		const char *action);
 };

@@ -11,13 +11,12 @@
 # include "../../src/gpur/GpuMvpBuilder.hpp"
 # include "../../src/gpur/GpuTextureAtlas.hpp"
 # include "../../src/world/World.hpp"
+# include "../../Libft/Modules/Voxel/voxel_shadow.hpp"
 # include "../ft_vox.hpp"
 
 class GpuWorldRenderer
 {
   public:
-	using MegaVertex = GpuGeometryBatch::Vertex;
-
 	GpuWorldRenderer();
 	GpuWorldRenderer(const GpuWorldRenderer &other);
 	~GpuWorldRenderer();
@@ -29,17 +28,22 @@ class GpuWorldRenderer
 	void resize(int width, int height);
 	void render(const Camera &camera, const World &world);
 	size_t gpu_bytes() const;
+	bool uploaded_identity_matches(int32_t slot, uint64_t revision,
+		int32_t chunk_x, int32_t chunk_z, uint64_t voxel_revision) const;
 
   private:
 	ft_gpu_shader _world_shader;
 	ft_gpu_shader _sky_shader;
 	ft_gpu_shader _crosshair_shader;
+	ft_gpu_shader _shadow_shader;
 	GpuTextureAtlas _atlas;
 	GpuGeometryBatch _batch;
 
 	GLuint _sky_vao;
 	GLuint _crosshair_vao;
 	GLuint _crosshair_vbo;
+	GLuint _shadow_vao;
+	GLuint _shadow_vbo;
 	int _width;
 	int _height;
 
@@ -52,8 +56,14 @@ class GpuWorldRenderer
 	GLint _u_atlas_loaded;
 	GLint _u_tile_uvs;
 	GLint _u_fallback;
+	GLint _u_sky_darkening;
 	GLint _u_sky_size;
 	GLint _u_crosshair_color;
+	GLint _u_shadow_mvp;
+	GLint _u_shadow_center;
+	GLint _u_shadow_radius;
+	GLint _u_shadow_y;
+	GLint _u_shadow_alpha;
 
 	bool compile_shaders(const std::string &shader_dir);
 	void cache_uniforms();
@@ -61,6 +71,8 @@ class GpuWorldRenderer
 	void update_crosshair_geometry();
 	void draw_sky() const;
 	void draw_crosshair() const;
+	void draw_player_shadow(const Camera &camera, const World &world,
+		const float *mvp);
 
 	static bool compile_shader_from_file(ft_gpu_shader &shader,
 		const char *vert_path, const char *frag_path);

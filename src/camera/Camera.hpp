@@ -24,6 +24,7 @@ class Camera
 	void initialize();
 	void update_orientation(const CameraInput &input, double delta_seconds);
 	void update(const CameraInput &input, double delta_seconds);
+	static double max_pitch();
 
   private:
 	static const double MOUSE_SENSITIVITY;

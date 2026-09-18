@@ -67,7 +67,7 @@ int32_t WorldRevisionServer::handle_message(int32_t client_handle,
 }
 
 int32_t WorldRevisionServer::apply_biome_size_range_override(json_group *revision,
-	terrain_generation_config &revision_config)
+	voxel_generation_config &revision_config)
 {
 	json_item	*size_min;
 	json_item	*size_max;
@@ -83,7 +83,7 @@ int32_t WorldRevisionServer::apply_biome_size_range_override(json_group *revisio
 }
 
 int32_t WorldRevisionServer::apply_biome_specific_override(json_group *revision,
-	terrain_generation_config &revision_config)
+	voxel_generation_config &revision_config)
 {
 	json_item	*biome_index;
 	json_item	*biome_min;
@@ -103,7 +103,7 @@ int32_t WorldRevisionServer::apply_biome_specific_override(json_group *revision,
 	if (biome_index == nullptr)
 		return (FT_ERR_INVALID_ARGUMENT);
 	index = static_cast<uint32_t>(ft_atoi(biome_index->value));
-	if (index >= TERRAIN_MAX_CUSTOM_BIOMES)
+	if (index >= VOXEL_MAX_CUSTOM_BIOMES)
 		return (FT_ERR_INVALID_ARGUMENT);
 	result = FT_ERR_SUCCESS;
 	if (biome_min != nullptr || biome_max != nullptr)
@@ -125,7 +125,7 @@ int32_t WorldRevisionServer::apply_biome_specific_override(json_group *revision,
 }
 
 int32_t WorldRevisionServer::apply_biome_config_overrides(json_group *revision,
-	terrain_generation_config &revision_config)
+	voxel_generation_config &revision_config)
 {
 	json_item	*sizes_enabled;
 	int32_t		enabled;
@@ -152,14 +152,14 @@ int32_t WorldRevisionServer::handle_begin_action(json_group *revision)
 {
 	json_item					*mode_item;
 	int32_t						mode;
-	terrain_generation_config	revision_config;
+	voxel_generation_config	revision_config;
 	int32_t						result;
 
 	mode_item = json_find_item(revision, "mode");
 	mode = mode_item == nullptr ? -1 : ft_atoi(mode_item->value);
 	if (mode < World::REGEN_DECORATION_REFRESH || mode > World::REGEN_FULL)
 		return (FT_ERR_INVALID_ARGUMENT);
-	result = revision_config.initialize(this->world_->terrain_generation_settings());
+	result = revision_config.initialize(this->world_->voxel_generation_settings());
 	if (result == FT_ERR_SUCCESS)
 		result = this->apply_biome_config_overrides(revision, revision_config);
 	if (result != FT_ERR_SUCCESS)

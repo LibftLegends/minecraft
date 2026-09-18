@@ -15,7 +15,7 @@ class WorldGenerationWorkerLoop
 
   private:
 	static std::unique_ptr<WorldGenerationPipeline::Result> process_request(WorldGenerationPipeline &pipeline,
-		std::unique_ptr<WorldGenerationPipeline::Request> request) noexcept;
+		std::unique_ptr<WorldGenerationPipeline::Request> &request) noexcept;
 	static bool request_is_cancelled(const WorldGenerationPipeline &pipeline,
 		const WorldGenerationPipeline::Request &request) noexcept;
 };

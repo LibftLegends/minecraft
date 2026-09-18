@@ -15,6 +15,10 @@ class WorldChunkSnapshotReader
 		const WorldGenerationPipeline::WorldChunkSnapshot &snapshot) noexcept;
 	static int32_t lookup_snapshot_block(void *user_data, int32_t world_x,
 		int32_t world_y, int32_t world_z, uint32_t *block_id) noexcept;
+	static int32_t lookup_snapshot_mesh_block(void *user_data, int32_t world_x,
+		int32_t world_y, int32_t world_z, uint32_t *block_id) noexcept;
+	static int32_t lookup_snapshot_light(void *user_data, int32_t world_x,
+		int32_t world_y, int32_t world_z, uint8_t *packed_light) noexcept;
 
   private:
 	static int32_t lookup_border_block(const WorldGenerationPipeline::WorldChunkSnapshot &snapshot,

@@ -5,9 +5,10 @@
 #include "../../src/chunks/WorldChunk.hpp"
 #include "../../src/chunks/WorldChunkLoader.hpp"
 #include "../../src/chunks/WorldChunkStore.hpp"
+#include "../../src/edits/WorldEditHistory.hpp"
 #include "../../src/coordinates/WorldCoordinates.hpp"
 #include "../../Libft/Modules/Errno/errno.hpp"
-#include "../../Libft/Modules/Voxel/terrain_api.hpp"
+#include "../../Libft/Modules/Voxel/voxel_api.hpp"
 #include "../../src/queries/WorldBlockQuery.hpp"
 #include "../../src/edits/WorldBlockEditor.hpp"
 #include "../../src/queries/WorldRaycaster.hpp"
@@ -16,6 +17,9 @@
 #include <chrono>
 #include <shared_mutex>
 
+class WorldChunkStreamer;
+class WorldRevisionManager;
+
 class World
 {
   public:
@@ -23,7 +27,7 @@ class World
 	{
 		REGEN_DECORATION_REFRESH = 0,
 		REGEN_UNDERGROUND_REFRESH = 1,
-		REGEN_TERRAIN_RESHAPING = 2,
+		REGEN_VOXEL_RESHAPING = 2,
 		REGEN_FULL = 3
 	};
 
@@ -61,7 +65,7 @@ class World
 
 	struct							RevisionRequest
 	{
-		terrain_generation_config	config;
+		voxel_generation_config	config;
 		RegenerationMode			mode;
 		uint32_t					stage_mask;
 		std::vector<RevisionChunkCoordinate> selected_chunks;
@@ -78,6 +82,31 @@ class World
 
 	struct							StreamDiagnostics
 	{
+		size_t						stale_result_count;
+		size_t						stale_stream_result_count;
+		size_t						stale_remesh_result_count;
+		size_t						playable_failed_count;
+		size_t						playable_required_count;
+		size_t						playable_drawable_count;
+		size_t						active_generation_count;
+		size_t						remesh_queue_peak;
+		size_t						remesh_priority_queue_depth;
+		size_t						interactive_remesh_queue_depth;
+		uint64_t					remesh_starvation_promotions;
+		uint64_t					oldest_remesh_queue_age;
+		uint64_t					remesh_snapshot_bytes;
+		uint64_t					remesh_capture_duration_nanoseconds;
+		uint64_t					remesh_capture_count;
+		uint64_t					remesh_scanned_cells;
+		uint64_t					remesh_propagated_cells;
+		uint64_t					remesh_light_queue_peak;
+		uint64_t					remesh_completed_count;
+		uint64_t					remesh_incremental_completed_count;
+		uint64_t					remesh_full_completed_count;
+		uint64_t					remesh_geometry_only_count;
+		uint64_t					remesh_canceled_count;
+		size_t					deferred_edit_count;
+		size_t					deferred_edit_cursor;
 		uint64_t					frame;
 		uint64_t					progress_frame;
 		size_t						candidate_count;
@@ -85,6 +114,11 @@ class World
 		size_t						pending_count;
 		size_t						retryable_count;
 		size_t						failed_count;
+		size_t					stale_remesh_capture_count;
+		size_t					stale_remesh_dependency_count;
+		size_t					stale_remesh_pending_count;
+		size_t					stale_remesh_revision_count;
+		uint64_t					oldest_result_age_nanoseconds;
 		uint64_t					oldest_pending_age;
 		int32_t						last_error;
 	};
@@ -100,10 +134,12 @@ class World
 	int32_t							center_chunk_z;
 	int32_t							active_render_distance;
 	char							seed[128];
-	terrain_generation_config		terrain_config;
-	terrain_generation_context		terrain_context;
-	bool							terrain_generation_started;
+	voxel_generation_config		voxel_config;
+	voxel_generation_context		voxel_context;
+	bool							voxel_generation_started;
+	bool							lifecycle_active_;
 	uint64_t						current_tick;
+	uint64_t						geometry_revision;
 	WorldEditHistory				edit_history;
 	ft_uniqueptr<WorldChunkStreamer> chunk_streamer_storage_;
 	ft_uniqueptr<WorldRevisionManager> revision_manager_storage_;
@@ -117,16 +153,23 @@ class World
 
 	int32_t initialize(const char *seed_value);
 	int32_t initialize(const char *seed_value,
-		const char *terrain_config_file_path);
-	void set_terrain_config(const terrain_generation_config &config);
-	const terrain_generation_config &terrain_generation_settings() const;
-	int32_t load_terrain_config(const char *file_path);
-	int32_t save_terrain_config(const char *file_path) const;
+		const char *voxel_config_file_path);
+	void mark_geometry_changed() noexcept;
+	void set_voxel_config(const voxel_generation_config &config);
+	const voxel_generation_config &voxel_generation_settings() const;
+	int32_t load_voxel_config(const char *file_path);
+	int32_t save_voxel_config(const char *file_path) const;
 	void destroy();
 	int32_t update_around(double camera_x, double camera_z,
 		int32_t generation_budget);
 	int32_t update_around(double camera_x, double camera_z,
 		int32_t generation_budget, int32_t render_distance);
+	int32_t set_light_update_config(
+		const voxel_light_update_config &config) noexcept;
+	const voxel_light_update_config &light_update_config() const noexcept;
+	int32_t set_interactive_light_update_config(
+		const voxel_light_update_config &config) noexcept;
+	const voxel_light_update_config &interactive_light_update_config() const noexcept;
 	int32_t stream_last_error() const;
 	int32_t stream_retryable_count() const;
 	StreamDiagnostics stream_diagnostics() const;
@@ -141,6 +184,9 @@ class World
 	int32_t delete_block_at(int32_t world_x, int32_t world_y, int32_t world_z);
 	int32_t place_block_at(int32_t world_x, int32_t world_y, int32_t world_z,
 		uint32_t block_id);
+	int32_t apply_authoritative_block_change(
+		const game_block_change_request &request,
+		game_block_delta *delta_out);
 	void advance_tick();
 	int32_t undo_last_edit();
 	int32_t redo_last_edit();
@@ -157,8 +203,20 @@ class World
 	const WorldChunk *find_chunk(int32_t chunk_x, int32_t chunk_z) const;
 	WorldChunk *find_chunk_mutable(int32_t chunk_x, int32_t chunk_z);
 	void register_chunk_index(const WorldChunk &chunk);
+	int32_t capture_remesh_snapshot(int32_t chunk_x, int32_t chunk_z,
+		WorldGenerationPipeline::WorldChunkSnapshot &snapshot) const noexcept;
+	bool remesh_capture_is_current(int32_t chunk_x, int32_t chunk_z,
+		uint64_t request_id, uint64_t voxel_revision,
+		uint64_t light_revision, uint16_t content_version,
+		uint16_t light_input_version) const noexcept;
+	void clear_pending_remesh(int32_t chunk_x, int32_t chunk_z,
+		uint64_t request_id) noexcept;
+	/* WorldChunkStreamer::update() runs while World already owns the write
+	 * lock.  This helper is restricted to that call boundary. */
+	void clear_pending_remesh_unlocked(int32_t chunk_x, int32_t chunk_z,
+		uint64_t request_id) noexcept;
 
-	int32_t begin_world_revision(const terrain_generation_config &config,
+	int32_t begin_world_revision(const voxel_generation_config &config,
 		RegenerationMode mode);
 	int32_t cancel_world_revision();
 	WorldRevision world_revision() const;
@@ -218,10 +276,10 @@ class World
     uint32_t world_revision_id_;
     uint32_t revision_stage_mask_;
     RegenerationMode revision_mode_;
-    terrain_generation_config revision_config_;
+    voxel_generation_config revision_config_;
     std::vector<RevisionChunk> revision_selected_;
     std::vector<RevisionChunk> revision_manual_protected_;
-    std::vector<WorldDeferredBlockEdit> deferred_edits_;
+    std::vector<WorldGenerationPipeline::WorldDeferredBlockEdit> deferred_edits_;
     bool revision_regeneration_active_;
     uint64_t revision_generation_epoch_;
     std::size_t revision_job_count_;
@@ -232,9 +290,9 @@ class World
     mutable std::shared_mutex world_data_mutex_;
 
     void copy_seed(const char *seed_value);
+    int32_t seed_first_chunk_and_stream();
     void clear_chunk_index();
     void rebuild_chunk_index();
-    void register_chunk_index(const WorldChunk &chunk);
     int32_t try_load_chunk_at(int32_t chunk_x, int32_t chunk_z);
     int32_t stream_chunks_sync(int32_t stream_radius, int32_t budget, int32_t *generated);
     int32_t stream_chunks_async(int32_t stream_radius, int32_t budget, int32_t *generated);

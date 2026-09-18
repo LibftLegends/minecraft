@@ -18,7 +18,7 @@ class WorldRevisionManager
 	uint32_t					revision_id_;
 	uint32_t					stage_mask_;
 	int32_t						mode_;
-	terrain_generation_config	config_;
+	voxel_generation_config	config_;
 	std::vector<RevisionChunk> selected_;
 	std::vector<RevisionChunk> manual_protected_;
 	WorldRegenerationProgress	progress_;
@@ -29,7 +29,7 @@ class WorldRevisionManager
 	WorldRevisionManager &operator=(const WorldRevisionManager &other);
 
 	void reset() noexcept;
-	int32_t begin(const terrain_generation_config &config,
+	int32_t begin(const voxel_generation_config &config,
 		int32_t mode) noexcept;
 	int32_t cancel() noexcept;
 	uint32_t identifier() const noexcept;
@@ -58,7 +58,7 @@ class WorldRevisionManager
 	int32_t start_regeneration() noexcept;
 	int32_t regenerate_selected_chunks(int32_t *regenerated_count,
 		int32_t *skipped_count) noexcept;
-	int32_t apply_request(const terrain_generation_config &config, int32_t mode,
+	int32_t apply_request(const voxel_generation_config &config, int32_t mode,
 		uint32_t stage_mask, const std::vector<RevisionChunk> &selected_chunks,
 		const std::vector<RevisionChunk> &protected_chunks,
 		int32_t *regenerated_count, int32_t *skipped_count) noexcept;

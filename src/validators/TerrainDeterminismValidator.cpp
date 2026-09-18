@@ -64,9 +64,9 @@ int TerrainDeterminismValidator::generate_pair(int32_t world_x, int32_t world_z,
 	if (error_code == FT_ERR_SUCCESS)
 		error_code = second.initialize();
 	if (error_code == FT_ERR_SUCCESS)
-		error_code = terrain_generate_chunk(first, world_x, world_z, seed);
+		error_code = voxel_generate_chunk(first, world_x, world_z, seed);
 	if (error_code == FT_ERR_SUCCESS)
-		error_code = terrain_generate_chunk(second, world_x, world_z, seed);
+		error_code = voxel_generate_chunk(second, world_x, world_z, seed);
 	if (error_code == FT_ERR_SUCCESS)
 		error_code = compare_chunks(first, second);
 	(void)first.destroy();

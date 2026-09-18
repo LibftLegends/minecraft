@@ -1,5 +1,78 @@
 #include "../../src/chunks/WorldChunkLoader.hpp"
 
+namespace
+{
+	struct LightLookupContext
+	{
+		WorldChunk *chunks;
+		int32_t chunk_count;
+		WorldChunk *target;
+	};
+
+	int32_t lookup_world_light_block(void *user_data, int32_t world_x,
+		int32_t world_y, int32_t world_z, uint32_t *block_id) noexcept
+	{
+		LightLookupContext *context;
+		int32_t chunk_x;
+		int32_t chunk_z;
+		const WorldChunk *chunk;
+		int32_t local_x;
+		int32_t local_z;
+
+		if (user_data == nullptr || block_id == nullptr)
+			return (FT_ERR_INVALID_ARGUMENT);
+		if (world_y < 0 || world_y >= GAME_VOXEL_CHUNK_HEIGHT)
+		{
+			*block_id = GAME_VOXEL_AIR_BLOCK;
+			return (FT_ERR_SUCCESS);
+		}
+		context = static_cast<LightLookupContext *>(user_data);
+		chunk_x = WorldCoordinates::floor_divide(world_x,
+			GAME_VOXEL_CHUNK_WIDTH);
+		chunk_z = WorldCoordinates::floor_divide(world_z,
+			GAME_VOXEL_CHUNK_DEPTH);
+		chunk = context->target;
+		if (chunk == nullptr || chunk->chunk_x != chunk_x
+			|| chunk->chunk_z != chunk_z)
+			chunk = WorldChunkStore::find_chunk(context->chunks,
+				context->chunk_count, chunk_x, chunk_z);
+		/* The target has already been generated when this callback is used by
+		 * initialize_chunk(), but it is deliberately not marked initialized
+		 * until lighting and the first mesh have completed.  Treating that target
+		 * as an unknown solid chunk suppresses sky light for the entire initial
+		 * mesh.  Neighbours still require the published/initialized state so an
+		 * in-flight chunk cannot be read as open air. */
+		if (chunk == nullptr || (chunk != context->target
+			&& chunk->initialized == false))
+		{
+			/* Unknown streamed space is a conservative solid boundary. It must
+			 * never become an accidental opening into the sky. */
+			*block_id = VOXEL_GENERATOR_STONE_BLOCK;
+			return (FT_ERR_SUCCESS);
+		}
+		local_x = WorldCoordinates::positive_modulo(world_x,
+			GAME_VOXEL_CHUNK_WIDTH);
+		local_z = WorldCoordinates::positive_modulo(world_z,
+			GAME_VOXEL_CHUNK_DEPTH);
+		return (chunk->chunk.read_block(local_x, world_y, local_z, block_id));
+	}
+
+	int32_t lookup_local_light_block(void *user_data, int32_t world_x,
+		int32_t world_y, int32_t world_z, uint32_t *block_id) noexcept
+	{
+		game_voxel_chunk *chunk = static_cast<game_voxel_chunk *>(user_data);
+		if (chunk == nullptr || block_id == nullptr)
+			return (FT_ERR_INVALID_ARGUMENT);
+		world_x %= GAME_VOXEL_CHUNK_WIDTH;
+		world_z %= GAME_VOXEL_CHUNK_DEPTH;
+		if (world_x < 0)
+			world_x += GAME_VOXEL_CHUNK_WIDTH;
+		if (world_z < 0)
+			world_z += GAME_VOXEL_CHUNK_DEPTH;
+		return (chunk->read_block(world_x, world_y, world_z, block_id));
+	}
+}
+
 WorldChunkLoader::WorldChunkLoader()
 {
 }
@@ -33,7 +106,7 @@ int32_t WorldChunkLoader::setup_chunk_coordinates(WorldChunk *world_chunk,
 }
 
 int32_t WorldChunkLoader::init_chunk_data(WorldChunk *world_chunk,
-	const char *seed, const terrain_generation_config *config)
+	const char *seed, const voxel_generation_config *config)
 {
 	int32_t	err;
 
@@ -47,10 +120,10 @@ int32_t WorldChunkLoader::init_chunk_data(WorldChunk *world_chunk,
 		return (err);
 	}
 	if (config != nullptr)
-		err = terrain_generate_chunk(world_chunk->chunk, world_chunk->world_x,
+		err = voxel_generate_chunk(world_chunk->chunk, world_chunk->world_x,
 				world_chunk->world_z, seed, *config);
 	else
-		err = terrain_generate_chunk(world_chunk->chunk, world_chunk->world_x,
+		err = voxel_generate_chunk(world_chunk->chunk, world_chunk->world_x,
 				world_chunk->world_z, seed);
 	if (err != FT_ERR_SUCCESS)
 	{
@@ -64,9 +137,18 @@ int32_t WorldChunkLoader::build_mesh_with_neighbors(WorldChunk *world_chunk,
 	int32_t chunk_x, int32_t chunk_z, WorldChunk *chunks, int32_t chunk_count)
 {
 	int32_t	err;
+	LightLookupContext light_context;
 
+	light_context.chunks = chunks;
+	light_context.chunk_count = chunk_count;
+	light_context.target = world_chunk;
+	err = voxel_light_build_chunk(world_chunk->light, world_chunk->world_x,
+		world_chunk->world_z, lookup_world_light_block, &light_context);
+	if (err != FT_ERR_SUCCESS)
+		return (err);
 	err = ChunkNeighborMesher::generate_with_neighbors(world_chunk->mesh,
-			world_chunk->chunk, chunk_x, chunk_z, chunks, chunk_count);
+			world_chunk->chunk, chunk_x, chunk_z, chunks, chunk_count,
+			&world_chunk->light);
 	if (err != FT_ERR_SUCCESS)
 	{
 		(void)chunk_mesh_destroy(world_chunk->mesh);
@@ -86,7 +168,12 @@ int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk,
 	err = init_chunk_data(world_chunk, seed);
 	if (err != FT_ERR_SUCCESS)
 		return (err);
-	err = chunk_mesh_generate_from_chunk(world_chunk->mesh, world_chunk->chunk);
+	err = voxel_light_build_chunk_local(world_chunk->light,
+		world_chunk->world_x, world_chunk->world_z, lookup_local_light_block,
+		&world_chunk->chunk);
+	if (err == FT_ERR_SUCCESS)
+		err = chunk_mesh_generate_from_chunk_with_light(world_chunk->mesh,
+			world_chunk->chunk, world_chunk->light);
 	if (err != FT_ERR_SUCCESS)
 	{
 		(void)chunk_mesh_destroy(world_chunk->mesh);
@@ -96,8 +183,17 @@ int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk,
 	world_chunk->initialized = true;
 	world_chunk->mesh_revision += 1U;
 	world_chunk->voxel_revision += 1U;
-	world_chunk->pending_mesh_request_id = 0U;
+	world_chunk->light_revision += 1U;
+	world_chunk->content_version = 1U;
+	world_chunk->light_version = 1U;
+	world_chunk->light_input_version = 1U;
+	world_chunk->computed_light_input_version = 1U;
+	world_chunk->light_ready_for_render = true;
+	world_chunk->clear_pending_remesh_request();
 	world_chunk->mesh_dirty = false;
+	err = world_chunk->publish_read_state();
+	if (err != FT_ERR_SUCCESS)
+		return (err);
 	return (FT_ERR_SUCCESS);
 }
 
@@ -120,14 +216,23 @@ int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk,
 	world_chunk->initialized = true;
 	world_chunk->mesh_revision += 1U;
 	world_chunk->voxel_revision += 1U;
-	world_chunk->pending_mesh_request_id = 0U;
+	world_chunk->light_revision += 1U;
+	world_chunk->content_version = 1U;
+	world_chunk->light_version = 1U;
+	world_chunk->light_input_version = 1U;
+	world_chunk->computed_light_input_version = 1U;
+	world_chunk->light_ready_for_render = true;
+	world_chunk->clear_pending_remesh_request();
 	world_chunk->mesh_dirty = false;
+	err = world_chunk->publish_read_state();
+	if (err != FT_ERR_SUCCESS)
+		return (err);
 	return (FT_ERR_SUCCESS);
 }
 
 int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk,
 	int32_t chunk_x, int32_t chunk_z, const char *seed, WorldChunk *chunks,
-	int32_t chunk_count, const terrain_generation_config &config)
+	int32_t chunk_count, const voxel_generation_config &config)
 {
 	int32_t	err;
 
@@ -144,8 +249,17 @@ int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk,
 	world_chunk->initialized = true;
 	world_chunk->mesh_revision += 1U;
 	world_chunk->voxel_revision += 1U;
-	world_chunk->pending_mesh_request_id = 0U;
+	world_chunk->light_revision += 1U;
+	world_chunk->content_version = 1U;
+	world_chunk->light_version = 1U;
+	world_chunk->light_input_version = 1U;
+	world_chunk->computed_light_input_version = 1U;
+	world_chunk->light_ready_for_render = true;
+	world_chunk->clear_pending_remesh_request();
 	world_chunk->mesh_dirty = false;
+	err = world_chunk->publish_read_state();
+	if (err != FT_ERR_SUCCESS)
+		return (err);
 	return (FT_ERR_SUCCESS);
 }
 
@@ -172,20 +286,31 @@ int32_t WorldChunkLoader::remesh_chunk(WorldChunk *chunks, int32_t chunk_count,
 {
 	WorldChunk	*wc;
 	int32_t		err;
+	LightLookupContext light_context;
 
 	wc = WorldChunkStore::find_chunk_mutable(chunks, chunk_count, chunk_x,
 			chunk_z);
 	if (!wc)
 		return (FT_ERR_SUCCESS);
-	wc->pending_mesh_request_id = 0U;
+	wc->clear_pending_remesh_request();
 	wc->mesh_dirty = true;
+	light_context.chunks = chunks;
+	light_context.chunk_count = chunk_count;
+	light_context.target = wc;
+	err = voxel_light_build_chunk(wc->light, wc->world_x, wc->world_z,
+		lookup_world_light_block, &light_context);
+	if (err != FT_ERR_SUCCESS)
+		return (err);
+	wc->light_revision += 1U;
 	err = chunk_mesh_clear(wc->mesh);
 	if (err == FT_ERR_SUCCESS)
-		err = chunk_mesh_generate_from_chunk(wc->mesh, wc->chunk);
+		err = chunk_mesh_generate_from_chunk_with_light(wc->mesh, wc->chunk,
+			wc->light);
 	if (err == FT_ERR_SUCCESS)
 	{
 		wc->mesh_revision += 1U;
 		wc->mesh_dirty = false;
+		err = wc->publish_read_state();
 	}
 	return (err);
 }
@@ -195,52 +320,44 @@ int32_t WorldChunkLoader::remesh_chunk(WorldChunk *chunks, int32_t chunk_count,
 {
 	WorldChunk	*wc;
 	int32_t		err;
+	LightLookupContext light_context;
 
 	wc = WorldChunkStore::find_chunk_mutable(chunks, chunk_count, chunk_x,
 			chunk_z);
 	if (!wc)
 		return (FT_ERR_SUCCESS);
-	wc->pending_mesh_request_id = 0U;
+	wc->clear_pending_remesh_request();
 	wc->mesh_dirty = true;
+	light_context.chunks = chunks;
+	light_context.chunk_count = chunk_count;
+	light_context.target = wc;
+	err = voxel_light_build_chunk(wc->light, wc->world_x, wc->world_z,
+		lookup_world_light_block, &light_context);
+	if (err != FT_ERR_SUCCESS)
+		return (err);
+	wc->light_revision += 1U;
 	err = chunk_mesh_clear(wc->mesh);
 	if (err != FT_ERR_SUCCESS)
 		return (err);
 	if (!use_neighbors)
 	{
-		err = chunk_mesh_generate_from_chunk(wc->mesh, wc->chunk);
+		err = chunk_mesh_generate_from_chunk_with_light(wc->mesh, wc->chunk,
+			wc->light);
 		if (err == FT_ERR_SUCCESS)
 		{
 			wc->mesh_revision += 1U;
 			wc->mesh_dirty = false;
+			err = wc->publish_read_state();
 		}
 		return (err);
 	}
 	err = ChunkNeighborMesher::generate_with_neighbors(wc->mesh, wc->chunk,
-			chunk_x, chunk_z, chunks, chunk_count);
+			chunk_x, chunk_z, chunks, chunk_count, &wc->light);
 	if (err == FT_ERR_SUCCESS)
 	{
 		wc->mesh_revision += 1U;
 		wc->mesh_dirty = false;
+		err = wc->publish_read_state();
 	}
-	return (err);
-}
-
-int32_t WorldChunkLoader::remesh_edited_chunk_border(WorldChunk *chunks,
-	int32_t chunk_count, int32_t chunk_x, int32_t chunk_z, int32_t local_x,
-	int32_t local_z)
-{
-	int32_t	err;
-
-	err = remesh_chunk(chunks, chunk_count, chunk_x, chunk_z, true);
-	if (err != FT_ERR_SUCCESS)
-		return (err);
-	if (local_x == 0)
-		err = remesh_chunk(chunks, chunk_count, chunk_x - 1, chunk_z, true);
-	if (err == FT_ERR_SUCCESS && local_x == GAME_VOXEL_CHUNK_WIDTH - 1)
-		err = remesh_chunk(chunks, chunk_count, chunk_x + 1, chunk_z, true);
-	if (err == FT_ERR_SUCCESS && local_z == 0)
-		err = remesh_chunk(chunks, chunk_count, chunk_x, chunk_z - 1, true);
-	if (err == FT_ERR_SUCCESS && local_z == GAME_VOXEL_CHUNK_DEPTH - 1)
-		err = remesh_chunk(chunks, chunk_count, chunk_x, chunk_z + 1, true);
 	return (err);
 }

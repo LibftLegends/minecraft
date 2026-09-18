@@ -91,6 +91,10 @@ int32_t ChunkNeighborMesher::lookup_block(void *user_data, int32_t world_x,
 	resolve_neighbor_read(*ctx, local_x, local_z, &wc, &read_x, &read_z);
 	if (!wc || !wc->initialized)
 	{
+		/* Geometry and lighting need different unknown-neighbour semantics.  A
+		 * geometry query must close the current chunk's world-facing boundary;
+		 * returning air makes the boundary face drawable while the neighbour is
+		 * absent.  Lighting uses its own conservative solid fallback. */
 		*block_id = GAME_VOXEL_AIR_BLOCK;
 		return (FT_ERR_SUCCESS);
 	}
@@ -99,11 +103,11 @@ int32_t ChunkNeighborMesher::lookup_block(void *user_data, int32_t world_x,
 
 int32_t ChunkNeighborMesher::generate_with_neighbors(chunk_mesh &mesh,
 	const game_voxel_chunk &chunk, int32_t chunk_x, int32_t chunk_z,
-	WorldChunk *chunks, int32_t chunk_count)
+	WorldChunk *chunks, int32_t chunk_count, const voxel_light_chunk *light)
 {
 	NeighborContext	ctx;
 
 	ctx = build_context(chunk_x, chunk_z, chunks, chunk_count);
 	return (chunk_mesh_generate_from_chunk_with_neighbors(mesh, chunk, chunk_x,
-			chunk_z, &lookup_block, &ctx));
+		chunk_z, &lookup_block, &ctx, light));
 }

@@ -5,6 +5,7 @@
 #include "../../src/camera/Camera.hpp"
 #include "../../src/world/World.hpp"
 #include "../../src/debug/RenderDebug.hpp"
+#include "../../src/diagnostics/SystemMemoryInfo.hpp"
 #include "../../src/platform/InputReader.hpp"
 #include "../../src/platform/ApplicationWindow.hpp"
 #include "../../src/render/VoxelRenderer.hpp"
@@ -19,6 +20,8 @@
 class GameSession
 {
   public:
+	static const char *BIOME_NAMES[5];
+
 	enum class Action
 	{
 		CONTINUE,
@@ -34,10 +37,11 @@ class GameSession
 
 	int start(const std::string &seed, ApplicationWindow &window,
 		VoxelRenderer &renderer);
-	void set_terrain_generation_config(const terrain_generation_config &config);
+	void set_voxel_generation_config(const voxel_generation_config &config);
 	void stop();
 	bool is_active() const;
 	bool is_ready_to_play() const;
+	void activate_configured_render_distance();
 	int error_code() const;
 
 	int loading_tick(const RenderDistanceStrategy &strategy);
@@ -66,6 +70,10 @@ class GameSession
     uint64_t render_debug_frame_;
     uint32_t cached_ram_mb_;
     uint32_t cached_vram_mb_;
+    int32_t cached_biome_world_x_;
+    int32_t cached_biome_world_z_;
+    bool cached_biome_valid_;
+    char cached_biome_name_[24];
     int32_t revision_preview_center_x_;
     int32_t revision_preview_center_z_;
     uint32_t revision_preview_identifier_;
@@ -82,6 +90,9 @@ class GameSession
 	void build_render_debug(VoxelRenderer &renderer);
 	void sync_player_character_location();
 	void reset_session_state();
+#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	void report_loading_gaps() const;
+#endif
 };
 
 #endif

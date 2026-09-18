@@ -76,14 +76,17 @@ int32_t WorldEditHistory::apply(World &world, const Record &entry,
 			block_id_to_write);
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
+	wc->mark_content_changed();
+	world.mark_geometry_changed();
+	world.chunk_streamer.mark_remesh_dirty(*wc);
 	recorded_edit.world_x = entry.edit.world_x;
 	recorded_edit.world_y = entry.edit.world_y;
 	recorded_edit.world_z = entry.edit.world_z;
 	recorded_edit.block_type = block_id_to_write;
 	recorded_edit.tick = world.current_tick;
 	(void)wc->chunk.record_dirty_edit(recorded_edit);
-	return (WorldChunkLoader::remesh_edited_chunk_border(world.chunks,
-			world.chunk_count, chunk_x, chunk_z, local_x, local_z));
+	world.chunk_streamer.mark_neighbor_remeshes(chunk_x, chunk_z, true);
+	return (FT_ERR_SUCCESS);
 }
 
 int32_t WorldEditHistory::undo(World &world)

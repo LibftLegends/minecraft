@@ -138,6 +138,6 @@ endif
 # feature, or link configurations.  Compute one invocation-level identity;
 # do not launch a fingerprinting process per object.
 FT_VOX_CONFIG_FINGERPRINT := $(shell printf '%s\n' \
-    '$(CC)|$(CFLAGS)|$(COMPILE_FLAGS)|$(LDFLAGS)|$(OPT_LEVEL)|$(DEBUG)|$(COVERAGE)|$(ENABLE_LTO)|$(ENABLE_PGO)|$(HAVE_FREETYPE)|$(REPRODUCIBLE)' | \
+    '$(CC)|$(CFLAGS)|$(COMPILE_FLAGS)|$(LDFLAGS)|$(OPT_LEVEL)|$(DEBUG)|$(COVERAGE)|$(ENABLE_LTO)|$(ENABLE_PGO)|$(HAVE_FREETYPE)|$(REPRODUCIBLE)|$(FT_VOX_ANALYTICS)' | \
     cksum | awk '{print $$1}')
 LIBFT_BUILD_OUTPUT_SUFFIX := _ft_vox_opt$(OPT_LEVEL)_cfg$(FT_VOX_CONFIG_FINGERPRINT)

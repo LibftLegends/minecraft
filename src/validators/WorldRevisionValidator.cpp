@@ -1,5 +1,10 @@
 #include "../../src/validators/WorldRevisionValidator.hpp"
 
+#include <chrono>
+#include <memory>
+#include <new>
+#include <thread>
+
 WorldRevisionValidator::WorldRevisionValidator()
 {
 }
@@ -32,8 +37,20 @@ int32_t WorldRevisionValidator::initialize_world_with_edit(World &world) noexcep
 		world.destroy();
 		return (1);
 	}
+	if (WorldRevisionValidator::wait_for_loaded_chunk(world, 1, 0)
+		!= FT_ERR_SUCCESS)
+	{
+		world.destroy();
+		return (1);
+	}
+	if (WorldRevisionValidator::quiesce_stream_pipeline(world)
+		!= FT_ERR_SUCCESS)
+	{
+		world.destroy();
+		return (1);
+	}
 	if (world.find_chunk_mutable(0, 0)->chunk.write_block(0, 0, 0,
-			TERRAIN_GENERATOR_STONE_BLOCK) != FT_ERR_SUCCESS)
+			VOXEL_GENERATOR_STONE_BLOCK) != FT_ERR_SUCCESS)
 	{
 		world.destroy();
 		return (1);
@@ -41,15 +58,60 @@ int32_t WorldRevisionValidator::initialize_world_with_edit(World &world) noexcep
 	return (FT_ERR_SUCCESS);
 }
 
+int32_t WorldRevisionValidator::quiesce_stream_pipeline(World &world) noexcept
+{
+	std::unique_ptr<WorldGenerationPipeline::Result> discarded_result;
+	int32_t iteration;
+
+	world.chunk_streamer.cancel_pending_remeshes();
+	iteration = 0;
+	while (iteration < 500)
+	{
+		while (world.chunk_streamer.pipeline().poll(discarded_result)
+			== FT_ERR_SUCCESS)
+			discarded_result.reset();
+		if (world.chunk_streamer.pipeline().queued_count() == 0U
+			&& world.chunk_streamer.pipeline().completed_count() == 0U
+			&& world.chunk_streamer.pipeline().active_count() == 0U)
+			return (FT_ERR_SUCCESS);
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		iteration += 1;
+	}
+	return (world.chunk_streamer.pipeline().queued_count() == 0U
+		&& world.chunk_streamer.pipeline().completed_count() == 0U
+		&& world.chunk_streamer.pipeline().active_count() == 0U
+		? FT_ERR_SUCCESS : FT_ERR_TIMEOUT);
+}
+
+int32_t WorldRevisionValidator::wait_for_loaded_chunk(World &world,
+	int32_t chunk_x, int32_t chunk_z) noexcept
+{
+	int32_t iteration;
+	int32_t error_code;
+
+	iteration = 0;
+	while (iteration < 200
+		&& world.find_chunk_mutable(chunk_x, chunk_z) == nullptr)
+	{
+		error_code = world.update_around(0.0, 0.0, 4);
+		if (error_code != FT_ERR_SUCCESS)
+			return (error_code);
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		iteration += 1;
+	}
+	return (world.find_chunk_mutable(chunk_x, chunk_z) != nullptr
+		? FT_ERR_SUCCESS : FT_ERR_NOT_FOUND);
+}
+
 WorldRevisionValidator::SelectionResults WorldRevisionValidator::apply_selection_actions(World &world,
 	std::vector<World::RevisionPreviewEntry> &preview) noexcept
 {
-	terrain_generation_config config;
+	voxel_generation_config config;
 	SelectionResults results;
 
-	terrain_default_generation_config(config);
+	voxel_default_generation_config(config);
 	results.begin_result = world.begin_world_revision(config,
-			World::REGEN_TERRAIN_RESHAPING);
+			World::REGEN_VOXEL_RESHAPING);
 	results.edit_select_result = world.select_revision_chunk(0, 0, true);
 	results.protect_result = world.set_chunk_protected(4, 0, true);
 	results.select_loaded_result = world.select_revision_chunk(1, 0, true);
@@ -104,7 +166,17 @@ int32_t WorldRevisionValidator::regenerate_and_check(World &world,
 	int32_t *regenerated, int32_t *skipped) noexcept
 {
 	int32_t regenerate_result;
+	World::WorldRevision revision;
 
+	revision = world.world_revision();
+	std::fprintf(stderr,
+					"world-revision: before-regeneration pending=%d selected=%zu"
+					" state_1_0=%d state_4_0=%d chunk_1_0=%s\n",
+					revision.pending ? 1 : 0,
+					revision.selected_count,
+					static_cast<int>(world.revision_state(1, 0)),
+					static_cast<int>(world.revision_state(4, 0)),
+					world.find_chunk_mutable(1, 0) == nullptr ? "missing" : "present");
 	regenerate_result = world.regenerate_selected_chunks(regenerated, skipped);
 	if (regenerate_result != FT_ERR_SUCCESS || *regenerated < 1 || *skipped < 1
 		|| world.world_revision().pending)
@@ -118,27 +190,48 @@ int32_t WorldRevisionValidator::regenerate_and_check(World &world,
 						world.world_revision().pending ? 1 : 0);
 		return (1);
 	}
+	{
+		WorldChunk *regenerated_chunk = world.find_chunk_mutable(1, 0);
+		if (regenerated_chunk == nullptr
+			|| regenerated_chunk->light_buffer_is_valid() == false
+			|| regenerated_chunk->light_is_current() == false
+			|| regenerated_chunk->light_ready_for_render == false)
+		{
+			std::fprintf(stderr,
+				"world-revision: regenerated chunk lost valid light "
+				"chunk=%s valid=%d current=%d ready=%d\n",
+				regenerated_chunk == nullptr ? "missing" : "present",
+				regenerated_chunk != nullptr
+					&& regenerated_chunk->light_buffer_is_valid() ? 1 : 0,
+				regenerated_chunk != nullptr
+					&& regenerated_chunk->light_is_current() ? 1 : 0,
+				regenerated_chunk != nullptr
+					&& regenerated_chunk->light_ready_for_render ? 1 : 0);
+			return (1);
+		}
+	}
 	return (FT_ERR_SUCCESS);
 }
 
 int32_t WorldRevisionValidator::roundtrip_metadata(World &world) noexcept
 {
 	const char *metadata_path;
-	World restored_world;
+	std::unique_ptr<World> restored_world(new (std::nothrow) World());
 
 	metadata_path = "world_revision_validator.bin";
-	if (world.save_revision_metadata(metadata_path) != FT_ERR_SUCCESS)
+	if (restored_world == nullptr
+		|| world.save_revision_metadata(metadata_path) != FT_ERR_SUCCESS)
 		return (1);
-	if (restored_world.initialize("revision-validator") != FT_ERR_SUCCESS
-		|| restored_world.load_revision_metadata(metadata_path) != FT_ERR_SUCCESS
-		|| !restored_world.is_chunk_protected(4, 0))
+	if (restored_world->initialize("revision-validator") != FT_ERR_SUCCESS
+		|| restored_world->load_revision_metadata(metadata_path) != FT_ERR_SUCCESS
+		|| !restored_world->is_chunk_protected(4, 0))
 	{
 		std::remove(metadata_path);
-		restored_world.destroy();
+		restored_world->destroy();
 		return (1);
 	}
 	std::remove(metadata_path);
-	restored_world.destroy();
+	restored_world->destroy();
 	return (FT_ERR_SUCCESS);
 }
 
@@ -147,13 +240,13 @@ int32_t WorldRevisionValidator::apply_request_test(World &world) noexcept
 	World::RevisionRequest request;
 	World::RevisionRequestResult request_result;
 
-	terrain_default_generation_config(request.config);
+	voxel_default_generation_config(request.config);
 	request.mode = World::REGEN_DECORATION_REFRESH;
-	request.stage_mask = TERRAIN_STAGE_DECORATION;
+	request.stage_mask = VOXEL_STAGE_DECORATION;
 	request.selected_chunks.push_back({1, 0});
 	if (world.apply_revision_request(request, &request_result) != FT_ERR_SUCCESS
 		|| request_result.regenerated_count < 1
-		|| request_result.stage_mask != TERRAIN_STAGE_DECORATION)
+		|| request_result.stage_mask != VOXEL_STAGE_DECORATION)
 		return (1);
 	return (FT_ERR_SUCCESS);
 }
@@ -169,28 +262,30 @@ bool WorldRevisionValidator::fail_if_error(World &world,
 
 int WorldRevisionValidator::validate() const
 {
-	World world;
+	std::unique_ptr<World> world(new (std::nothrow) World());
 	std::vector<World::RevisionPreviewEntry> preview;
 	int32_t regenerated;
 	int32_t skipped;
 
-	if (WorldRevisionValidator::initialize_world_with_edit(world) != FT_ERR_SUCCESS)
+	if (world == nullptr
+		|| WorldRevisionValidator::initialize_world_with_edit(*world)
+			!= FT_ERR_SUCCESS)
 		return (1);
-	if (WorldRevisionValidator::fail_if_error(world,
-			WorldRevisionValidator::setup_revision_selection(world, preview)))
+	if (WorldRevisionValidator::fail_if_error(*world,
+			WorldRevisionValidator::setup_revision_selection(*world, preview)))
 		return (1);
-	if (WorldRevisionValidator::fail_if_error(world,
-			WorldRevisionValidator::regenerate_and_check(world, &regenerated,
+	if (WorldRevisionValidator::fail_if_error(*world,
+			WorldRevisionValidator::regenerate_and_check(*world, &regenerated,
 				&skipped)))
 		return (1);
-	if (WorldRevisionValidator::fail_if_error(world,
-			WorldRevisionValidator::roundtrip_metadata(world)))
+	if (WorldRevisionValidator::fail_if_error(*world,
+			WorldRevisionValidator::roundtrip_metadata(*world)))
 		return (1);
-	if (WorldRevisionValidator::fail_if_error(world,
-			WorldRevisionValidator::apply_request_test(world)))
+	if (WorldRevisionValidator::fail_if_error(*world,
+			WorldRevisionValidator::apply_request_test(*world)))
 		return (1);
 	std::printf("world-revision: ok regenerated=%d skipped=%d\n", regenerated,
 		skipped);
-	world.destroy();
+	world->destroy();
 	return (0);
 }
