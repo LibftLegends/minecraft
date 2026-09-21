@@ -11,9 +11,19 @@ than an administrative revision tool. A player should be able to use a
 dedicated in-world block to inspect a map, choose chunks, pay a configurable
 world resource such as magical dust, draw and play cards from a regeneration-
 only deck, preview the result, and ask the authoritative world service to
-regenerate those chunks safely. Establish the adjacent survival foundations
-that make this loop playable: world item drops, inventory, recipe-book crafting,
-crafting stations, smelting, gear, food, health, and hunger.
+regenerate those chunks safely. Keep the broader survival foundations—world
+items, inventory, crafting, smelting, gear, food, health, hunger, and fauna—in
+the same roadmap, but give them a separate release gate so they do not delay
+validation or delivery of the central regeneration loop.
+
+This roadmap distinguishes two milestones. **Regeneration 1.0** is the first
+complete, playable World Loom/card-driven regeneration release. **Game 1.0**
+is the broader survival release that builds on it with the full item,
+crafting, survival, combat, farming, fauna, customizable player-avatar, and
+custom-structure progression package. This includes villages and villagers,
+and a late progression volcano/boss feature. Before either release, build a
+deliberately tiny end-to-end playable vertical slice to validate the core
+interaction and atomic world update.
 
 The same design must leave room for basic non-hostile animals—sheep, cows,
 pigs, and chickens—without allowing regeneration to duplicate, erase, or
@@ -44,6 +54,10 @@ The current Minecraft tree already contains useful foundations:
 - `EntityState` is a serializable motion/state representation, but it is not a
   complete creature simulation or renderer. There is no finished neutral-mob
   behavior/rendering system to extend yet.
+- Player movement/collision geometry exists, but it is not a rendered,
+  customizable character model. The slice may use a placeholder; Game 1.0 must
+  provide visible player avatars and a persistent appearance-customization
+  path.
 
 The old Libft `WORLD_REGENERATION.md` remains useful background for revisions,
 protection, and transitions. This document specializes that proposal into a
@@ -288,6 +302,37 @@ The exact persistence primitive may be implemented in Minecraft, but should
 use Libft's safe/atomic file facilities where their documented guarantees fit.
 Do not synchronously perform slow disk I/O while holding world/chunk locks.
 
+### 7.5 Dust acquisition and anti-duplication rules
+
+The minimum vertical slice may seed dust through a test fixture. Regeneration
+1.0 needs one clear, server-authoritative in-game source/reward and a persistent
+ledger, but it does not need to wait for the full inventory economy. For Game
+1.0, use this proposed resource loop:
+
+1. The player explores and mines configured, uncommon crystal deposits made
+   from the existing crystalline blocks (for example amethyst, amber, frost
+   crystal, and shimmer stone) or finds a small amount in a world cache.
+2. Mining yields the normal crystal block item. At a Workbench, a deterministic
+   `Refine Resonance` recipe converts configured crystal block items into a
+   distinct magical-dust item. Exact source blocks, tool tiers, yields, and
+   recipes are configuration data.
+3. The player deposits dust at the World Loom. The server validates the item
+   stack and inventory revision, then atomically removes it and credits the
+   Loom/player regeneration ledger. That balance pays only for regeneration
+   chunk costs and card draws by default; card crafting uses its own paper,
+   ink, and catalyst materials so dust is not charged twice for the same loop.
+
+The tutorial grants enough initial dust for a first successful operation.
+Later sources should reward exploration/mining rather than routine per-frame
+or repeatable actions. Track depleted deposits as player-authored world state:
+regeneration, chunk rollback, retry, or a card effect must not respawn a
+previously mined crystal deposit or duplicate its dust yield. Any intentional
+deposit regeneration needs its own explicit cooldown, cap, and persistent
+node identity. The resource configuration must report expected acquisition
+per hour against average draw and chunk costs, and the UI must show the balance,
+source, and cost before confirmation. Never let a dust-reward event be replayed
+or collected twice.
+
 ## 8. Regeneration-only deck and cards
 
 ### 8.1 Deck bounds and separation from player inventory
@@ -447,12 +492,15 @@ gamble behind a normal known-recipe button.
 cards, but power is explicit and bounded. Each card definition has a validated
 effect budget/complexity tier (such as target scope, biome influence, ore
 profile strength, or number of compatible operations). Each recipe tier has a
-minimum material/resource cost and a maximum allowed effect budget. Every
+minimum material cost and a maximum allowed effect budget. Every
 possible randomized result must fit the tier paid for; randomness selects the
 card identity within the tier, not a lucky over-budget power roll. Costs and
 budgets are configuration data, reviewed against regeneration limits and
 starter-deck strength. Stronger cards must still obey the world safety and
-preservation precedence in Section 8.3.
+preservation precedence in Section 8.3. By default, card crafting does not
+consume magical dust; dust is reserved for drawing and regenerating. A world
+config may deliberately add a separate dust cost, but it must be disclosed and
+must not replace or obscure the normal material recipe.
 
 The card catalog, recipe definitions, experiment candidate pools/weights,
 ingredient tags, discovery rewards, tier budgets, and unlock progression are
@@ -633,6 +681,88 @@ Add property tests for every emitted fluid cell: it belongs to a valid feature,
 its support/boundary rules hold, and edge continuation agrees when adjacent
 chunks are generated in either order.
 
+### 10.4 Extensible custom generation features and structures
+
+Custom content must use a versioned, data-driven generation contract rather
+than special-case code for each structure. A `custom_feature_definition`
+should contain stable feature/definition IDs, schema and content versions,
+allowed generation source (`DEFAULT_WORLD`, `REGENERATION_ONLY`, or both),
+minimum/maximum footprint in chunks, allowed biome/height/terrain tags,
+placement and rotation rules, required stages, feature/effect budget, and
+references to configured block palettes, structure pieces, entities, and
+progression unlocks. Callbacks, where unavoidable, are stable registered IDs;
+never serialize function pointers or give generation workers mutable `World`
+access.
+
+Plan a cross-chunk structure once in global world coordinates using a stable
+`structure_instance_id`, anchor, bounding box, required chunk footprint, and
+generation/config digest. Then produce chunk-local terrain/mesh fragments
+from that shared plan. Each chunk stores a structure-fragment reference with
+the instance ID, global bounds, local fragment bounds, anchor relation, and
+which neighboring chunk edges the structure continues across. The renderer
+must understand that a village road/building/volcano contour crossing a chunk
+edge is one continuous structure—not a completed structure ending at each
+chunk boundary. It must use consistent global coordinates, seam ownership,
+face culling, lighting inputs, and neighbor dependencies so the edge does not
+become a gap, duplicate surface, or false opaque wall. Do not copy the whole
+structure into every chunk or send structure meshes over the network.
+
+Before work begins, the server validates the complete footprint against the
+selected chunks, safe zone, protected/player-edited content, claims, terrain
+constraints, and per-session budgets. A feature requiring a contiguous area
+must not silently shrink, move into protected land, or generate only the
+selected fragment. Reject an incomplete selection with the missing footprint
+shown on the map, or require the player to choose another valid anchor. For a
+large multi-chunk feature, persist a group/instance manifest and per-chunk
+candidate status. Prepare all necessary fragments before making the feature
+active; then commit/publish through bounded per-chunk work while keeping the
+instance marked incomplete and non-interactive until every required fragment
+is committed. Crash recovery resumes or rolls back the group without leaving
+an untracked half-structure. Villagers, boss triggers, and loot become active
+only after the structure manifest is complete.
+
+The custom-feature registry is extensible through game configs/content packs:
+new structures, palettes, footprints, eligible biomes, regeneration cards,
+NPC role tables, and unlock conditions can be added without changing the
+chunk format or renderer for each new content definition. Config validation
+rejects unknown block/entity IDs, invalid footprints, unbounded piece counts,
+unsafe fluid placement, conflicting exclusive features, and impossible
+unlock/cost references before world generation starts.
+
+### 10.5 Village and volcano feature requirements
+
+**Villages** are custom structure instances whose roads, plots, buildings,
+storage, and NPC spawn points may span any number of chunks. A village placed
+on a chunk border must have the fragment/continuation metadata above, and the
+renderer must show a single connected village as neighboring chunks load,
+regardless of generation order. The server assigns a stable `village_id` and
+ties its structures, villagers, owned resource stockpiles, reputation, and
+generation provenance to that ID. Village generation may be enabled for
+ordinary world generation or reserved for a regeneration card by config.
+
+**Volcano** is a late progression feature and is explicitly
+`REGENERATION_ONLY`: the default world-generation configuration never places
+one. Based on the chunk-regeneration context, “minimum 9x9” means a minimum
+footprint of **9 by 9 chunks (81 contiguous chunks)**; confirm this unit before
+implementation if blocks rather than chunks were intended. The feature card
+requires an unlocked high tier, previews the entire footprint and cost, and is
+rejected if any part intersects the protected 3-by-3 zone or other protected
+content. The configured footprint may be larger than 9x9, never smaller.
+By default, all 81-or-more footprint chunks count toward the normal per-chunk
+dust cost; any configured bundled/discount price is explicit in the preview
+and cannot bypass safe-zone, protection, or total-work limits.
+
+The volcano's terrain, crater, internal passages, arena, and lava are generated
+from one global plan and validated for support, containment, lighting, and
+chunk-edge continuity. It contains a configured boss encounter. The boss may
+spawn only after the whole volcano manifest is committed, its arena is valid,
+and the player meets the configured unlock/encounter conditions. Boss health,
+phases, attacks, arena bounds, persistence, death, and rewards are
+server-authoritative. The boss has one stable identity per structure instance;
+chunk reloads, repeated requests, and regeneration retries cannot respawn or
+duplicate a defeated boss or its unique reward. A deliberate reset, if ever
+allowed, is a separate explicit world rule.
+
 ## 11. Neutral mobs and fauna
 
 ### 11.1 Scope and prerequisites
@@ -720,6 +850,42 @@ could include:
 
 These remain optional content and must use the same bounded, configurable
 behavior/spawn interfaces. They are not prerequisites for chunk regeneration.
+
+### 11.6 Villager NPCs and village relationships
+
+Villagers are a separate non-hostile NPC archetype that uses the same stable
+entity ownership, persistence, replication, and renderer contracts as fauna,
+but has a village identity and configurable job/relationship behavior. Each
+villager has a stable entity ID, `village_id`, role/job ID, schedule state,
+navigation target, and bounded carried/work inventory. Example roles include
+farmers tending village plots, gatherers collecting configured nearby
+renewable resources, and keepers maintaining village stockpiles. Gathered
+items are deposited into server-owned village storage; villagers cannot
+generate unlimited resources, collect outside configured bounds, or modify
+player-owned terrain. Work cadence, resource quotas, pathfinding area, and
+population caps are configuration data.
+
+Track a bounded, persistent reputation value per player and village. Taking
+from a marked village-owned container or resource plot without permission
+emits one authoritative theft event; the village can respond with a warning,
+refusal to trade, or other configured non-hostile reaction. A player can make
+a deliberate gift/donation, such as depositing magical dust into a village
+contribution store. Validate the gift and debit it transactionally, then
+increase village reputation exactly once. Positive reputation can unlock
+trades, recipes, regeneration clues/cards, assistance, or more favorable
+dialogue. Rewards and penalties are thresholds defined in data; they must not
+be granted by spoofed client events, repeated packets, or taking an item and
+immediately returning it unless the rules explicitly permit that recovery.
+
+Villagers react to player actions through bounded server events, not a scan of
+all players/items every frame. Use a local village spatial index and a capped
+number of scheduled NPC decisions per tick, with fair priority for nearby,
+visible interactions. Clients receive compact state/action updates and
+interpolate walking/working animations. Resource gathering, theft detection,
+gift/reputation changes, trade unlocks, and villager schedules persist across
+chunk unload and server restart. Regeneration must preserve a village's
+identity/reputation and never reset its stockpile or rewards by regenerating
+one of its chunks.
 
 ## 12. Compression and persistence on the Libft branch
 
@@ -923,6 +1089,15 @@ evidence that the player-facing feature works.
 Use a deterministic small world with at least a 5-by-5 chunk area, a World
 Loom, known player edits, protected structures, and a fixed seed.
 
+- **Pre-Phase 1 slice gate:** reuse the existing `M` revision preview,
+  generation worker, and result-commit path when their tests pass. In a small
+  deterministic world, preview one target outside the protected 3-by-3 area,
+  spend one configured dust balance, play one configured card, and regenerate
+  exactly one chunk. Verify its prior drawable state remains until the
+  block/light/mesh replacement commits atomically. Repeat with stale revision,
+  cancellation, duplicate request, and injected prepare/commit failures; the
+  resource ledger and chunk state must be conserved. Do not require the full
+  inventory, crafting, fauna, or avatar-customization system for this gate.
 - End-to-end: open station, map, select a valid chunk, draw, play a biome/ore
   card, preview, confirm, receive a session, wait for completion, and compare
   authoritative chunk revision/config digest.
@@ -1019,6 +1194,16 @@ or flickering chunks, and deterministic output for identical input hashes.
   Verify the selected result and server RNG state survive retries, disconnect,
   save/reload, and replay without a reroll; injected transaction failures
   either commit materials, discovery, and card once or commit none.
+- Paper-reed fiber produces paper sheets and binder; paper plus binder makes
+  card stock. Brown mushrooms provide a common dark ink, flowers provide
+  colored pigment/ink, and mineral pigments are gated by configured recipes.
+  Test material conservation, renewable regrowth, station checks, and output
+  capacity.
+- Crystal-block processing produces the configured magical-dust amount exactly
+  once. Depositing dust at a World Loom atomically debits the inventory and
+  credits the resource ledger; retries cannot duplicate it. Regeneration/reload
+  cannot respawn depleted resource deposits. Known card recipes do not consume
+  dust unless the versioned recipe explicitly says so.
 - Insertion/removal between inventory and deck is atomic and enforces the
   20/100 bounds. Card crafting remains recipe-book driven, never a 2D grid.
 - Player health/hunger transitions, food values, healing limits, death,
@@ -1040,80 +1225,193 @@ or flickering chunks, and deterministic output for identical input hashes.
 - Raw/cooked meat and harvested fruit have configured, deterministic hunger
   effects. Animal loot cannot duplicate across death, chunk unload, or retries.
 
+### 16.7 Custom structures, villagers, and progression tests
+
+- Reject invalid custom-feature definitions: unknown IDs, invalid/default
+  generation-source flags, footprints outside limits, unsupported block/entity
+  references, unbounded structure pieces, and missing cross-chunk metadata.
+- Generate the same village with each neighboring chunk order and unloaded
+  neighbors. Roads/buildings crossing every horizontal chunk edge render as
+  one continuous structure, with no gap, duplicate face, false boundary wall,
+  incorrect light seam, or duplicate whole-structure mesh.
+- Interrupt a multi-chunk structure job after planning, candidate preparation,
+  and partial chunk publication. Recovery must resume or roll back the same
+  structure instance; villagers/loot/bosses remain inactive until the full
+  manifest is complete.
+- Verify a volcano is absent from default world generation and cannot be
+  requested without its regeneration unlock. Accept a valid minimum 9-by-9
+  contiguous chunk footprint; reject 8-by-9, disconnected, safe-zone,
+  protected, or otherwise ineligible selections without partial mutation.
+  Verify larger configured footprints, resource cost preview, fluid/lighting
+  seams, and persistence too.
+- The volcano boss spawns once only after the committed instance and arena are
+  valid. Save/reload, regeneration retry, disconnect, and defeated-state
+  replay cannot respawn the boss or duplicate its one-time reward.
+- Villager jobs gather only configured resources inside their bounds, respect
+  quotas/population caps, and deposit into village-owned stock. Tick-budget
+  tests prove NPC decisions/pathfinding cannot monopolize world updates.
+- Unauthorized taking from village stock emits one negative relation event;
+  valid dust gifts debit the giver and credit the village/reputation together.
+  Repeated requests, failed persistence, disconnects, and inventory/ledger
+  exhaustion preserve item totals and cannot farm reputation.
+- Village reputation, stock, NPC schedules, structure IDs, and progression
+  flags survive save/load and chunk regeneration. No regeneration reroll can
+  reset a theft penalty, repeat a gift reward, re-unlock an owned reward, or
+  restore a depleted crystal deposit.
+- First-time biome/structure discoveries, configured regeneration milestones,
+  village reputation, and the volcano reward unlock only their configured
+  cards/recipes/armor/weapon tiers. Repeated chunk generation is idempotent;
+  server validation rejects locked recipes/equipment regardless of client UI.
+
 ## 17. Implementation sequence
 
 ### Phase 0 — validate the existing foundation
 
-1. Run existing terrain configuration, revision preview, selected chunk
-   regeneration, stale-result, light-publication, and rendering tests.
-2. Write down current serialized chunk/generation identity and failure behavior.
-3. Establish normal-build performance and seeded output-hash baselines.
-4. Verify exact Compression and Analytics APIs from the selected Libft branch;
-   do not change the submodule branch or pointer as part of this feature.
+1. Inventory the existing `World` revision API, `M` preview, asynchronous
+   generation pipeline, result-commit path, chunk/light/render publication,
+   and their tests.
+2. For each vertical-slice requirement, record **already implemented and
+   passing**, **partially implemented**, or **missing**. Source/API existence
+   alone is not proof of completion.
+3. Reuse verified working pieces. Fix or adapt gaps at their current boundary;
+   do not rebuild the preview, worker, or commit pipeline from scratch.
+4. Record the current chunk serialization/revision contract, failure behavior,
+   normal-build performance, and seeded output hashes.
+5. Verify the exact Compression and Analytics APIs on the selected Libft
+   branch; do not change the submodule branch/pointer as part of this roadmap.
 
-### Phase 1 — items, inventory, crafting, and survival foundation
+### Pre-Phase 1 — finish the minimum playable vertical slice
 
-1. Audit Libft Game's item/inventory/recipe APIs on the target branch and
-   define Minecraft item IDs, stack rules, and transaction adapters.
-2. Add server-authoritative ground item entities, pickup, merge, persistence,
-   and replication.
-3. Add a recipe-book UI and transactional recipe execution without a crafting
-   grid; gate recipes on required ingredients, unlocks, and station type.
-4. Add a persistent furnace with fuel, ore-to-bar smelting, and meat cooking.
-5. Add the first health/hunger loop, food values, grain farming and bread,
-   plus fruit harvesting from configured apple/pear trees. Defer thirst unless
-   a separate gameplay need has been approved.
-6. Establish the initial configurable inventory/stack limits and benchmark
-   gathering/crafting before expanding the item catalog.
+This is the first implementation gate, before the broader Phase 1 work. Its
+purpose is to validate the central regeneration interaction as early as
+possible, not to rebuild existing infrastructure or wait for the survival
+economy. Use the Phase 0 inventory to reuse every slice component that is
+already working and implement only the missing pieces.
 
-### Phase 2 — player-facing station and map
+1. Interact with one World Loom (a temporary/test-placed station is acceptable
+   if the production block asset is not ready) and open the existing map/preview.
+2. Show the default protected 3-by-3 region; select exactly one valid chunk
+   outside it in a small test world.
+3. Use one server-owned dust balance/resource ledger. Seed a small test balance
+   or grant it through one explicit prototype reward; do not wait for the full
+   inventory/drop/crafting economy.
+4. Use one configured regeneration card/effect and a minimal test deck; the
+   full 20-card starter deck and deck editing are later Regeneration 1.0 work.
+5. Preview, confirm, and regenerate the selected chunk through the existing
+   authoritative request/worker/result-commit path wherever it passes Phase 0.
+6. Keep the previous chunk drawable until the replacement block/light/mesh
+   state is valid, then publish it atomically. Verify player content and
+   protected neighbors remain unchanged.
+7. Inject stale revision, rejected request, cancellation, and prepare/commit
+   failure. The chunk and dust ledger must remain consistent; a retry must not
+   charge or commit twice.
+8. A simple placeholder avatar is sufficient here; final character assets or
+   customization must not block this core interaction test.
 
-1. Add the World Loom block interaction and permission checks.
-2. Expose a map using the existing revision preview/status model.
-3. Enforce the server-calculated 3-by-3 safe zone and automatic protection.
-4. Add a preview token and stale-revision response.
+The gate passes only when a player can complete this one-chunk loop repeatedly
+and the tests prove preservation, rollback, idempotency, and atomic visual
+publication. Do not begin broad survival implementation before recording this
+result.
 
-### Phase 3 — card manufacturing and regeneration deck
+### Phase 1 — Regeneration 1.0
 
-1. Add a paper-yielding renewable plant and its harvesting/processing recipe.
-2. Add exploration unlocks and deterministic known Card Press recipes; then
-   add the optional ingredient-constrained Research Synthesis path with
-   configured candidate pools, disclosed cost tiers, and bounded effect budgets.
-3. Add 20-card starter deck, deck editing at the World Loom, and the 20/100
-   transfer constraints between inventory and deck storage.
-4. Add the resource ledger, checked geometric draw costs, hand/discard zones,
-   and unique card-instance IDs.
-5. Implement the starter regeneration card set, preview resolution, and
-   deterministic configuration digest.
+Expand the proven slice into a complete player-facing regeneration release:
 
-### Phase 4 — authoritative asynchronous regeneration
+1. Complete World Loom permissions, map/fog policy, multi-chunk selection,
+   server-calculated 3-by-3 protection, preview tokens, and stale-revision
+   feedback.
+2. Add the configured dust acquisition/payment loop, exponential draw pricing,
+   resource reservations/refunds, and a 20-card starter deck with unique card
+   IDs, draw/hand/discard state, and bounded deck editing.
+3. Add the starter card set, effect precedence, deterministic resolved-policy
+   digest, and safe preview/confirmation workflow. Card manufacturing can
+   remain configured starter content at this milestone.
+4. Harden bounded priority scheduling, per-chunk prepare/commit, cancellation,
+   persistence/compression, and authoritative client replication.
+5. Meet atomic block/light/mesh publication and strict frame/edit-latency
+   gates. Analytics-on/off runs must yield the same world result.
+6. Add the versioned custom-feature/structure planning interface, including
+   default-world versus regeneration-only policy, complete chunk footprints,
+   stable structure-instance IDs, and renderer-visible cross-chunk fragments.
+   Production villages/volcano content comes later.
+7. Provide a valid default player avatar for other clients; the full appearance
+   customization flow is a Game 1.0 gate.
 
-1. Adapt existing revision requests to carry resolved policy, cards, and
-   expected revisions without exposing mutable `World` to workers.
-2. Add bounded priority scheduling and cancellation/refund rules.
-3. Prepare block, light, and mesh candidates and atomically publish them.
-4. Add progress messages and multiplayer/idempotency coverage.
-5. Add versioned snapshot compression/persistence off the hot path.
+Regeneration 1.0 does **not** wait for the complete item catalog, crafting
+stations, farming, health/hunger, combat, card-recipe experimentation, or all
+four animal species. Dust and cards use the smallest authoritative contracts
+needed for this milestone and can later be adapted to the full item economy.
 
-### Phase 5 — neutral fauna foundation
+### Phase 2 — Game 1.0 item and inventory foundation
 
-1. Define authoritative entity ownership, persistence, spawn/despawn, and
-   renderer submission contracts.
-2. Implement one species end-to-end (sheep is a useful first vertical slice),
-   including its ground item drops, configured breeding feed, controlled
-   breeding, maturation, and cooking/food integration.
-3. Add cow, pig, and chicken through configurable species/behavior/breeding
-   rules and their respective feed items.
-4. Verify regeneration cannot duplicate, erase, or relocate protected
+1. Audit Libft Game's item/inventory/recipe APIs on the target branch; define
+   Minecraft stable item IDs, block-item mappings, stack rules, and adapters.
+2. Implement ground item spawn, pickup, merge, persistence, and replication;
+   cover all registered blocks with the documented drop rules.
+3. Add bucket-based water/lava transfer, grass spread, and the remaining
+   persistent item/world interactions.
+4. Establish configurable inventory capacity and transactional item transfers.
+
+### Phase 3 — Game 1.0 crafting and survival loop
+
+1. Add recipe-book crafting (no grid), station checks, workbench, furnace,
+   fuel, ore smelting, and cooking.
+2. Add paper plants, farming/grain/bread, apple/pear harvesting, and the
+   configured food catalog.
+3. Implement authoritative health and hunger; keep thirst optional and
+   independently configurable.
+4. Add the initial tools, armor, weapons, shields, staffs, and combat/magic
+   rules, with balance and performance tests.
+
+### Phase 4 — Game 1.0 card manufacture and discovery
+
+1. Add paper/card materials and the Card Press using the recipe-book model.
+2. Add exploration blueprints, deterministic known recipes, and optional
+   ingredient-constrained Research Synthesis with disclosed candidate pools
+   and bounded effect tiers.
+3. Connect crafted unique card items to World Loom deck transfers without
+   changing the Regeneration 1.0 card identity/save contract.
+
+### Phase 5 — Game 1.0 player avatars and customization
+
+1. Add the final block-style player rig/model, default appearance, and
+   authoritative pose/animation replication.
+2. Add the player appearance UI and saved, validated customization profiles.
+3. Confirm armor, tools, shields, bows, and staffs display on the model without
+   changing gameplay collision or combat authority.
+
+### Phase 6 — Game 1.0 neutral fauna
+
+1. Complete authoritative entity ownership, persistence, spawn/despawn, and
+   renderer submission; implement sheep as the first species vertical slice.
+2. Add sheep drops/breeding/maturation, then cows, pigs, and chickens with
+   configured behavior, feed, cooldowns, and drop tables.
+3. Verify regeneration cannot duplicate, erase, or relocate protected
    creatures, eggs, drops, or breeding state.
 
-### Phase 6 — broader card and content system
+### Phase 7 — Game 1.0 custom structures and regeneration progression
+
+1. Add a configurable village feature pack with structure fragments that cross
+   chunk borders and a bounded village population of job-configured villagers.
+2. Add villager resource gathering/storage, theft reactions, and transactional
+   positive reputation for gifts such as magical dust.
+3. Add progression definitions that connect first-time regeneration outcomes,
+   structure/biome discoveries, village relationships, and boss rewards to
+   unlocks for higher card, armor, and weapon tiers.
+4. Add the regeneration-only volcano content after its footprint planner,
+   persistence, structure renderer, and boss-combat tests pass. Enforce the
+   minimum 9-by-9-chunk footprint and do not add it to default generation.
+5. Preserve structure instance state, village stock/reputation, progression
+   unlocks, and one-time boss rewards across regeneration and retries.
+
+### Phase 8 — broader content and extension
 
 1. Add richer draw/discard, bonus-scope, feature, and combination cards.
-2. Add progression/unlock configuration and recipe-book content discovery.
+2. Add further structure definitions and progression content through config,
+   without adding per-structure special cases to the chunk renderer.
 3. If Libft's CardGame module is implemented and reviewed on the target branch,
    add an adapter without changing persistent card IDs or replay semantics.
-4. Add optional species only after entity and performance gates pass.
+4. Add optional animal species only after entity and performance gates pass.
 
 Do not skip the normal-build tests between phases. Do not call the design
 implemented merely because the preview UI or generator helper works in
@@ -1121,53 +1419,137 @@ isolation.
 
 ## 18. Acceptance criteria
 
-The first complete release is accepted only when:
+### 18.1 Pre-Phase 1 vertical-slice gate
 
-- a player can interact with the World Loom, inspect a map, choose eligible
-  chunks, pay dust, draw/play regeneration cards, preview the effect, and
-  confirm a server-authoritative job;
-- the 3-by-3 safe zone and all other protection rules are enforced on the
+The vertical slice is a small internal playable milestone, not either full
+release. It is accepted when:
+
+- the Phase 0 inventory identifies existing working pieces and the slice
+  reuses the current revision preview, asynchronous generation, and commit
+  path wherever tests prove them ready;
+- one World Loom interaction opens the map, marks the protected 3-by-3 area,
+  and lets the player choose exactly one valid chunk outside that area;
+- one configured dust balance and one configured regeneration card can pay
+  for, preview, confirm, and complete that chunk's regeneration;
+- the authoritative result is prepared asynchronously and the prior drawable
+  block/light/mesh tuple stays visible until a valid replacement is atomically
+  published;
+- protected/player-authored content remains unchanged, and stale revision,
+  cancellation, duplicate request, and injected prepare/commit failures leave
+  world and resource state consistent;
+- repeated end-to-end tests complete without duplicate charge, duplicate
+  commit, black/partial chunk publication, or render-thread generation.
+
+The slice may seed dust and a test deck through explicit development/test
+fixtures. It does not require the general item economy, card discovery, or a
+final character model.
+
+### 18.2 Regeneration 1.0 release gate
+
+Regeneration 1.0 is accepted when the complete World Loom loop is reliable and
+playable, without requiring the broader survival package:
+
+- players can interact with an authorized World Loom, inspect the configured
+  map/fog view, choose eligible chunks, pay dust, draw/play cards, preview the
+  effect, and confirm a server-authoritative job;
+- the 3-by-3 safe zone and all ownership/protection rules are enforced on the
   server and cannot be bypassed with cards or crafted requests;
-- geometric draw pricing, card identity, deck persistence, idempotency, and
-  resource refunds are tested at boundaries and injected failures;
-- world item drops/pickups, inventory transfers, recipe-book crafting,
-  station-gated smelting/cooking, and card-item/deck transfers preserve item
-  counts transactionally;
-- players begin with exactly 20 valid regeneration cards and can maintain a
-  deck of 20 through 100 unique instances without cards duplicating across
-  inventory and deck zones;
-- health and hunger are implemented as authoritative, persistent gameplay
-  systems; thirst remains opt-in and independently configurable;
-- apple/pear harvesting, paper-plant harvesting, raw/cooked meat, bars, and
-  starter tools/weapons/armor have explicit recipe and balance configuration;
-- grain can be farmed and turned into bread through the recipe book, and
-  animals have a controlled, capped breeding path so meat/material supplies
-  need not depend only on hunting;
+- the configured dust source/payment ledger, geometric draw pricing, unique
+  card identities, 20-card starter deck, 20-to-100 deck bounds, persistence,
+  idempotency, cancellation, and refunds pass boundary and failure-injection
+  tests;
+- starter cards have validated effects, deterministic policy resolution,
+  preview warnings, and a versioned configuration digest; full Card Press
+  manufacturing is not required for this gate;
+- selected chunks and connected clients converge through authoritative
+  revisions, with persistence/compression recovery and stale-result handling;
+- the versioned custom-generation contract can validate default-world versus
+  regeneration-only features, full multi-chunk footprints, and per-chunk
+  structure continuation metadata without requiring a finished village or
+  volcano content pack yet;
 - generation, lighting, mesh creation, compression, and persistence do not
   block the render thread or hold world locks while doing expensive work;
 - old chunk block/light/mesh state remains visible until a complete valid
   replacement commits; stale/failing results leave it unchanged;
-- water/lava and chunk-boundary tests prove no floating/leaking features;
-- selected chunk results and clients converge through authoritative revisions;
+- water/lava generation and chunk-boundary tests prove no floating/leaking
+  features, even though portable bucket gameplay may be part of Game 1.0;
+- every player has a valid default rendered avatar where other players are
+  shown; full model customization is a Game 1.0 gate;
 - the normal and analytics builds produce identical deterministic world
-  results, and strict latency budgets pass under concurrent generation;
-- the four neutral species have an explicit staged plan, and no mob is claimed
-  complete until simulation, persistence, replication, and rendering all work;
-- the current Libft compression/analytics branch builds and passes required
-  tests without relying on unmerged changes from `very-real-engine-checkout`.
+  results, strict latency budgets pass, and the selected Libft
+  compression/analytics branch builds and passes required tests without
+  relying on unmerged `very-real-engine-checkout` changes.
+
+### 18.3 Game 1.0 release gate
+
+Game 1.0 includes Regeneration 1.0 plus the broader survival and player
+identity systems. It is accepted when:
+
+- every registered current block has a valid standalone item/drop policy,
+  including grass-to-dirt, and ground items support transactional drop,
+  pickup, stacking, save/load, and replication;
+- water and lava exist as world fluids and can be legally transferred using
+  empty, water, and lava buckets under server validation;
+- the recipe book, workbench, furnace, fuel, smelting, cooking, inventory,
+  paper/card materials, Card Press recipes, and deck transfer preserve item
+  counts transactionally;
+- exploration unlocks and ingredient-constrained Research Synthesis discover
+  cards; known recipes craft exact cards, while random results are bounded by
+  their disclosed tier, committed once, persisted, and replay-safe;
+- health and hunger are authoritative and persistent; farming, grain/bread,
+  fruit, raw/cooked foods, and optional thirst follow configured rules;
+- starter tools, armor, weapons, shields, staffs, and combat/magic profiles
+  have explicit recipes, balance configuration, and server validation;
+- players have a rendered character model and can customize an allowed,
+  persistent appearance profile; appearance cannot change collision, reach,
+  movement, damage, or other authoritative gameplay stats;
+- the custom-structure framework renders a village continuously across chunk
+  borders; villagers have bounded gathering jobs, village-owned storage,
+  negative responses to unauthorized taking, and persistent positive
+  reputation for accepted gifts such as magical dust;
+- regeneration is a real progression path: validated discoveries/unlocks
+  grant access to higher card, armor, and weapon tiers. A late milestone adds
+  a regeneration-only volcano with a minimum 9-by-9-chunk footprint, a
+  persistent boss encounter, and unique one-time rewards; it never appears in
+  default world generation;
+- sheep, cows, pigs, and chickens have staged but complete spawn, simulation,
+  persistence, replication, rendering, drops, and controlled breeding before
+  they are described as shipped features;
+- the tests prove regeneration cannot duplicate, erase, or relocate protected
+  animals, eggs, drops, breeding state, or player-built content.
+
+### 18.4 Shared quality and performance gates
+
+Both releases must pass the relevant existing unit, integration, sanitizer,
+failure-injection, persistence, networking, and performance suites. Report
+latency distributions (including p50/p95/p99 and worst observed), enforce the
+budgets in this document, demonstrate bounded queues/memory, and verify
+analytics-on/off equivalence. A passing prototype must not be reported as a
+complete release if its milestone's own criteria remain unmet.
 
 ## 19. Non-goals for the first vertical slice
 
+- Rebuilding already-working revision preview, generation worker, or result
+  commit code merely to match a new plan; Phase 0 decides what to reuse.
+- Requiring the full item catalog, inventory, crafting, smelting, farming,
+  health/hunger, combat, four animal species, or card manufacturing before the
+  one-chunk slice can be tested.
+- Treating the regeneration deck or its active hand as normal inventory; card
+  items outside the deck are the transferable inventory objects.
 - Implementing a full general-purpose card-game engine in Minecraft.
-- Treating the regeneration deck or its active hand as normal inventory; only
-  crafted card items outside the deck are inventory objects.
-- Allowing clients to regenerate terrain or choose their own seed.
-- Regenerating protected chunks or silently deleting player content.
-- Sending chunk meshes over the network.
-- Running analytics, compression, disk I/O, lighting propagation, or full mesh
-  rebuilds in the render frame.
-- Shipping complex mob breeding, combat, trading, or a large animal roster
-  before the base entity lifecycle and renderer exist.
+- Allowing clients to regenerate terrain or choose their own seed, regenerating
+  protected chunks, or silently deleting player content.
+- Sending chunk meshes over the network or running analytics, compression,
+  disk I/O, lighting propagation, or full mesh rebuilds in the render frame.
+- Requiring final player-model assets/customization to pass the minimum slice;
+  a temporary placeholder is acceptable there.
+
+Regeneration 1.0 also does not require the complete survival economy, animal
+breeding, combat progression, experimental card crafting, or customizable
+avatars, nor does it require finished village/villager or volcano/boss content.
+The versioned custom-structure and cross-chunk renderer contract is required
+in Regeneration 1.0; those specific content packs remain explicit Game 1.0
+work rather than being removed from the roadmap.
 
 ## 20. World items, inventory, and recipes
 
@@ -1337,11 +1719,52 @@ server transaction against the crop's current maturity/revision and must not
 duplicate grain or seeds if the request is retried.
 
 Add a renewable reed-like **paper plant** (working name: paper reed) that can
-grow near suitable wet ground. Harvesting yields plant fiber; a Paper Mill
-recipe processes it into paper/card stock, optionally using water and a
-configured binding material. Regrowth is deterministic and bounded so the
-plant is a renewable source rather than a one-time world-generation exploit.
-Biome, soil, water, growth, and yield rules are configuration data.
+grow near suitable wet ground. Harvesting yields paper-reed fiber. Use a
+simple, explicit processing chain:
+
+```text
+paper-reed fiber + water -> paper sheet       (Paper Mill)
+paper-reed fiber -> plant-fiber binder        (Paper Mill)
+paper sheets + plant-fiber binder -> card stock (Paper Mill)
+brown mushroom + water + binder -> dark ink   (Paper Mill)
+red/yellow flower pigment + water + binder -> colored ink (Paper Mill)
+crushed mineral + water + binder -> advanced pigment/ink (Workbench/Paper Mill)
+```
+
+The exact quantities and whether a recipe consumes water or returns its
+container are configured. The brown mushroom is the common early dark-ink
+source; red/yellow flowers provide early colored pigments; selected mineral
+items (such as amethyst, quartz, or amber) can provide later colors/effect
+catalysts. A configured wood-to-charcoal recipe may be added later, but basic
+ink must not depend on fuel availability or rare minerals. Keep paper-sheet,
+card-stock, pigment, ink, and binder as distinct item definitions only where
+they have a real recipe or gameplay role. Basic ink and card stock must be
+reachable from renewable/common materials; rare materials gate
+stronger/specialized recipes rather than basic participation.
+
+Regrowth is deterministic and bounded so the paper plant is a renewable source
+rather than a one-time world-generation exploit. Biome, soil, water, growth,
+yield, and processing rules are configuration data. Crop/plant processing is
+server-tick and station-driven, never a per-frame scan.
+
+Card recipes use named material roles instead of arbitrary hidden combinations:
+
+- **Substrate:** card stock is required for every physical card and sets the
+  base recipe tier/quality.
+- **Ink/pigment:** supplies the card's visible motif and may constrain the
+  configured experiment pool, but cosmetic color alone must not secretly add
+  combat or generation power.
+- **Effect-family catalyst:** a tagged ore/crystal, biome block sample, seed,
+  or validated fluid sample biases or selects the card's effect family. Its
+  item tags are explicit configuration, not inferred from its display name.
+- **Stabilizer/binder:** plant fiber/starch is sufficient for basic cards;
+  selected quartz, amethyst, amber, frost crystal, or shimmer-stone materials
+  can be required for higher tiers and bound their effect budget.
+
+The Card Press/Research Synthesis UI presents these roles and ingredient
+choices in the recipe book; it is not a crafting grid. A fluid catalyst, if
+allowed, consumes only the configured amount and returns the empty bucket in
+the same transaction. Do not consume magical dust by default; see Section 7.5.
 
 The Card Press combines paper/card stock with configured pigment/ink and
 materials. A known recipe names and deterministically creates its exact card.
@@ -1420,6 +1843,7 @@ balance values—not hard-coded assumptions in the inventory or recipe engine.
 | Block items | One placeable item for every applicable current block above; new placeable farmland, mature/plantable crop or seed representations as needed, paper-plant block, workbench, furnace, Paper Mill, Card Press, World Loom, and later storage blocks. A block drop references an item definition; it does not create a bespoke item type per drop event. |
 | Fluid containers | Empty bucket, water bucket, lava bucket. The empty bucket is crafted from configured metal bars at a workbench. Filled buckets have stack limit 1; an empty bucket may stack only if its item-state representation is identical. A filled bucket is a single fluid-container item with `fluid_kind`, fixed capacity, and no arbitrary client-writable payload. |
 | Wood and basic materials | Oak/pine/birch logs and leaves as block items; configured planks and sticks as processed items; stone and gravel block items; coal/fuel; plant fiber; paper reed fiber; paper/card stock; configured ink/pigment/binding material. |
+| Regeneration resource | Magical dust as a stable item/resource ID, refined from configured crystal block items and optionally found in exploration caches; depositing it transfers value exactly once into the World Loom/player regeneration ledger. |
 | Mining and metal progression | Coal, iron, gold, copper, diamond, and emerald ore-block items matching the existing blocks; smelted iron/gold/copper bars (only where a recipe is defined); configured crystals/gems; pickaxes, axes, swords, and their recipe components. Ore-block items remain collectible even if a required tool tier controls whether they can be mined. |
 | Farming and food | Grain/wheat item, seed item, bread, apple, pear, raw and cooked beef, raw and cooked pork, raw and cooked chicken, raw and cooked mutton, and any configured animal feed. Each edible definition declares hunger and saturation values; no food behavior is inferred from its display name. |
 | Animal materials | Wool, leather, feathers, eggs, and species-specific raw meat items from configured sheep/cow/pig/chicken drop tables. Death/drop generation is one authoritative transaction; breeding consumes configured feed and produces an entity, not a duplicated inventory item. |
@@ -1656,11 +2080,13 @@ deterministically, and be disableable without changing health/hunger behavior.
 The item economy is intentionally an early tuning target, not a set of
 permanent numbers. Keep item definitions, stack limits, recipe ingredients and
 outputs, station requirements, furnace times/fuel values, food nutrition,
-tool tiers/durability, card costs, and deck rules in versioned game configs.
-Configs are validated before a world/session starts. Missing item IDs, invalid
-stack limits, cycles that generate items without cost, impossible station
-requirements, and card recipes that reference unavailable materials fail
-validation rather than silently producing free items.
+tool tiers/durability, card costs, dust sources, custom-feature footprints,
+progression/unlock definitions, villager job/reputation rules, and deck rules
+in versioned game configs. Configs are validated before a world/session starts.
+Missing item IDs, invalid stack limits, cycles that generate items without
+cost, impossible station requirements, invalid structure sizes, and card
+recipes that reference unavailable materials fail validation rather than
+silently producing free items.
 
 For each recipe chain, add a balance report that states acquisition sources,
 expected items/minute, station bottlenecks, output storage pressure, and how
@@ -1668,29 +2094,73 @@ many sessions/deck upgrades it supports. Analytics can measure crafting and
 gathering duration, but must not silently tune gameplay or expose private
 inventory data in shared traces.
 
+### 22.1 Regeneration as the progression path
+
+Chunk regeneration is not only a repeatable terrain-edit tool: it is one of
+the main ways the player discovers new regions, materials, cards, settlements,
+and higher equipment tiers. Keep progression rules in versioned configuration
+with stable milestone/unlock IDs rather than scattering `if biome == ...`
+checks through the renderer, inventory, or chunk generator.
+
+A progression definition names its prerequisites, authoritative completion
+event, unlocks, and one-time reward policy. Valid triggers may include a
+first-time biome or resource discovery from a committed regeneration result,
+crafting/adding a newly learned card, reaching a village reputation threshold,
+or defeating a specific structure boss. A chunk commit alone is not a repeatable
+reward trigger: track unique discovery/structure IDs so regenerating the same
+area cannot repeatedly grant materials, card recipes, reputation, or gear
+unlocks.
+
+Use configurable equipment/card tiers. As the player regenerates into new
+terrain and follows card effects, discoveries unlock the materials and recipes
+for progressively stronger armor and weapons. A village can provide trade,
+resource exchange, or research clues; giving dust can improve its relationship
+with the player and expose configured rewards. The regeneration-only volcano
+is a late milestone: its unlocked 9-by-9-chunk feature card opens a high-cost
+encounter, and its defeated boss grants a unique progression reward/recipe for
+the highest configured equipment tier. These are examples of progression
+content, not hard-coded engine rules; worlds may configure alternative paths.
+
+Each unlock/reward is committed idempotently with its source event and saved
+player/world progression revision. A failed chunk commit cannot unlock a
+discovery based on terrain that was not published. A failed inventory or
+reward write cannot record the boss/discovery as completed while losing its
+reward. The UI explains the next known milestone and the relevant card,
+resource, structure, or crafting requirements without revealing intentionally
+hidden content.
+
 ## 23. Updated dependency order
 
-The item/economy foundation is a prerequisite for the complete progression
-loop, but it must not block an isolated World Loom/map prototype. Teams may
-implement those UI and validation pieces in parallel against test adapters;
-production card crafting, animal drops, and food require the item framework.
-
-The required dependency graph is:
+The minimum World Loom slice intentionally comes before the item/economy
+foundation. It reuses the current world-revision path and may use test-seeded
+dust/card fixtures; do not implement the entire inventory to prove one chunk
+can be selected, regenerated, and published correctly. Regeneration 1.0 then
+adds its real resource ledger, deck, and persistent replication. The broader
+Game 1.0 systems depend on the item/inventory and entity foundations.
 
 ```text
+existing revision preview + async generation + atomic commit
+        -> Pre-Phase 1 one-chunk World Loom slice (minimal dust/card fixture)
+        -> Regeneration 1.0 resource ledger + 20..100 deck + replication
+        -> versioned custom-feature planner + cross-chunk fragment metadata
+             -> Game 1.0 villages/villagers
+             -> regeneration-only 9x9+ volcano/boss -> top equipment tier
+
 item definitions + inventory transactions
-        ├── ground item drops/pickups ── neutral animal drops
-        ├── recipe book + stations ───── tools, armor, furnace, cooking
-        │                                  ├── health/hunger food loop
-        │                                  └── card press + paper plant
-        └── World Loom card transfer ─── regeneration deck (20..100)
-                                            └── authoritative chunk regeneration
+        -> all-block drops/pickups + buckets + dust deposit
+        -> recipe book + stations
+             -> furnace/smelting/cooking + tools/armor/weapons
+             -> farming/food + health/hunger
+             -> paper/ink/card stock + Card Press/discovery
+        -> customizable player avatar and equipment presentation
+entity lifecycle + item drops + entity renderer
+        -> sheep vertical slice -> cows/pigs/chickens + breeding
 ```
 
-Build each edge with end-to-end tests before depending on it. The World Loom's
-map/preview can be developed before the complete recipe economy, but a release
-claiming the whole gameplay loop must pass the item, crafting, hunger/health,
-card production, and regeneration acceptance criteria together.
+Build each edge with end-to-end tests before depending on it. Do not claim
+Regeneration 1.0 requires Game 1.0's complete item, crafting, survival, avatar
+customization, or fauna branches. A Game 1.0 release must pass all applicable
+branches and the Regeneration 1.0 gate together.
 
 ## 24. Performance and stability implementation contract
 
@@ -2128,3 +2598,90 @@ letting them grow without bound.
 - Benchmark attack resolution with full inventory and many nearby entities;
   cost should remain constant with inventory size because combat uses cached
   derived stats. Verify no per-frame scan is introduced.
+
+## 26. Player character model and customization
+
+The current player movement/collision geometry is not a character model. Add
+an actual rendered player avatar and an intentional appearance-customization
+flow as Game 1.0 work. Regeneration 1.0 only needs a valid default avatar for
+other players; the pre-Phase 1 slice may use a temporary placeholder so model
+production does not delay the core regeneration test.
+
+### 26.1 Model and rig
+
+Use a stylized, block-compatible 3D character with a stable shared rig for
+head, torso, arms, and legs. The model's proportions and animations must fit
+the existing player movement and collision contract. Rendering geometry is
+never the collision/hitbox source of truth: customization must not change
+reach, movement speed, collision, health, damage, mining rate, or network
+authority. Support a default body/model and the same bounded rig for every
+appearance profile; avoid arbitrary per-player bone scaling in the first
+version.
+
+Other clients render the complete avatar with equipped gear and held items.
+In first-person, the local client may hide the body and render arms/held items
+to avoid camera clipping, but this must use the same selected appearance and
+equipment. A missing/unknown appearance or asset version resolves to a safe
+default model, not an invisible player or a load failure that blocks joining.
+
+### 26.2 Customization profile and player flow
+
+Provide a character setup/customization screen at initial creation and a
+reachable edit flow later. Offer a controlled set of compatible options, such
+as:
+
+- skin/body palette;
+- face/eye style and color;
+- hair style and color;
+- clothing/outfit style and palette;
+- a small set of cosmetic accessory slots.
+
+Options are selected from versioned, whitelisted content definitions. The
+profile stores stable IDs and palette values, not pointers or arbitrary asset
+paths. Cosmetic unlocks may come from gameplay progression later, but the
+initial appearance choices must not require rare resources or grant combat
+advantages. Armor/equipment renders as a layer or compatible model attachment;
+it does not overwrite the saved base appearance. UI previews the exact selected
+model and safely falls back if a combination is unsupported.
+
+Persist the profile against the stable player identity, independently of
+chunk state and inventory. A customization update has a profile revision,
+validates every selected option, and is saved atomically. Replicate only the
+compact validated appearance IDs/colors and revision; clients resolve assets
+from the matching local content pack. Never send arbitrary mesh/texture bytes
+as routine player-state updates. Unknown IDs or content-version mismatches use
+the default profile and produce a diagnostic.
+
+### 26.3 Animation and presentation
+
+Implement a small first animation set: idle, walk/run, jump/fall/land, and
+common tool-use/attack poses. Animation state is derived from authoritative
+movement/action state and smoothly interpolated on clients. The renderer may
+predict local cosmetic pose, but it cannot use pose data to validate a hit,
+movement, or interaction. Equipment visibility follows the validated loadout:
+armor, shield, bow, sword, staff, and held block/item should attach to defined
+rig slots without bespoke per-player mesh construction.
+
+Load and prepare shared model assets off the render hot path. Cache rig,
+mesh/material combinations, and animation data; changing a palette should
+update a small material/appearance handle rather than rebuild the world or
+recreate all player meshes. Use distance-based visibility/LOD for remote
+avatars and bound animation/update work by visible nearby players.
+
+### 26.4 Avatar tests
+
+- Every supported appearance combination resolves to a valid rig/material;
+  invalid IDs, missing files, unsupported combinations, and content-version
+  mismatches select the documented default without crashing or hiding players.
+- Save/load and reconnect preserve the exact profile revision. Repeated or
+  stale customization requests cannot overwrite a newer profile.
+- Replication sends only validated compact appearance state; clients never
+  select arbitrary filesystem paths or upload unbounded assets.
+- Before/after customization, assert identical hitbox dimensions, collision,
+  movement, reach, combat values, and server validation results.
+- Verify first-person and remote third-person presentation, all base
+  animations, held-item/armor attachments, and graceful asset fallback.
+- Stress a representative maximum number of nearby avatars. Asset loading,
+  palette changes, and animation must not cause per-frame allocations,
+  unbounded mesh rebuilds, or violations of the frame-time budgets in Section
+  24.
