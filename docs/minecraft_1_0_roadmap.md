@@ -20,10 +20,11 @@ This roadmap distinguishes two milestones. **Regeneration 1.0** is the first
 complete, playable World Loom/card-driven regeneration release. **Game 1.0**
 is the broader survival release that builds on it with the full item,
 crafting, survival, combat, farming, fauna, customizable player-avatar, and
-custom-structure progression package. This includes villages and villagers,
-and a late progression volcano/boss feature. Before either release, build a
-deliberately tiny end-to-end playable vertical slice to validate the core
-interaction and atomic world update.
+custom-structure progression package, plus a small Card Table minigame built
+on Libft CardGame. This includes villages and villagers, and a late progression
+volcano/boss feature. Before either release, build a deliberately tiny
+end-to-end playable vertical slice to validate the core interaction and atomic
+world update.
 
 The same design must leave room for basic non-hostile animals—sheep, cows,
 pigs, and chickens—without allowing regeneration to duplicate, erase, or
@@ -66,25 +67,54 @@ transactions, and validation.
 
 ### Libft branch compatibility note
 
-At the time of writing, the Minecraft submodule is on
-`agent/compression-analytics-cardgame-scripting` at `4922eb88`. The fetched
-`very-real-engine-checkout` branch diverges from it and is not merged into it.
-Implementation must target the compression/analytics branch named above and
-must not assume that changes found only on `very-real-engine-checkout` are
-available.
+The checked-out Minecraft submodule is on
+`agent/compression-analytics-cardgame-scripting` at `4922eb88`. This is the
+CardGame branch to audit and integrate; do not assume APIs from the divergent
+`very-real-engine-checkout` branch are available. The checked-out CardGame
+module is implemented and documented in
+`Libft/Modules/CardGame/README.md`. Its Hearthstone-, Magic-, and
+Yu-Gi-Oh!-style samples are simplified demonstrations of the generic engine,
+not implementations of those games' complete official rules.
 
-That branch provides useful Compression and Analytics APIs. Its CardGame work
-is design groundwork, not a dependency that this first playable feature may
-assume is already implemented. The first implementation should use a narrow
-Minecraft-owned regeneration-deck adapter with stable IDs and declarative
-effects. Add a Libft CardGame adapter later when the branch has a reviewed,
-usable deck/effect API. Keep the adapter boundary so that migration does not
-change saved deck data or gameplay semantics.
+The current Libft foundation provides configurable card types/zones, ordered
+decks and hands with stable physical instance IDs, deterministic RNG, effect
+callbacks and operation buffers, turn/phase graphs, event ordering, resource
+costs and allowances, choices, usage limits, combat/stat modifiers, format
+legality and exceptions, deck codes/hashes, snapshots/deltas, state/rules
+hashes, command records, replay/result storage, and player-view replay
+redaction. Minecraft should integrate this engine through a small adapter;
+do not build a second card-game runtime in Minecraft.
+
+Respect these current API boundaries when planning integration:
+
+- `card_game_deck_code` accepts up to 500 total cards, but the current active
+  `card_game_engine` match-state arrays are bounded by
+  `FT_CARD_GAME_MAX_CARDS == 128`. A deck string that can encode 500 cards is
+  not proof that a 500-card match can be played. The minigame's requested
+  25-to-500-card formats require a Libft capacity/snapshot/delta update before
+  advertising 500-card active decks; do not silently lower the product
+  requirement or overflow the existing state format.
+- CardGame callbacks, callback context pointers, and function pointers are
+  process-local. Register the same stable effect IDs/callback mapping on each
+  server or replay process before use. Persist IDs and versioned data, never
+  addresses or raw `void *` context.
+- The engine's built-in effect operations cover generic card-game state (for
+  example health, mana, events, instance damage/healing, and stat modifiers).
+  They do not edit Minecraft chunks. Minecraft maps a resolved card effect to
+  a validated immutable generation-policy intent, then uses its existing
+  authoritative preview/prepare/commit pipeline.
+- `card_game_resolution_stack` is a separate component. If a profile uses it,
+  Minecraft must include its state and resolution boundary in the profile's
+  persistence, replay, and transaction design rather than assuming it is
+  automatically part of the engine snapshot.
+- `card_game_format` validates deck legality; it is not a booster-pack,
+  collection, rarity, or card-crafting economy. Those remain Minecraft-owned
+  content/economy systems.
 
 Any future Libft code changes must follow `Libft/AGENTS.md`; in particular,
-test hooks stay test-only, APIs use stable IDs rather than serialized function
-pointers, and fallible lifecycle operations are explicit. This task itself
-adds only a Minecraft documentation file.
+APIs use stable IDs rather than serialized function pointers, and fallible
+lifecycle operations are explicit. This roadmap update changes documentation
+only; it does not modify the CardGame implementation.
 
 ## 3. Design rules
 
@@ -339,11 +369,13 @@ or collected twice.
 
 Every player has a base regeneration deck owned by this feature. The active
 deck is a separate subsystem, not an inventory container: it cannot be dropped
-as a whole or consumed by ordinary gameplay, and it is not the future
-general-purpose CardGame deck. Individual crafted card items may be carried in
-inventory before being inserted into the regeneration deck, or after being
-removed from it. Moving one into the deck transfers that unique instance; it
-must never exist in both places at once.
+as a whole or consumed by ordinary gameplay, and it is not the player's Card
+Table minigame deck or match state. Both features may use Libft CardGame, but
+they must use separate profiles, engine sessions, zones, and persistence
+records. Individual crafted card items may be carried in inventory before
+being inserted into the regeneration deck, or after being removed from it.
+Moving one into a deck transfers that unique instance; it must never exist in
+inventory and a deck, or in two deck contexts, at once.
 
 The configured deck contains **at least 20 and at most 100 card instances**.
 The initial starter deck contains 20 deliberately low-power cards. Deck edits
@@ -504,10 +536,10 @@ must not replace or obscure the normal material recipe.
 
 The card catalog, recipe definitions, experiment candidate pools/weights,
 ingredient tags, discovery rewards, tier budgets, and unlock progression are
-all game configuration. Libft's card/recipe machinery may validate and execute
-configured operations, but Minecraft owns exploration rewards, Card Press
-access, material economy, and the mapping from recipe outcomes to generation
-effects. Do not put raw callbacks or mutable world pointers in a card or recipe.
+all game configuration. Libft CardGame provides the match/deck/effect runtime;
+Minecraft owns exploration rewards, Card Press access, material economy, and
+the mapping from recipe outcomes to generation effects. Do not put raw
+callbacks or mutable world pointers in a card or recipe.
 
 Tests must verify exact known-recipe output, blueprint unlocks, ingredient
 influence on experiment eligibility/weights, tier caps for every candidate,
@@ -518,6 +550,200 @@ effects commit once or none do. Duplicate request IDs, disconnects, save
 reloads, and deliberately repeated experiment requests must not duplicate
 materials/cards or reroll a completed experiment. Confirm the normal Card Press
 UI remains a recipe book and never becomes an ingredient grid.
+
+### 8.6 Libft CardGame adapter and World Loom integration
+
+Use the checked-out Libft `CardGame` module as the rules-neutral runtime for
+card identity, ordered zones, draws/shuffles, effect dispatch, choices,
+usage limits, and match/session state. Minecraft owns the world-specific
+meaning of cards and every world mutation. Implement one thin
+`MinecraftCardGameAdapter` boundary that translates versioned Minecraft
+content into Libft definitions and translates validated engine results back
+into Minecraft-owned intents. Do not build a second card-game runtime in
+Minecraft.
+
+Use distinct engine profiles/instances for these contexts:
+
+1. **World Loom regeneration:** one server-authoritative session per active
+   regeneration operation/player. Configure typed zones for its draw pile,
+   active hand, discard and, if required, a resolving/effect-order zone. Keep
+   the existing 20-to-100 owned-card rule, geometric dust draw pricing,
+   chunk selection, safe zone, preview, resource reservations/refunds and
+   world job outside the generic engine. Use the rules-neutral ordered-zone
+   APIs; do not put terrain cards onto the creature board just to reuse
+   `play_card` semantics.
+2. **Card Table minigame:** a separate match session with its own profile,
+   format, phases, zones, RNG stream, command sequence, deck validation,
+   snapshots and replay. It may use the engine's configured board/combat
+   paths where they match the Minecraft rules. A minigame match never borrows
+   or mutates the player's World Loom deck zones.
+
+The Minecraft adapter registers stable card, card-type, zone, phase, event,
+effect, usage-limit and predicate IDs from a versioned content catalogue.
+Callback registries are recreated on each process from that catalogue before
+snapshots/replays are loaded. Callbacks must be deterministic for the same
+rules version, command and state; callbacks must not write to the world,
+perform I/O, retain engine-owned pointers, or serialize function/user-data
+pointers. The current generic operation buffer covers card-game values such
+as health, mana, emitted events, instance damage/healing and stat modifiers;
+it is not a terrain edit API.
+
+For a regeneration card, validate the player command and its card-instance ID,
+resolve the card through the registered stable effect ID, and produce a
+bounded immutable `regeneration_policy_intent` in Minecraft-owned memory.
+That intent contains only IDs, numeric parameters, target chunk coordinates,
+and relevant config/content versions. Validate it against selected chunks,
+generator capabilities, protection, feature footprints, and effect budgets;
+then feed the resolved immutable policy to the existing preview and
+world-generation path. If using an engine event as the adapter boundary, the
+event type and source card/effect IDs are stable; target coordinates and
+parameters remain in a validated, request-ID-keyed Minecraft command record.
+An engine event or callback must never be treated as authority to mutate a
+chunk directly.
+
+Treat a World Loom action as a cross-system transaction. The Libft engine can
+make its own card operation transactional, but it cannot atomically commit
+Minecraft inventory, dust, deck membership, regeneration escrow, a multi-chunk
+world revision, and persistence. A single authoritative coordinator must
+validate and reserve these together under an idempotent request ID, durably
+record the accepted intent, and define compensation/refund behavior for
+failure/cancellation. The coordinator must not hold world locks while the
+engine runs callbacks or while chunk generation occurs. Use snapshot/restore
+for rollback only for engine state included in the pinned engine contract.
+Once a chunk commits, later session failure
+does not undo that chunk; settle only the corresponding per-chunk costs and
+card effects according to explicit policy.
+
+Use the engine-owned deterministic RNG for deck shuffle/draw and persist its
+state with the session. Use engine snapshots/deltas or authoritative commands
+only after verifying the exact state they include. The Minecraft session
+record additionally stores world request/idempotency state, resource escrow,
+target chunks, applied policy digest, structure plans and per-chunk commit
+results. Do not assume these external fields are in a `card_game_snapshot`.
+Clients receive filtered card state: a player's own hand may be visible to
+that player, but opponents' hands and hidden piles must not be broadcast in a
+full engine snapshot.
+
+The present 20-to-100 World Loom deck fits the engine's current 128-card
+active match-state bound. Keep the two limits independently validated; a
+future content change must not silently push an active deck past engine
+capacity.
+
+### 8.7 Card Table minigame
+
+Game 1.0 includes a small, fully playable card-game activity at a Card Table
+(name provisional), built on a separate Libft `card_game_engine` instance.
+Start with one explicit Minecraft rules profile and a two-player match; the
+engine's higher player-count limit is not a promise that Minecraft implements
+rules or UI for every player count. Use the engine's match-start
+configuration, turn/phase graph, registered card types/zones, card/effect
+callbacks, resource-cost/allowance APIs, choice ledger, usage-limit ledger,
+modifier/combat operations, command sequencing, state hashes, deck codes and
+replay/result archive where the configured rules need them. Configure a
+resolution stack separately when the profile needs stack/chain behavior, and
+persist/hash/replay it through the Minecraft match adapter because it is a
+separate component.
+
+Minecraft's card catalogue defines card definitions, set/corpus revisions,
+rarities, printings, booster contents/odds, collection ownership, and
+Minecraft-specific effect callbacks. `card_game_format` is the legality
+boundary for a selected profile/corpus: use its legal-card list, copy limits,
+ban/restricted entries and typed exceptions, then bind the match/deck code to
+the format hash. It is not a booster-generation or collection system. A deck
+code is an import/export representation, not proof that a deck is owned,
+legal, or available in the current world; verify format, corpus, ownership,
+and instance IDs server-side before a match.
+
+The intended minigame deck contract remains **25 to 500 cards**, with profile
+specific main/extra/side/leader zones and copy limits. The current deck-code
+codec can encode up to 500 total cards, but active match state is presently
+bounded by 128 cards. Before enabling a format whose legal deck can exceed
+that active limit, update Libft engine storage, snapshots/deltas, hashes,
+serialization and replay capacity, with format-version migration. Until then,
+clearly mark those formats unsupported and never truncate an imported deck.
+
+The initial minigame loop is: select a legal owned deck (or a tutorial loaner),
+validate its code and format on the server, initialize a seeded match, draw
+opening hands, submit sequenced commands, resolve effects/choices/phases and
+combat, determine a server-owned result, then save/export a replay. Use
+server-authoritative hidden zones and publish only player-appropriate views.
+The engine's player-view replay projection is useful for sharing; opponent
+hidden-zone contents and private event payloads must be irreversibly removed.
+Any reward from a match uses a separate idempotent Minecraft reward
+ledger, cannot mint repeated dust/cards through replay or reconnect, and is
+not required for the core minigame loop.
+
+The Hearthstone-, Magic-, and Yu-Gi-Oh!-style samples in Libft are simplified
+engine simulations, not a complete implementation of those games' official
+rules. The Minecraft minigame must ship only rules defined by its own
+versioned profile. It may draw design examples from
+different games, but must not claim parity with their full rulesets. Keep
+rules data and registered effect programs modular so future profiles can add
+conditional resources, summon/action allowances, zones, timing windows,
+stack admission/order, triggers, and combat policy without changing the
+generic engine for each card.
+
+### 8.8 Required changes at the Libft and Minecraft boundaries
+
+**Libft CardGame changes:**
+
+- Raise active match capacity beyond 128 so it supports a 500-card deck across
+  its configured deck zones, plus any additional live card instances the
+  profile can create. Define and enforce one total match-instance limit rather
+  than implying 500 cards are independently available in every zone. Update
+  engine storage, card/deck/hand/zone validation, snapshots, deltas, state
+  hashing, command/replay serialization, and version migration together;
+  changing only `FT_CARD_GAME_MAX_CARDS` or relying on the 500-card deck-code
+  codec is insufficient. The existing 20-to-100 regeneration deck needs no
+  capacity increase.
+- Provide one versioned authoritative match-action path for every
+  player-originated state change. At this revision, `card_game_command_type`
+  records play-card, end-turn, and advance-phase, while operations such as
+  choosing an option, mulligan, payment, and several zone changes have direct
+  APIs. Extend the generic command/replay model with stable action IDs and
+  bounded fixed-width arguments, or expose a supported composite-action
+  interface that lets a caller journal these actions without bypassing engine
+  validation. Do not serialize function pointers or callback user data.
+- For profiles that use `card_game_resolution_stack`, either include its
+  configured ordering/admission state in the engine's authoritative snapshot,
+  delta, state hash, and replay contract, or explicitly keep it in a composite
+  match-state API. It is separate from `card_game_engine` today, so a caller
+  must not assume it follows automatically from an engine snapshot.
+- Do not add Minecraft terrain, chunk, inventory, or dust concepts to Libft's
+  generic operation enum. Existing stable effect IDs/events and registered
+  callbacks are enough to bridge card resolution to a game-owned policy
+  adapter. Add a generic custom-operation facility only if another consumer
+  needs it; it must use stable operation type IDs, bounded value payloads, and
+  registered validators/handlers rather than game-specific code or pointers.
+
+**Minecraft changes:**
+
+- Add a configuration loader/registry that builds the Libft card definitions,
+  types, zones, turn phases, formats, effect IDs, usage limits, predicates,
+  and callback bindings from versioned Minecraft content. A saved match stores
+  profile/format/corpus/config versions and stable IDs; startup re-registers
+  process-local callbacks before restoring state.
+- Implement two distinct wrappers over the same engine: a `WorldLoomSession`
+  that owns the single-player regeneration profile plus a Minecraft
+  `RegenerationRequest`/policy-intent journal, and a `CardTableMatch` that
+  owns a normal match profile and a composite match record. Do not implement a
+  duplicate deck/hand/shuffle/effect runtime in Minecraft, and do not share
+  mutable zones or RNG state between the wrappers.
+- Keep world authority, dust/inventory accounting, safe-zone checks, chunk
+  selection, generation, structure placement, and commit/refund logic in
+  Minecraft's existing server/world owner. The adapter turns an accepted
+  CardGame action into a bounded immutable game intent; the server validates
+  and commits that intent through the established World Loom transaction.
+- Keep collection ownership, boosters/rarities/printings, card crafting,
+  localization, UI, player permissions, and reward settlement in Minecraft.
+  Use Libft `card_game_format` for ruleset legality and the canonical deck
+  code/hash for interchange, not as substitutes for owned-card checks or
+  Minecraft's collection and booster systems.
+- Build live network views from the authoritative engine state but filter
+  hidden zones per recipient. Store the engine state together with Minecraft
+  request IDs, reward-ledger entries, and any external resolution state needed
+  to resume a match. Use Libft replay projection for sharing only after the
+  Minecraft wrapper has removed its own private payloads as well.
 
 ## 9. Request and job architecture
 
@@ -1277,8 +1503,11 @@ or flickering chunks, and deterministic output for identical input hashes.
    do not rebuild the preview, worker, or commit pipeline from scratch.
 4. Record the current chunk serialization/revision contract, failure behavior,
    normal-build performance, and seeded output hashes.
-5. Verify the exact Compression and Analytics APIs on the selected Libft
-   branch; do not change the submodule branch/pointer as part of this roadmap.
+5. Verify the exact Compression, Analytics, and CardGame APIs on the selected
+   Libft branch and record the pinned CardGame revision. Specifically keep the
+   500-card deck-code capacity separate from the current 128-card active
+   match-state bound. Do not change the submodule pointer as part of this
+   roadmap.
 
 ### Pre-Phase 1 — finish the minimum playable vertical slice
 
@@ -1295,8 +1524,11 @@ already working and implement only the missing pieces.
 3. Use one server-owned dust balance/resource ledger. Seed a small test balance
    or grant it through one explicit prototype reward; do not wait for the full
    inventory/drop/crafting economy.
-4. Use one configured regeneration card/effect and a minimal test deck; the
-   full 20-card starter deck and deck editing are later Regeneration 1.0 work.
+4. Use the pinned Libft CardGame engine through the planned Minecraft adapter
+   for one draw, one card play/effect, and the required deck/hand/discard
+   transition. A minimal configured deck is enough; the full 20-card starter
+   deck and editing are later Regeneration 1.0 work. The effect must resolve
+   into a Minecraft-owned immutable policy intent, not write the world.
 5. Preview, confirm, and regenerate the selected chunk through the existing
    authoritative request/worker/result-commit path wherever it passes Phase 0.
 6. Keep the previous chunk drawable until the replacement block/light/mesh
@@ -1321,20 +1553,26 @@ Expand the proven slice into a complete player-facing regeneration release:
    server-calculated 3-by-3 protection, preview tokens, and stale-revision
    feedback.
 2. Add the configured dust acquisition/payment loop, exponential draw pricing,
-   resource reservations/refunds, and a 20-card starter deck with unique card
-   IDs, draw/hand/discard state, and bounded deck editing.
-3. Add the starter card set, effect precedence, deterministic resolved-policy
-   digest, and safe preview/confirmation workflow. Card manufacturing can
-   remain configured starter content at this milestone.
-4. Harden bounded priority scheduling, per-chunk prepare/commit, cancellation,
+   resource reservations/refunds, and a 20-card starter deck using Libft
+   CardGame ordered zones, stable instance IDs, and deterministic shuffle
+   state. Keep the Minecraft 20-to-100 ownership limit and deck transfers in
+   the game adapter.
+3. Add the Minecraft CardGame adapter, starter card catalogue, effect-ID
+   registration, and conversion from successful card resolution into a
+   validated immutable generation-policy intent. Keep the engine's card-match
+   state separate from the external World Loom resource/world transaction.
+4. Add effect precedence, deterministic resolved-policy digest, and safe
+   preview/confirmation workflow. Card manufacturing can remain configured
+   starter content at this milestone.
+5. Harden bounded priority scheduling, per-chunk prepare/commit, cancellation,
    persistence/compression, and authoritative client replication.
-5. Meet atomic block/light/mesh publication and strict frame/edit-latency
+6. Meet atomic block/light/mesh publication and strict frame/edit-latency
    gates. Analytics-on/off runs must yield the same world result.
-6. Add the versioned custom-feature/structure planning interface, including
+7. Add the versioned custom-feature/structure planning interface, including
    default-world versus regeneration-only policy, complete chunk footprints,
    stable structure-instance IDs, and renderer-visible cross-chunk fragments.
    Production villages/volcano content comes later.
-7. Provide a valid default player avatar for other clients; the full appearance
+8. Provide a valid default player avatar for other clients; the full appearance
    customization flow is a Game 1.0 gate.
 
 Regeneration 1.0 does **not** wait for the complete item catalog, crafting
@@ -1369,10 +1607,30 @@ needed for this milestone and can later be adapted to the full item economy.
 2. Add exploration blueprints, deterministic known recipes, and optional
    ingredient-constrained Research Synthesis with disclosed candidate pools
    and bounded effect tiers.
-3. Connect crafted unique card items to World Loom deck transfers without
-   changing the Regeneration 1.0 card identity/save contract.
+3. Connect crafted unique card items to both World Loom deck transfers and the
+   card collection/minigame catalogue without changing stable definition,
+   printing, or physical-instance IDs.
 
-### Phase 5 — Game 1.0 player avatars and customization
+### Phase 5 — Game 1.0 Card Table minigame
+
+1. Build the Minecraft adapter on the pinned Libft CardGame module; configure
+   one explicit two-player profile with versioned phases, zones, resource
+   rules, effect IDs, turn rules, usage limits, and a legal-card format.
+2. Use the Libft format/hash and deck-code APIs for legality and sharing, with
+   server-side checks for current corpus, card ownership, copies, and format
+   revision. Keep booster rarity/odds and collection ownership in Minecraft.
+3. Implement the initial Card Table UI for deck selection, opening draw,
+   choices, legal actions, turn/phase status, effects, combat, result, and
+   replay. Client UI proposes actions; the server submits sequenced commands
+   and owns the authoritative match state.
+4. Complete the intended 25-to-500-card format range only after Libft's active
+   match-state capacity, snapshots/deltas, serialization, hashes, and replay
+   support 500-card decks. Until that prerequisite lands, cap enabled formats
+   to the supported engine capacity and label larger formats unavailable.
+5. Add optional minigame rewards through a separate idempotent reward ledger;
+   never let match/replay retries duplicate dust, cards, unlocks, or gear.
+
+### Phase 6 — Game 1.0 player avatars and customization
 
 1. Add the final block-style player rig/model, default appearance, and
    authoritative pose/animation replication.
@@ -1380,7 +1638,7 @@ needed for this milestone and can later be adapted to the full item economy.
 3. Confirm armor, tools, shields, bows, and staffs display on the model without
    changing gameplay collision or combat authority.
 
-### Phase 6 — Game 1.0 neutral fauna
+### Phase 7 — Game 1.0 neutral fauna
 
 1. Complete authoritative entity ownership, persistence, spawn/despawn, and
    renderer submission; implement sheep as the first species vertical slice.
@@ -1389,7 +1647,7 @@ needed for this milestone and can later be adapted to the full item economy.
 3. Verify regeneration cannot duplicate, erase, or relocate protected
    creatures, eggs, drops, or breeding state.
 
-### Phase 7 — Game 1.0 custom structures and regeneration progression
+### Phase 8 — Game 1.0 custom structures and regeneration progression
 
 1. Add a configurable village feature pack with structure fragments that cross
    chunk borders and a bounded village population of job-configured villagers.
@@ -1404,14 +1662,12 @@ needed for this milestone and can later be adapted to the full item economy.
 5. Preserve structure instance state, village stock/reputation, progression
    unlocks, and one-time boss rewards across regeneration and retries.
 
-### Phase 8 — broader content and extension
+### Phase 9 — broader content and extension
 
 1. Add richer draw/discard, bonus-scope, feature, and combination cards.
 2. Add further structure definitions and progression content through config,
    without adding per-structure special cases to the chunk renderer.
-3. If Libft's CardGame module is implemented and reviewed on the target branch,
-   add an adapter without changing persistent card IDs or replay semantics.
-4. Add optional animal species only after entity and performance gates pass.
+3. Add optional animal species only after entity and performance gates pass.
 
 Do not skip the normal-build tests between phases. Do not call the design
 implemented merely because the preview UI or generator helper works in
@@ -1440,9 +1696,9 @@ release. It is accepted when:
 - repeated end-to-end tests complete without duplicate charge, duplicate
   commit, black/partial chunk publication, or render-thread generation.
 
-The slice may seed dust and a test deck through explicit development/test
-fixtures. It does not require the general item economy, card discovery, or a
-final character model.
+The slice may seed dust and a minimal deck through explicit development
+configuration. It does not require the general item economy, card discovery,
+or a final character model.
 
 ### 18.2 Regeneration 1.0 release gate
 
@@ -1461,6 +1717,10 @@ playable, without requiring the broader survival package:
 - starter cards have validated effects, deterministic policy resolution,
   preview warnings, and a versioned configuration digest; full Card Press
   manufacturing is not required for this gate;
+- the World Loom uses Libft CardGame for card definitions, unique instances,
+  deck/hand/discard transitions, deterministic shuffling, and effect dispatch;
+  Minecraft still owns dust, chunk selection, safety, policy intents and world
+  commit, with no mutable world access from card callbacks;
 - selected chunks and connected clients converge through authoritative
   revisions, with persistence/compression recovery and stale-result handling;
 - the versioned custom-generation contract can validate default-world versus
@@ -1496,6 +1756,17 @@ identity systems. It is accepted when:
 - exploration unlocks and ingredient-constrained Research Synthesis discover
   cards; known recipes craft exact cards, while random results are bounded by
   their disclosed tier, committed once, persisted, and replay-safe;
+- the Card Table offers a complete server-authoritative two-player minigame
+  profile using Libft CardGame, with Minecraft-owned card sets/collection,
+  deck legality, user interface and effect definitions; shared deck codes are
+  validated against the selected format and owned cards;
+- advertised minigame formats support the intended 25-to-500-card deck range
+  in active match state, snapshots/deltas, persistence and replay, not merely
+  in the deck-code codec. Unsupported larger formats are not shown as playable;
+- live match views and shared replays preserve hidden-zone privacy, while match
+  results and any rewards are settled through Minecraft's authoritative
+  idempotent session/reward records. Genre-inspired samples are not described
+  as full Hearthstone, Magic or Yu-Gi-Oh! rules implementations;
 - health and hunger are authoritative and persistent; farming, grain/bread,
   fruit, raw/cooked foods, and optional thirst follow configured rules;
 - starter tools, armor, weapons, shields, staffs, and combat/magic profiles
@@ -1536,7 +1807,11 @@ complete release if its milestone's own criteria remain unmet.
   one-chunk slice can be tested.
 - Treating the regeneration deck or its active hand as normal inventory; card
   items outside the deck are the transferable inventory objects.
-- Implementing a full general-purpose card-game engine in Minecraft.
+- Reimplementing Libft's generic card-game engine in Minecraft; Minecraft
+  supplies the content, game-specific profiles, adapter, UI and world-facing
+  behavior instead.
+- Requiring the separate Card Table minigame before the one-chunk slice or
+  Regeneration 1.0; it is a Game 1.0 feature and uses an isolated match.
 - Allowing clients to regenerate terrain or choose their own seed, regenerating
   protected chunks, or silently deleting player content.
 - Sending chunk meshes over the network or running analytics, compression,
@@ -1545,8 +1820,9 @@ complete release if its milestone's own criteria remain unmet.
   a temporary placeholder is acceptable there.
 
 Regeneration 1.0 also does not require the complete survival economy, animal
-breeding, combat progression, experimental card crafting, or customizable
-avatars, nor does it require finished village/villager or volcano/boss content.
+breeding, the separate Card Table minigame, combat progression, experimental
+card crafting, or customizable avatars, nor does it require finished
+village/villager or volcano/boss content.
 The versioned custom-structure and cross-chunk renderer contract is required
 in Regeneration 1.0; those specific content packs remain explicit Game 1.0
 work rather than being removed from the roadmap.
@@ -2141,7 +2417,8 @@ Game 1.0 systems depend on the item/inventory and entity foundations.
 ```text
 existing revision preview + async generation + atomic commit
         -> Pre-Phase 1 one-chunk World Loom slice (minimal dust/card fixture)
-        -> Regeneration 1.0 resource ledger + 20..100 deck + replication
+             -> Libft CardGame adapter + one regeneration profile/session
+        -> Regeneration 1.0 resource ledger + engine-backed 20..100 deck
         -> versioned custom-feature planner + cross-chunk fragment metadata
              -> Game 1.0 villages/villagers
              -> regeneration-only 9x9+ volcano/boss -> top equipment tier
@@ -2152,6 +2429,8 @@ item definitions + inventory transactions
              -> furnace/smelting/cooking + tools/armor/weapons
              -> farming/food + health/hunger
              -> paper/ink/card stock + Card Press/discovery
+                    -> Libft CardGame adapter + Card Table two-player profile
+                       -> 25..500-card active match capacity prerequisite
         -> customizable player avatar and equipment presentation
 entity lifecycle + item drops + entity renderer
         -> sheep vertical slice -> cows/pigs/chickens + breeding
