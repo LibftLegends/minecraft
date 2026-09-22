@@ -509,12 +509,20 @@ Card definitions are configuration-driven and refer to stable IDs. Prefer a
 small declarative set of validated regeneration operations in the first
 implementation. Example operations include:
 
-- add/remove a biome from an allowed set;
+- exclude a biome from an allowed set;
+- guarantee a biome when the current world rules and selected chunk footprint
+  can legally satisfy that guarantee;
 - adjust biome weights within configured bounds;
-- enable/disable an ore or alter its configured distribution profile;
+- enable/disable an ore or increase one ore's distribution profile within
+  world-defined caps;
+- guarantee at least one valid village footprint in the generated chunks when
+  the village feature is enabled and the selected area has enough space;
 - add a bounded water, lava, cave, structure, or surface-feature profile;
+- add bounded surface lava pools with the same containment and safety checks as
+  every other generated fluid;
 - modify feature density within world-defined safe limits;
-- draw/discard cards through the regeneration deck API;
+- draw cards, draw two then discard one, or discard cards through the
+  regeneration deck API;
 - grant a bounded number of extra chunk targets;
 - add a constraint or select a supported regeneration stage.
 
@@ -535,15 +543,43 @@ Resolve generation policy in this order:
    preserved.
 3. World-owner generation configuration and selected regeneration mode/stage
    mask.
-4. Played card effects in a documented order (the default is the order played
-   by the player).
-5. Deterministic generation using the resulting immutable policy.
+4. Create a fresh immutable working snapshot by deep-copying the current
+   authoritative world-generation rules. This snapshot is the only policy
+   object cards may adapt for this regeneration session.
+5. Apply played card effects in a documented order (the default is the order
+   played by the player) to the snapshot's current state.
+6. Deterministic generation using the resulting immutable snapshot.
 
 Cards may modify values only inside configured ranges and may not remove
 mandatory safety constraints. Conflicting cards either compose by an explicit
 operation (`add`, `multiply`, `replace`, `intersect`, or `exclude`) or are
 rejected as incompatible during preview. Never rely on container iteration
 order to resolve conflicts.
+
+The authoritative world rules are never modified by regeneration. Every new
+regeneration request pulls the current base rules again and creates a new
+working snapshot; the previous session's adapted snapshot is never reused as
+the next session's base. A successful regeneration persists its generated
+chunks and the resolved snapshot digest for audit/replay, but does not write
+card changes back into the world's permanent generation configuration.
+
+Effects always inspect the snapshot as it exists at the moment they are
+played, including changes made by earlier cards. For example, if an earlier
+card excludes desert, a later card that guarantees desert is incompatible or
+has no legal effect according to the declared conflict policy; it must not
+silently consult the original world rules and undo the earlier card. Likewise,
+excluding a biome that is already absent, increasing an ore already at its
+configured cap, or guaranteeing a feature that is disabled by the current
+snapshot produces a deterministic no-effect result.
+
+The preview must show each card's evaluated result as `APPLIED`, `PARTIAL`,
+`CONFLICT`, or `NO_EFFECT`, with a human-readable reason and the before/after
+summary. A `NO_EFFECT` card is never silently consumed: by default the player
+can remove it before confirmation. If the player explicitly confirms a
+session containing it, the server may move it to discard according to the
+configured card policy, but the resulting snapshot and audit record must make
+the no-op visible. Safety violations and invalid card targets remain hard
+errors, not no-ops.
 
 The server canonicalizes the resolved policy and computes a digest. The digest
 includes generator version, terrain config, mode/stage mask, card definition
@@ -552,25 +588,33 @@ the revision and chunk metadata.
 
 ### 8.4 Starter deck example
 
-The following is illustrative balance content, not fixed implementation data:
+The player starts with a **20-card regeneration deck**. These are illustrative
+basic definitions and balance content, not fixed implementation data:
 
 | Card | Example effect | Purpose |
 |---|---|---|
-| Biome Compass (5 copies) | Adds a small configured set of eligible biome weights | Teaches biome selection without forcing an unsafe hard replacement |
-| Deep Seam (4 copies) | Increases one selected ore profile within world caps | Simple underground modification |
-| Springseed (3 copies) | Enables a bounded freshwater feature profile | Introduces surface water with containment checks |
-| Gentle Ridges (4 copies) | Adds a modest height-variation profile | Makes terrain changes legible and low risk |
-| Surveyor's Reach (2 copies) | Grants one additional target chunk for this session | Demonstrates bonus scope and its explicit accounting |
-| Recycle Draft (2 copies) | Discards one card from the regeneration hand and draws one replacement under the draw-cost rules | Demonstrates deck manipulation without touching player inventory |
+| Biome Exclusion (4 copies) | Removes one selected biome from the snapshot's eligible biome set | Demonstrates safe biome filtering |
+| Deep Seam (4 copies) | Increases one selected ore profile within world caps | Adds more of one ore without bypassing distribution limits |
+| Village Charter (2 copies) | Guarantees one valid village footprint in the generated chunk set | Introduces bounded structure guarantees |
+| Surface Magma (2 copies) | Enables a bounded surface-lava-pool profile | Adds a risky feature with containment and safety validation |
+| Double Draft (2 copies) | Draws two cards, then forces one discard from the resulting hand | Demonstrates card draw/discard sequencing |
+| Biome Compass (4 copies) | Adds a small configured set of eligible biome weights | Teaches composable biome selection without an unsafe replacement |
+| Surveyor's Reach (2 copies) | Grants one additional target chunk for this session | Demonstrates bonus scope and explicit accounting |
 
 These example counts total the required 20-card starter deck. Card definitions
 are configuration content and can change without changing the deck-size
 invariant.
 
-Starter effects should be weak, transparent, and deterministic. Avoid cards
-that force lava, erase edits, override protection, create unbounded structures,
-or guarantee rare loot. Progression can add stronger combinations after the
-preview and rollback systems are reliable.
+Starter effects should be weak, transparent, and deterministic. In particular,
+`Village Charter` may fail with `NO_EFFECT` when the selected chunks are too
+small, protected, already occupied, or the village feature is disabled;
+`Surface Magma` may only create small enclosed pools in legal terrain; and
+`Double Draft` must respect hand, draw, discard, and per-session limits.
+Progression can later add cards such as `Biome Guarantee` (force one eligible
+biome when the snapshot can satisfy it) and `Fortune's Draw` (draw one card)
+after the preview, snapshot, and rollback systems are reliable. Avoid cards
+that erase edits, override protection, create unbounded structures, or
+guarantee rare loot.
 
 ### 8.5 Card recipe discovery and Card Press crafting
 
