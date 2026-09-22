@@ -7,6 +7,7 @@ SHELL := /bin/bash
 endif
 
 MAKEFLAGS += -r
+.DEFAULT_GOAL := all
 # BUILD_PLAN_MODE=1 is used by the stale-work planning wrapper.  Recipes emit
 # machine-readable markers in that mode and concise status lines otherwise.
 BUILD_PLAN_MODE ?= 0
@@ -26,6 +27,11 @@ include mk/directories.mk
 include mk/compiler.mk
 include mk/libft.mk
 include mk/objects.mk
+
+ifeq ($(FT_VOX_ANALYTICS),1)
+COMPILE_FLAGS += -DLIBFT_ENABLE_ANALYTICS=1
+LIBFT_COMPILE_FLAGS += -DLIBFT_ENABLE_ANALYTICS=1
+endif
 
 # Include Libft's canonical object/archive graph in the parent graph.  The
 # graph is configured with Libft-relative paths so one GNU Make scheduler can
@@ -67,7 +73,7 @@ LIBFT_PARENT_SELECTED_ARCHIVES := $(LIBFT_GLOBAL_RELEASE_ARCHIVES) \
         $(LIBFT_PARENT_GLOBAL_DEBUG_TARGET)
 
 define LIBFT_PARENT_ARCHIVE_RULE
-$(1): $(2) $(LIBFT_GLOBAL_ARCHIVE_CONFIG_INPUTS)
+$(1): $(2) $(LIBFT_GLOBAL_ARCHIVE_CONFIG_INPUTS) Libft/mk/global_graph.mk
 	@if [ "$$(BUILD_PLAN_MODE)" = "1" ]; then printf '%s\n' "__BUILD_PLAN__|archive|libft|Full_Libft|$(1)"; else printf '\033[1;35m[LIBFT] Archiving %s\033[0m\n' "$(1)"; fi
 	@$(MKDIR) $(dir $$@)
 	@$(RM) $$@.tmp
@@ -94,8 +100,68 @@ else
 SUBMODULE_UPDATE_CMD = sh tools/update_libft.sh
 endif
 
-all:
+all: normal
+
+normal:
 	@sh Libft/mk/run_build_with_progress.sh "$(MAKE)" internal-all
+	@test -f "$(TARGET)" && printf '\033[1;35m[MINECRAFT] Normal voxel ready: %s\033[0m\n' "$(TARGET)"
+	@if [ "$(FT_VOX_ANALYTICS)" != "1" ]; then \
+		$(MAKE) --no-print-directory analytics; \
+	fi
+
+ifeq ($(OS),Windows_NT)
+# Keep the documented executable name usable as a make target on Windows.
+# The real target includes .exe, while this alias also reaches the recursive
+# analytics build performed by the normal link recipe.
+ft_vox: normal
+endif
+
+analytics:
+	@$(MAKE) --no-print-directory FT_VOX_ANALYTICS=1 \
+		LIBFT_ARCHIVE_SUFFIX=_analytics \
+		LIBFT_BUILD_OUTPUT_SUFFIX=_analytics \
+		TARGET=ft_vox_analytics$(EXE_EXT) internal-all
+	@test -f "ft_vox_analytics$(EXE_EXT)" && printf '\033[1;35m[MINECRAFT][Analytics] Ready: %s\033[0m\n' "ft_vox_analytics$(EXE_EXT)"
+
+validate-lighting-harness: normal analytics
+	@status=0; analytics_status=0; ./ft_vox$(EXE_EXT) --validate-lighting-harness || status=$$?; \
+	./ft_vox_analytics$(EXE_EXT) --validate-lighting-harness || \
+	analytics_status=$$?; \
+	if [ $$analytics_status -ne 0 ] && [ $$status -eq 0 ]; then \
+		status=$$analytics_status; \
+	fi; exit $$status
+
+validate-lighting-stress: normal analytics
+	@status=0; analytics_status=0; ./ft_vox$(EXE_EXT) --validate-lighting-stress || status=$$?; \
+	./ft_vox_analytics$(EXE_EXT) --validate-lighting-stress || \
+	analytics_status=$$?; \
+	if [ $$analytics_status -ne 0 ] && [ $$status -eq 0 ]; then \
+		status=$$analytics_status; \
+	fi; exit $$status
+
+validate-lighting-scheduled-stress: normal analytics
+	@status=0; analytics_status=0; ./ft_vox$(EXE_EXT) --validate-lighting-scheduled-stress || \
+		status=$$?; \
+	./ft_vox_analytics$(EXE_EXT) --validate-lighting-scheduled-stress || \
+		analytics_status=$$?; \
+	if [ $$analytics_status -ne 0 ] && [ $$status -eq 0 ]; then \
+		status=$$analytics_status; \
+	fi; exit $$status
+
+validate-lighting-lifecycle: normal analytics
+	@status=0; analytics_status=0; ./ft_vox$(EXE_EXT) \
+		--validate-lighting-lifecycle || status=$$?; \
+	./ft_vox_analytics$(EXE_EXT) --validate-lighting-lifecycle || \
+		analytics_status=$$?; \
+	if [ $$analytics_status -ne 0 ] && [ $$status -eq 0 ]; then \
+		status=$$analytics_status; \
+	fi; exit $$status
+
+validate-worldgen-probe: normal
+	@./ft_vox$(EXE_EXT) --worldgen-probe
+
+validate-worldgen-probe-analytics: analytics
+	@./ft_vox_analytics$(EXE_EXT) --worldgen-probe --analytics-no-exporter
 
 plan:
 	@sh Libft/mk/print_build_plan.sh "$(MAKE)" internal-all
@@ -133,19 +199,35 @@ submodule_update:
 	@$(SUBMODULE_UPDATE_CMD)
 
 debug:
-	@sh Libft/mk/run_build_with_progress.sh "$(MAKE)" internal-debug
+	@DEBUG=1 sh Libft/mk/run_build_with_progress.sh "$(MAKE)" internal-debug
 
 internal-debug: $(NAME_DEBUG)
 
 $(TARGET): $(OBJS) $(LIBFT_LINK_LIB) $(FT_VOX_BUILD_CONFIG_INPUTS)
 	@if [ "$(BUILD_PLAN_MODE)" = "1" ]; then printf '%s\n' "__BUILD_PLAN__|link|minecraft|Minecraft|$@"; else printf '\033[1;35m[MINECRAFT] Linking %s\033[0m\n' "$@"; fi
-	@$(CC) $(CFLAGS) $(OBJS) $(LIBFT_LINK_FLAGS) -o $@ $(LDFLAGS)
+	$(file >$@.rsp,$(OBJS) $(LIBFT_LINK_FLAGS))
+	@$(CC) $(CFLAGS) -o $@ @$@.rsp $(LDFLAGS)
 	@printf '\033[1;35m[MINECRAFT] Link ready: %s\033[0m\n' "$@"
+	@if [ "$(FT_VOX_ANALYTICS)" != "1" ]; then \
+		$(MAKE) --no-print-directory FT_VOX_ANALYTICS=1 \
+			LIBFT_ARCHIVE_SUFFIX=_analytics \
+			LIBFT_BUILD_OUTPUT_SUFFIX=_analytics \
+			TARGET=ft_vox_analytics$(EXE_EXT) internal-all; \
+		analytics_status=$$?; \
+		if [ $$analytics_status -ne 0 ]; then exit $$analytics_status; fi; \
+		if [ ! -f "ft_vox_analytics$(EXE_EXT)" ]; then \
+			printf '%s\n' '[MINECRAFT][Analytics] output missing' >&2; \
+			exit 1; \
+		fi; \
+		printf '\033[1;35m[MINECRAFT][Analytics] Ready: %s\033[0m\n' \
+			"ft_vox_analytics$(EXE_EXT)"; \
+	fi
 
 $(TEST_NAME): $(TEST_OBJS) $(OBJS_NO_MAIN) $(TARGET) $(LIBFT_FULL_LIB) \
         $(FT_VOX_BUILD_CONFIG_INPUTS)
 	@if [ "$(BUILD_PLAN_MODE)" = "1" ]; then printf '%s\n' "__BUILD_PLAN__|link|minecraft|MinecraftTest|$@"; else printf '\033[1;35m[MINECRAFT][Test] Linking %s\033[0m\n' "$@"; fi
-	@$(CC) $(CFLAGS) $(TEST_OBJS) $(OBJS_NO_MAIN) $(LIBFT_LINK_FLAGS) -o $@ $(LDFLAGS)
+	$(file >$@.rsp,$(TEST_OBJS) $(OBJS_NO_MAIN) $(LIBFT_LINK_FLAGS))
+	@$(CC) $(CFLAGS) -o $@ @$@.rsp $(LDFLAGS)
 	@printf '\033[1;35m[MINECRAFT][Test] Link ready: %s\033[0m\n' "$@"
 
 $(OBJ_DIR)/%.o: %.cpp | $$(dir $$@)
@@ -196,16 +278,10 @@ re:
 	@$(MAKE) all
 
 test: tests
-	@./$(TEST_NAME) --validate-camera-speed
-	@./$(TEST_NAME) --validate-collision
-	@./$(TEST_NAME) --validate-block-edit
-	@./$(TEST_NAME) --validate-visible-distance
-	@./$(TEST_NAME) --validate-terrain-determinism
-	@./$(TEST_NAME) --validate-world-scale
-	@./$(TEST_NAME) --validate-caves
-	@./$(TEST_NAME) --validate-terrain-configuration
-	@./$(TEST_NAME) --validate-world-revision
-	@./$(TEST_NAME) --validate-async-generation
+	@./$(TEST_NAME) --validate-all
+
+validate-all: tests
+	@./$(TEST_NAME) --validate-all
 
 both: all debug
 
@@ -244,6 +320,10 @@ ci:
 	$(MAKE) ci-lint
 	$(MAKE) ci-coverage
 
-.PHONY: all plan internal-all dirs clean fclean re debug internal-debug both re_both tests internal-tests test lint coverage \
-        ci-build ci-test ci-lint ci-coverage ci submodule_init submodule_update \
-        ft_vox install_cobc tests_with_cobc
+.PHONY: all normal analytics plan internal-all dirs clean fclean re debug internal-debug both re_both tests internal-tests test lint coverage \
+	ci-build ci-test ci-lint ci-coverage ci submodule_init submodule_update \
+	validate-worldgen-probe validate-worldgen-probe-analytics \
+	validate-lighting-harness validate-lighting-stress \
+	validate-lighting-scheduled-stress \
+	validate-lighting-lifecycle \
+	ft_vox install_cobc tests_with_cobc

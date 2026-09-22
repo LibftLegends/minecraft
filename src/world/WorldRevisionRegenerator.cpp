@@ -1,4 +1,5 @@
 #include "../../src/world/WorldRevisionRegenerator.hpp"
+#include <cstdio>
 
 WorldRevisionRegenerator::WorldRevisionRegenerator()
 {
@@ -30,7 +31,8 @@ int32_t WorldRevisionRegenerator::capture_chunk_snapshot(WorldRevisionManager &m
 	if (manager.mode_ == World::REGEN_FULL)
 		return (FT_ERR_SUCCESS);
 	error_code = world.chunk_streamer.pipeline().capture_snapshot(chunk,
-			nullptr, nullptr, nullptr, nullptr, snapshot);
+			nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+			nullptr, snapshot);
 	if (error_code != FT_ERR_SUCCESS)
 	{
 		manager.progress_.record_error(error_code);
@@ -73,7 +75,7 @@ int32_t WorldRevisionRegenerator::submit_chunk_regeneration(WorldRevisionManager
 	{
 		manager.progress_.record_error(error_code);
 		manager.progress_.finish();
-		world.chunk_streamer.pipeline().cancel_queued();
+		world.chunk_streamer.cancel_pending_remeshes();
 		return (error_code);
 	}
 	manager.progress_.set_job_count(manager.progress_.job_count() + 1U);
@@ -100,17 +102,17 @@ int32_t WorldRevisionRegenerator::start(WorldRevisionManager &manager,
 	return (FT_ERR_SUCCESS);
 }
 
-int32_t WorldRevisionRegenerator::commit_terrain_config(WorldRevisionManager &manager,
+int32_t WorldRevisionRegenerator::commit_voxel_config(WorldRevisionManager &manager,
 	World &world) noexcept
 {
 	int32_t error_code;
 
-	error_code = world.terrain_config.initialize(manager.config_);
+	error_code = world.voxel_config.initialize(manager.config_);
 	if (error_code == FT_ERR_SUCCESS)
 	{
-		(void)world.terrain_context.destroy();
-		error_code = terrain_generation_context_initialize(world.terrain_context,
-				world.terrain_config);
+		(void)world.voxel_context.destroy();
+		error_code = voxel_generation_context_initialize(world.voxel_context,
+				world.voxel_config);
 	}
 	return (error_code);
 }
@@ -131,7 +133,7 @@ int32_t WorldRevisionRegenerator::finish(WorldRevisionManager &manager,
 		manager.selected_.clear();
 		return (generation_error);
 	}
-	error_code = WorldRevisionRegenerator::commit_terrain_config(manager,
+	error_code = WorldRevisionRegenerator::commit_voxel_config(manager,
 			world);
 	if (error_code != FT_ERR_SUCCESS)
 	{
@@ -142,7 +144,7 @@ int32_t WorldRevisionRegenerator::finish(WorldRevisionManager &manager,
 	manager.revision_id_ += 1U;
 	manager.pending_ = false;
 	manager.selected_.clear();
-	world.chunk_streamer.pipeline().cancel_queued();
+	world.chunk_streamer.cancel_pending_remeshes();
 	world.chunk_streamer.bump_generation_revision();
 	world.chunk_streamer.reset_candidates_after_regeneration();
 	return (FT_ERR_SUCCESS);
@@ -163,7 +165,15 @@ int32_t WorldRevisionRegenerator::regenerate_selected_chunks(WorldRevisionManage
 		error_code = WorldGenerationResultCommitter::drain(world.chunk_streamer,
 				world);
 		if (error_code != FT_ERR_SUCCESS)
+		{
+		#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+			std::fprintf(stderr,
+				"[WorldRevision] drain failed error=%d jobs=%zu progress_error=%d\n",
+				error_code, manager.progress_.job_count(),
+				manager.progress_.error());
+		#endif
 			break ;
+		}
 		if (manager.progress_.active())
 			std::this_thread::yield();
 	}

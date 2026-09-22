@@ -1,4 +1,6 @@
 #include "../../src/app/GameSession.hpp"
+#include "../../src/diagnostics/RuntimeAnalytics.hpp"
+#include <cstdio>
 
 #if defined(__APPLE__)
 # include <mach/mach.h>
@@ -7,18 +9,28 @@
 
 const char *GameSession::BIOME_NAMES[5] = {"PLAINS", "HILLS", "DESERT", "SNOW", "MOUNTAINS"};
 
+namespace
+{
+	bool game_session_mesh_is_drawable(const chunk_mesh &mesh)
+	{
+		return (WorldChunk::mesh_is_drawable(mesh));
+	}
+}
+
 GameSession::GameSession()
     : camera_(), player_character_(), world_(), render_debug_(),
       active_render_distance_(WorldCoordinates::REQUIRED_VISIBLE_DISTANCE), fps_accumulator_(0.0),
       rd_accumulator_(0.0), display_fps_(0.0), frame_ms_(0.0), performance_frame_ms_(16.67),
       fps_frame_count_(0U),
-      selected_block_id_(TERRAIN_GENERATOR_DIRT_BLOCK), boost_enabled_(false), active_(false),
+      selected_block_id_(VOXEL_GENERATOR_DIRT_BLOCK), boost_enabled_(false), active_(false),
       revision_preview_visible_(false), render_debug_frame_(0U), cached_ram_mb_(0U),
-      cached_vram_mb_(0U), revision_preview_center_x_(0), revision_preview_center_z_(0),
+      cached_vram_mb_(0U), cached_biome_world_x_(0), cached_biome_world_z_(0),
+      cached_biome_valid_(false), revision_preview_center_x_(0), revision_preview_center_z_(0),
       revision_preview_identifier_(0U), revision_preview_cache_valid_(false),
       revision_preview_cache_(), error_code_(FT_ERR_SUCCESS)
 {
 	seed_[0] = '\0';
+	cached_biome_name_[0] = '\0';
 }
 
 GameSession::GameSession(const GameSession &other)
@@ -26,9 +38,10 @@ GameSession::GameSession(const GameSession &other)
       active_render_distance_(WorldCoordinates::REQUIRED_VISIBLE_DISTANCE), fps_accumulator_(0.0),
       rd_accumulator_(0.0), display_fps_(0.0), frame_ms_(0.0), performance_frame_ms_(16.67),
       fps_frame_count_(0U),
-      selected_block_id_(TERRAIN_GENERATOR_DIRT_BLOCK), boost_enabled_(false), active_(false),
+      selected_block_id_(VOXEL_GENERATOR_DIRT_BLOCK), boost_enabled_(false), active_(false),
       revision_preview_visible_(false), render_debug_frame_(0U), cached_ram_mb_(0U),
-      cached_vram_mb_(0U), revision_preview_center_x_(0), revision_preview_center_z_(0),
+      cached_vram_mb_(0U), cached_biome_world_x_(0), cached_biome_world_z_(0),
+      cached_biome_valid_(false), revision_preview_center_x_(0), revision_preview_center_z_(0),
       revision_preview_identifier_(0U), revision_preview_cache_valid_(false),
       revision_preview_cache_(), error_code_(FT_ERR_SUCCESS)
 {
@@ -51,7 +64,7 @@ void GameSession::reset_session_state()
 {
 	active_render_distance_ = Settings::instance().render_distance();
 	boost_enabled_ = false;
-	selected_block_id_ = TERRAIN_GENERATOR_DIRT_BLOCK;
+	selected_block_id_ = VOXEL_GENERATOR_DIRT_BLOCK;
 	fps_accumulator_ = 0.0;
 	fps_frame_count_ = 0U;
 	rd_accumulator_ = 0.0;
@@ -65,29 +78,50 @@ void GameSession::reset_session_state()
 int GameSession::start(const std::string &seed, ApplicationWindow &window,
 	VoxelRenderer &renderer)
 {
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	std::fprintf(stderr, "World startup: initializing world\n");
+	#endif
     error_code_ = world_.initialize(seed.c_str());
     if (error_code_ != FT_ERR_SUCCESS)
+    {
         return error_code_;
+    }
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	std::fprintf(stderr, "World startup: world initialized\n");
+	#endif
     error_code_ = player_character_.initialize();
     if (error_code_ != FT_ERR_SUCCESS)
     {
         world_.destroy();
         return error_code_;
     }
+    {
+        int32_t analytics_error;
+
+        analytics_error = RuntimeAnalytics::begin_world_session();
+        if (analytics_error != FT_ERR_SUCCESS)
+            std::fprintf(stderr, "Analytics: unable to open world report (%d)\n",
+                analytics_error);
+    }
     std::strncpy(seed_, seed.c_str(), sizeof(seed_) - 1);
     seed_[sizeof(seed_) - 1] = '\0';
     camera_.initialize();
     PlayerController::spawn_player_on_ground(&camera_, world_);
     sync_player_character_location();
-    active_render_distance_ = Settings::instance().render_distance();
+    /* Only the minimum playable envelope is needed while loading. Streaming
+     * the full configured distance here competes with the chunks that gate
+     * startup and can make the loading screen appear hung. */
+    active_render_distance_ = WorldCoordinates::MIN_RENDER_DISTANCE;
     boost_enabled_ = false;
     revision_preview_visible_ = false;
     render_debug_frame_ = 0U;
     cached_ram_mb_ = 0U;
     cached_vram_mb_ = 0U;
+    cached_biome_valid_ = false;
+    cached_biome_name_[0] = '\0';
     revision_preview_cache_valid_ = false;
     revision_preview_cache_.clear();
-    selected_block_id_ = TERRAIN_GENERATOR_DIRT_BLOCK;
+    selected_block_id_ = VOXEL_GENERATOR_DIRT_BLOCK;
     fps_accumulator_ = 0.0;
     fps_frame_count_ = 0U;
     rd_accumulator_ = 0.0;
@@ -110,15 +144,21 @@ int GameSession::start(const std::string &seed, ApplicationWindow &window,
     return FT_ERR_SUCCESS;
 }
 
-void GameSession::set_terrain_generation_config(const terrain_generation_config &config)
+void GameSession::set_voxel_generation_config(const voxel_generation_config &config)
 {
-	this->world_.set_terrain_config(config);
+	this->world_.set_voxel_config(config);
 }
 
 void GameSession::stop()
 {
 	if (active_)
+	{
+		int32_t analytics_error = RuntimeAnalytics::end_world_session();
+		if (analytics_error != FT_ERR_SUCCESS)
+			std::fprintf(stderr, "Analytics: world report close failed (%d)\n",
+				analytics_error);
 		world_.destroy();
+	}
 	player_character_.destroy();
 	active_ = false;
 }
@@ -128,10 +168,22 @@ bool GameSession::is_active() const
 	return (active_);
 }
 
+void GameSession::activate_configured_render_distance()
+{
+	if (!active_)
+		return ;
+	active_render_distance_ = Settings::instance().render_distance();
+}
+
 bool GameSession::is_ready_to_play() const
 {
-	const int32_t radius = WorldCoordinates::render_distance_to_chunk_radius(active_render_distance_);
+	/* Loading readiness is deliberately based on the minimum playable area,
+	 * not the complete render-distance envelope. The persistent stream keeps
+	 * filling distant chunks after gameplay begins. */
+	const int32_t radius = WorldCoordinates::render_distance_to_chunk_radius(
+		WorldCoordinates::MIN_RENDER_DISTANCE);
 	const int32_t radius_sq = radius * radius;
+	int32_t ready_chunks = 0;
 	int32_t required_chunks = 0;
 
 	if (!active_)
@@ -141,10 +193,21 @@ bool GameSession::is_ready_to_play() const
 		for (int32_t x = -radius; x <= radius; ++x)
 		{
 			if ((x * x) + (z * z) <= radius_sq)
+			{
+				const WorldChunk *chunk = world_.find_chunk(
+					world_.center_chunk_x + x,
+					world_.center_chunk_z + z);
 				required_chunks += 1;
+				/* A published chunk is not playable until its worker-produced
+				 * mesh is complete. Counting only the chunk object lets loading
+				 * finish while the renderer still has no geometry to draw. */
+				if (chunk != nullptr
+					&& game_session_mesh_is_drawable(chunk->mesh))
+					ready_chunks += 1;
+			}
 		}
 	}
-	return (world_.loaded_chunk_count >= required_chunks);
+	return (ready_chunks == required_chunks);
 }
 
 int GameSession::error_code() const
@@ -154,21 +217,135 @@ int GameSession::error_code() const
 
 int GameSession::loading_tick(const RenderDistanceStrategy &strategy)
 {
-	const int32_t	gen = 2;
+	const int32_t gen = strategy.generation_budget_for_frame(
+		performance_frame_ms_, boost_enabled_);
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	World::StreamDiagnostics diagnostics;
+	#endif
 
-	(void)strategy;
 	if (!active_)
 		return (FT_ERR_INVALID_ARGUMENT);
 	error_code_ = world_.update_around(static_cast<double>(player_character_.get_x()),
 			static_cast<double>(player_character_.get_z()), gen,
 			active_render_distance_);
+	if (error_code_ != FT_ERR_SUCCESS)
+	{
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+		World::StreamDiagnostics failure = world_.stream_diagnostics();
+		std::fprintf(stderr,
+			"[Session] loading stream update failed error=%d last_error=%d "
+			"frame=%llu pending=%zu retryable=%zu failed=%zu "
+			"playable_failed=%zu remesh_pending=%zu\n",
+			error_code_, world_.stream_last_error(),
+			static_cast<unsigned long long>(failure.frame), failure.pending_count,
+			failure.retryable_count, failure.failed_count,
+			failure.playable_failed_count,
+			failure.interactive_remesh_queue_depth);
+		/* Positive Libft errors are recoverable outcomes (for example a
+		 * temporarily full queue).  Keep the loading session alive and retry on
+		 * the next tick; only negative errors are fatal here. */
+	#endif
+		if (error_code_ > 0)
+			return (FT_ERR_SUCCESS);
+	}
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	diagnostics = world_.stream_diagnostics();
+	if (error_code_ == FT_ERR_SUCCESS
+		&& diagnostics.playable_failed_count != 0U
+		&& diagnostics.frame % 120U == 0U)
+	{
+		std::fprintf(stderr,
+			"World loading: playable retry pending last_error=%d retryable=%zu\n",
+			world_.stream_last_error(), diagnostics.retryable_count);
+	}
+	if (error_code_ == FT_ERR_SUCCESS && diagnostics.frame % 120U == 0U
+		&& !this->is_ready_to_play())
+	{
+		std::fprintf(stderr,
+			"World loading: frame=%llu progress=%llu loaded=%d pending=%zu ready=%zu "
+			"drawable=%zu/%zu active=%zu retry=%zu failed=%zu last_error=%d "
+			"result_age_ns=%llu\n",
+			static_cast<unsigned long long>(diagnostics.frame),
+			static_cast<unsigned long long>(diagnostics.progress_frame),
+			world_.loaded_chunk_count, diagnostics.pending_count,
+			diagnostics.ready_count,
+			diagnostics.playable_drawable_count,
+			diagnostics.playable_required_count,
+			diagnostics.active_generation_count,
+			diagnostics.retryable_count, diagnostics.failed_count,
+			diagnostics.last_error,
+			static_cast<unsigned long long>(
+				diagnostics.oldest_result_age_nanoseconds));
+		this->report_loading_gaps();
+	}
+	#endif
 	return (error_code_);
 }
 
+#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+void GameSession::report_loading_gaps() const
+{
+	const int32_t radius = WorldCoordinates::render_distance_to_chunk_radius(
+		WorldCoordinates::MIN_RENDER_DISTANCE);
+	const int32_t radius_squared = radius * radius;
+	int32_t offset_z;
+	int32_t gap_count;
+	int32_t reported;
+
+	gap_count = 0;
+	reported = 0;
+	offset_z = -radius;
+	while (offset_z <= radius)
+	{
+		int32_t offset_x = -radius;
+		while (offset_x <= radius)
+		{
+			if (offset_x * offset_x + offset_z * offset_z <= radius_squared)
+			{
+				const int32_t chunk_x = world_.center_chunk_x + offset_x;
+				const int32_t chunk_z = world_.center_chunk_z + offset_z;
+				const WorldChunk *chunk = world_.find_chunk(chunk_x, chunk_z);
+				const bool drawable = chunk != nullptr
+					&& game_session_mesh_is_drawable(chunk->mesh);
+				if (!drawable)
+				{
+					gap_count += 1;
+					if (reported < 4)
+					{
+						std::fprintf(stderr,
+							"World loading: %s playable chunk=(%d,%d)\n",
+							chunk == nullptr ? "missing" : "non-drawable",
+							chunk_x, chunk_z);
+						reported += 1;
+					}
+				}
+			}
+			offset_x += 1;
+		}
+		offset_z += 1;
+	}
+	if (gap_count > reported)
+		std::fprintf(stderr,
+			"World loading: additional_playable_gaps=%d\n",
+			gap_count - reported);
+}
+#endif
+
 GameSession::Action GameSession::handle_navigation(ApplicationWindow &window)
 {
+	int32_t analytics_error;
+
 	(void)window;
+	analytics_error = RuntimeAnalytics::begin_scope(
+		RuntimeAnalyticsScope::INPUT_DEVICE_POLL);
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: input poll scope start failed (%d)\n",
+			analytics_error);
 	ft_dumb_controls_poll();
+	analytics_error = RuntimeAnalytics::end_scope();
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: input poll scope end failed (%d)\n",
+			analytics_error);
 	if (ft_dumb_control_was_pressed(FT_DUMB_CONTROL_BACK) == FT_TRUE)
 		return (Action::EXIT_TO_MENU);
 	if (ft_dumb_control_was_pressed(FT_DUMB_CONTROL_CONFIRM) == FT_TRUE)
@@ -183,31 +360,106 @@ GameSession::Action GameSession::tick_world(double delta_seconds,
 {
 	CameraInput	input;
 	int			gen;
+	int32_t analytics_error;
 
 	world_.advance_tick();
 	input = InputReader::read_camera_input(boost_enabled_);
+	analytics_error = RuntimeAnalytics::begin_scope(
+		RuntimeAnalyticsScope::PLAYER_MOTION);
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: player motion scope start failed (%d)\n",
+			analytics_error);
 	PlayerController::update_player_vertical_motion(&camera_, input, world_,
 		delta_seconds);
 	PlayerController::update_player_horizontal_motion(&camera_, input, world_,
 		delta_seconds);
+	analytics_error = RuntimeAnalytics::end_scope();
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: player motion scope end failed (%d)\n",
+			analytics_error);
 	sync_player_character_location();
 	active_render_distance_ = std::min(active_render_distance_,
 			Settings::instance().render_distance());
 	gen = strategy.generation_budget_for_frame(performance_frame_ms_,
 			boost_enabled_);
+	analytics_error = RuntimeAnalytics::begin_scope(
+		RuntimeAnalyticsScope::GAME_UPDATE);
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: stream scope start failed (%d)\n",
+			analytics_error);
 	error_code_ = world_.update_around(static_cast<double>(player_character_.get_x()),
 			static_cast<double>(player_character_.get_z()), gen,
 			active_render_distance_);
+	analytics_error = RuntimeAnalytics::end_scope();
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: stream scope end failed (%d)\n",
+			analytics_error);
 	if (error_code_ != FT_ERR_SUCCESS)
+	{
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+		World::StreamDiagnostics failure = world_.stream_diagnostics();
+		std::fprintf(stderr,
+			"[Session] in-game stream update failed error=%d last_error=%d "
+			"frame=%llu pending=%zu retryable=%zu failed=%zu "
+			"remesh_pending=%zu oldest_remesh_age=%llu\n",
+			error_code_, world_.stream_last_error(),
+			static_cast<unsigned long long>(failure.frame), failure.pending_count,
+			failure.retryable_count, failure.failed_count,
+			failure.interactive_remesh_queue_depth,
+			static_cast<unsigned long long>(failure.oldest_remesh_queue_age));
+	#endif
+		if (error_code_ > 0)
+		{
+			error_code_ = FT_ERR_SUCCESS;
+			return (Action::CONTINUE);
+		}
 		return (Action::FAILED);
+	}
+	analytics_error = RuntimeAnalytics::begin_scope(
+		RuntimeAnalyticsScope::BLOCK_INTERACTION);
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: interaction scope start failed (%d)\n",
+			analytics_error);
 	if (ft_dumb_control_was_pressed(FT_DUMB_CONTROL_MOUSE_PRIMARY) == FT_TRUE)
-		BlockInteractor::try_delete_target_block(&world_, camera_);
+	{
+		int32_t interaction_error = BlockInteractor::try_delete_target_block(
+			&world_, camera_);
+		if (interaction_error != FT_ERR_SUCCESS)
+		{
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+			std::fprintf(stderr, "[Session] delete interaction failed error=%d\n",
+				interaction_error);
+	#endif
+		}
+	}
 	if (ft_dumb_control_was_pressed(FT_DUMB_CONTROL_MOUSE_TERTIARY) == FT_TRUE)
-		BlockInteractor::try_pick_target_block(&world_, camera_,
-			&selected_block_id_);
+	{
+		int32_t interaction_error = BlockInteractor::try_pick_target_block(
+			&world_, camera_, &selected_block_id_);
+		if (interaction_error != FT_ERR_SUCCESS)
+		{
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+			std::fprintf(stderr, "[Session] pick interaction failed error=%d\n",
+				interaction_error);
+	#endif
+		}
+	}
 	if (ft_dumb_control_was_pressed(FT_DUMB_CONTROL_MOUSE_SECONDARY) == FT_TRUE)
-		BlockInteractor::try_place_selected_block(&world_, camera_,
-			selected_block_id_);
+	{
+		int32_t interaction_error = BlockInteractor::try_place_selected_block(
+			&world_, camera_, selected_block_id_);
+		if (interaction_error != FT_ERR_SUCCESS)
+		{
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+			std::fprintf(stderr, "[Session] place interaction failed error=%d\n",
+				interaction_error);
+	#endif
+		}
+	}
+	analytics_error = RuntimeAnalytics::end_scope();
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: interaction scope end failed (%d)\n",
+			analytics_error);
 	return (Action::CONTINUE);
 }
 
@@ -271,7 +523,7 @@ void GameSession::build_render_debug(VoxelRenderer &renderer)
     render_debug_.boost_speed = camera_.speed * 20.0;
     if (render_debug_frame_ == 1U || render_debug_frame_ % 30U == 0U)
     {
-        cached_ram_mb_ = system_ram_mb();
+        cached_ram_mb_ = SystemMemoryInfo::resident_set_mb();
         cached_vram_mb_ = renderer.get_gpu_renderer()
             ? renderer.get_gpu_renderer()->gpu_mb_approx() : 0U;
     }
@@ -280,16 +532,30 @@ void GameSession::build_render_debug(VoxelRenderer &renderer)
     std::strncpy(render_debug_.seed, seed_, sizeof(render_debug_.seed) - 1);
     render_debug_.seed[sizeof(render_debug_.seed) - 1] = '\0';
 
-    uint32_t biome_index = terrain_get_biome_index(
-        world_.terrain_generation_settings(), player_character_.get_x(),
-        player_character_.get_z(), seed_);
-    const char *bname = (biome_index < 5U) ? BIOME_NAMES[biome_index] : nullptr;
-    if (bname != nullptr)
-        std::strncpy(render_debug_.biome_name, bname,
-            sizeof(render_debug_.biome_name) - 1);
-    else
-        std::snprintf(render_debug_.biome_name, sizeof(render_debug_.biome_name),
-            "CUSTOM_%u", biome_index);
+    const int32_t biome_world_x = player_character_.get_x();
+    const int32_t biome_world_z = player_character_.get_z();
+    if (!cached_biome_valid_
+        || cached_biome_world_x_ != biome_world_x
+        || cached_biome_world_z_ != biome_world_z)
+    {
+        const uint32_t biome_index = voxel_get_biome_index(
+            world_.voxel_generation_settings(), biome_world_x,
+            biome_world_z, seed_);
+        const char *bname = (biome_index < 5U)
+            ? BIOME_NAMES[biome_index] : nullptr;
+        if (bname != nullptr)
+            std::strncpy(cached_biome_name_, bname,
+                sizeof(cached_biome_name_) - 1);
+        else
+            std::snprintf(cached_biome_name_, sizeof(cached_biome_name_),
+                "CUSTOM_%u", biome_index);
+        cached_biome_name_[sizeof(cached_biome_name_) - 1] = '\0';
+        cached_biome_world_x_ = biome_world_x;
+        cached_biome_world_z_ = biome_world_z;
+        cached_biome_valid_ = true;
+    }
+    std::strncpy(render_debug_.biome_name, cached_biome_name_,
+        sizeof(render_debug_.biome_name) - 1);
     render_debug_.biome_name[sizeof(render_debug_.biome_name) - 1] = '\0';
     render_debug_.revision_preview_visible = revision_preview_visible_;
     if (!revision_preview_visible_)
@@ -348,17 +614,36 @@ void GameSession::sync_player_character_location()
 void GameSession::render(ApplicationWindow &window, VoxelRenderer &renderer,
 	bool with_overlay)
 {
+    int32_t analytics_error = RuntimeAnalytics::begin_scope(
+        RuntimeAnalyticsScope::GAME_SESSION_RENDER);
+    if (analytics_error != FT_ERR_SUCCESS)
+        std::fprintf(stderr, "Analytics: game render scope start failed (%d)\n",
+            analytics_error);
     if (!active_)
+    {
+        analytics_error = RuntimeAnalytics::end_scope();
+        if (analytics_error != FT_ERR_SUCCESS)
+            std::fprintf(stderr, "Analytics: game render scope end failed (%d)\n",
+                analytics_error);
         return;
+    }
     const bool debug_enabled = with_overlay
         && (Settings::instance().fps_overlay() || revision_preview_visible_);
     if (!debug_enabled)
     {
         renderer.render_world(window.framebuffer(), camera_, world_,
             static_cast<const RenderDebug *>(nullptr));
+        analytics_error = RuntimeAnalytics::end_scope();
+        if (analytics_error != FT_ERR_SUCCESS)
+            std::fprintf(stderr, "Analytics: game render scope end failed (%d)\n",
+                analytics_error);
         return;
     }
     build_render_debug(renderer);
     const RenderDebug *dbg = &render_debug_;
     renderer.render_world(window.framebuffer(), camera_, world_, dbg);
+    analytics_error = RuntimeAnalytics::end_scope();
+    if (analytics_error != FT_ERR_SUCCESS)
+        std::fprintf(stderr, "Analytics: game render scope end failed (%d)\n",
+            analytics_error);
 }

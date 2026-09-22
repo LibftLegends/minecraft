@@ -44,7 +44,7 @@ bool TerrainCaveValidator::chunk_has_cave(const game_voxel_chunk &chunk)
 					break ;
 				surface_y = surface_y - 1;
 			}
-			local_y = TERRAIN_GENERATOR_SURFACE_HEIGHT / 4;
+			local_y = VOXEL_GENERATOR_SURFACE_HEIGHT / 4;
 			while (local_y < surface_y - 8)
 			{
 				if (chunk.read_block(local_x, local_y, local_z,
@@ -69,7 +69,7 @@ int TerrainCaveValidator::validate_origin(int32_t world_x, int32_t world_z,
 
 	error_code = chunk.initialize();
 	if (error_code == FT_ERR_SUCCESS)
-		error_code = terrain_generate_chunk(chunk, world_x, world_z,
+		error_code = voxel_generate_chunk(chunk, world_x, world_z,
 				"integration-seed");
 	if (error_code == FT_ERR_SUCCESS && chunk_has_cave(chunk) == true)
 		*found_cave = true;

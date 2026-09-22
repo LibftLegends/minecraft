@@ -1,4 +1,4 @@
 [submodule "Libft"]
 	path = Libft
-	url = https://github.com/Adyem/Libft
+	url = git@github.com:LibftLegends/Libft.git
 	branch = main

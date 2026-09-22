@@ -10,8 +10,6 @@
 class GpuRenderer
 {
   public:
-	using MegaVertex = GpuWorldRenderer::MegaVertex;
-
 	GpuRenderer();
 	GpuRenderer(const GpuRenderer &other);
 	~GpuRenderer();
@@ -29,6 +27,8 @@ class GpuRenderer
 	void draw_menu(float alpha);
 	bool is_ready() const;
 	uint32_t gpu_mb_approx() const;
+	bool uploaded_identity_matches(int32_t slot, uint64_t revision,
+		int32_t chunk_x, int32_t chunk_z, uint64_t voxel_revision) const;
 
   private:
 	GpuWorldRenderer _world;

@@ -52,7 +52,7 @@ bool WorldBlockQuery::surface_top_at(const World &world, int32_t world_x,
 	{
 		if (world_chunk->chunk.read_block(local_x, y, local_z,
 				&block_id) == FT_ERR_SUCCESS && block_id != GAME_VOXEL_AIR_BLOCK
-			&& terrain_block_is_solid(block_id) == FT_TRUE)
+			&& voxel_block_is_solid(block_id) == FT_TRUE)
 		{
 			*surface_top = static_cast<double>(y + 1);
 			return (true);
@@ -78,7 +78,7 @@ bool WorldBlockQuery::solid_block_at(const World &world, int32_t world_x,
 			&block_id) != FT_ERR_SUCCESS)
 		return (false);
 	return (block_id != GAME_VOXEL_AIR_BLOCK
-		&& terrain_block_is_solid(block_id) == FT_TRUE);
+		&& voxel_block_is_solid(block_id) == FT_TRUE);
 }
 
 bool WorldBlockQuery::block_id_at(const World &world, int32_t world_x,

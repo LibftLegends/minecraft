@@ -1,4 +1,8 @@
 #include "../../src/world/World.hpp"
+#include "../../src/diagnostics/RuntimeAnalytics.hpp"
+#include <cstdio>
+#include <mutex>
+#include <shared_mutex>
 
 void World::register_chunk_index(const WorldChunk &chunk)
 {
@@ -19,6 +23,76 @@ void World::register_chunk_index(const WorldChunk &chunk)
 	this->chunk_index[((slot_z + WorldCoordinates::CACHE_CHUNK_RADIUS)
 			* grid_width) + (slot_x
 			+ WorldCoordinates::CACHE_CHUNK_RADIUS)] = const_cast<WorldChunk *>(&chunk);
+}
+
+int32_t World::capture_remesh_snapshot(int32_t chunk_x, int32_t chunk_z,
+	WorldGenerationPipeline::WorldChunkSnapshot &snapshot) const noexcept
+{
+	const WorldChunk *target;
+	int32_t error_code;
+	std::shared_lock<std::shared_mutex> read_lock(this->world_data_mutex_);
+
+	target = this->find_chunk(chunk_x, chunk_z);
+	if (target == nullptr || !target->initialized)
+		return (FT_ERR_NOT_FOUND);
+	error_code = this->chunk_streamer.pipeline().capture_snapshot(*target,
+		this->find_chunk(chunk_x - 1, chunk_z),
+		this->find_chunk(chunk_x + 1, chunk_z),
+		this->find_chunk(chunk_x, chunk_z - 1),
+		this->find_chunk(chunk_x, chunk_z + 1),
+		this->find_chunk(chunk_x - 1, chunk_z - 1),
+		this->find_chunk(chunk_x + 1, chunk_z - 1),
+		this->find_chunk(chunk_x - 1, chunk_z + 1),
+		this->find_chunk(chunk_x + 1, chunk_z + 1), snapshot);
+#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	if (error_code != FT_ERR_SUCCESS)
+		std::fprintf(stderr,
+			"[WorldGen] capture_remesh_snapshot result chunk=(%d,%d) error=%d\n",
+			chunk_x, chunk_z, error_code);
+#endif
+	return (error_code);
+}
+
+bool World::remesh_capture_is_current(int32_t chunk_x, int32_t chunk_z,
+	uint64_t request_id, uint64_t voxel_revision,
+	uint64_t light_revision, uint16_t content_version,
+	uint16_t light_input_version) const noexcept
+{
+	const WorldChunk *chunk;
+	std::shared_lock<std::shared_mutex> read_lock(this->world_data_mutex_);
+
+	chunk = this->find_chunk(chunk_x, chunk_z);
+	if (chunk == nullptr || !chunk->initialized)
+		return (false);
+	if (chunk->pending_mesh_request_id != request_id)
+		return (false);
+	if (chunk->voxel_revision != voxel_revision)
+		return (false);
+	if (chunk->light_revision != light_revision)
+		return (false);
+	if (chunk->content_version != content_version
+		|| chunk->light_input_version != light_input_version)
+		return (false);
+	return (true);
+}
+
+void World::clear_pending_remesh(int32_t chunk_x, int32_t chunk_z,
+	uint64_t request_id) noexcept
+{
+	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
+	this->clear_pending_remesh_unlocked(chunk_x, chunk_z, request_id);
+}
+
+void World::clear_pending_remesh_unlocked(int32_t chunk_x, int32_t chunk_z,
+	uint64_t request_id) noexcept
+{
+	WorldChunk *chunk = this->find_chunk_mutable(chunk_x, chunk_z);
+
+	if (chunk != nullptr && chunk->pending_mesh_request_id == request_id)
+	{
+		chunk->clear_pending_remesh_request();
+		chunk->mesh_dirty = true;
+	}
 }
 
 const WorldChunk *World::find_chunk(int32_t chunk_x, int32_t chunk_z) const
@@ -57,6 +131,16 @@ int32_t World::update_around(double camera_x, double camera_z,
 {
 	bool	center_changed;
 	int32_t	stream_radius;
+	int32_t analytics_error;
+	std::vector<int32_t> evicted_chunk_x;
+	std::vector<int32_t> evicted_chunk_z;
+	std::vector<std::unique_ptr<WorldChunk>> retired_chunks;
+	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
+#if defined(LIBFT_ENABLE_ANALYTICS)
+	int32_t loaded_before_recenter;
+	int32_t loaded_after_recenter;
+	const auto recenter_start = std::chrono::steady_clock::now();
+#endif
 
 	this->center_chunk_x = WorldCoordinates::floor_divide(static_cast<int32_t>(std::floor(camera_x)),
 			GAME_VOXEL_CHUNK_WIDTH);
@@ -69,14 +153,116 @@ int32_t World::update_around(double camera_x, double camera_z,
 		|| this->chunk_index_center_z != this->center_chunk_z;
 	if (this->chunk_index_valid == false || center_changed)
 	{
-		WorldChunkStore::evict_far_chunks(this->chunks, this->chunk_count,
-			&this->loaded_chunk_count, this->center_chunk_x,
-			this->center_chunk_z);
+		if (center_changed)
+			this->mark_geometry_changed();
+#if defined(LIBFT_ENABLE_ANALYTICS)
+		loaded_before_recenter = this->loaded_chunk_count;
+#endif
+		analytics_error = RuntimeAnalytics::begin_scope(
+			RuntimeAnalyticsScope::WORLD_STREAM_RECENTER);
+		if (analytics_error != FT_ERR_SUCCESS)
+			std::fprintf(stderr,
+				"Analytics: stream recenter scope start failed (%d)\n",
+				analytics_error);
+		for (int32_t index = 0; index < this->chunk_count; ++index)
+		{
+			if (this->chunks[index].initialized
+				&& WorldCoordinates::chunk_distance_squared(
+					this->chunks[index].chunk_x, this->chunks[index].chunk_z,
+					this->center_chunk_x, this->center_chunk_z)
+					> WorldCoordinates::CACHE_CHUNK_RADIUS
+						* WorldCoordinates::CACHE_CHUNK_RADIUS)
+			{
+				evicted_chunk_x.push_back(this->chunks[index].chunk_x);
+				evicted_chunk_z.push_back(this->chunks[index].chunk_z);
+			}
+		}
+		retired_chunks.reserve(evicted_chunk_x.size());
+		for (int32_t index = 0; index < this->chunk_count; ++index)
+		{
+			if (this->chunks[index].initialized == false
+				|| WorldCoordinates::chunk_distance_squared(
+					this->chunks[index].chunk_x, this->chunks[index].chunk_z,
+					this->center_chunk_x, this->center_chunk_z)
+					<= WorldCoordinates::CACHE_CHUNK_RADIUS
+						* WorldCoordinates::CACHE_CHUNK_RADIUS)
+				continue ;
+			std::unique_ptr<WorldChunk> retired(new (std::nothrow) WorldChunk());
+			if (retired == nullptr
+				|| retired->move(this->chunks[index]) != FT_ERR_SUCCESS)
+			{
+				this->chunks[index].destroy();
+			}
+			else
+				retired_chunks.push_back(std::move(retired));
+			if (this->loaded_chunk_count > 0)
+				this->loaded_chunk_count -= 1;
+		}
+		for (std::unique_ptr<WorldChunk> &retired : retired_chunks)
+			(void)this->chunk_streamer.pipeline().retire_chunk(std::move(retired));
+		for (std::size_t index = 0U; index < evicted_chunk_x.size(); ++index)
+			this->chunk_streamer.mark_neighbor_remeshes(evicted_chunk_x[index],
+				evicted_chunk_z[index], false, true);
 		this->rebuild_chunk_index();
+#if defined(LIBFT_ENABLE_ANALYTICS)
+		loaded_after_recenter = this->loaded_chunk_count;
+#endif
+		analytics_error = RuntimeAnalytics::end_scope();
+		if (analytics_error != FT_ERR_SUCCESS)
+			std::fprintf(stderr,
+				"Analytics: stream recenter scope end failed (%d)\n",
+				analytics_error);
+#if defined(LIBFT_ENABLE_ANALYTICS)
+		const uint64_t recenter_us = static_cast<uint64_t>(
+			std::chrono::duration_cast<std::chrono::microseconds>(
+				std::chrono::steady_clock::now() - recenter_start).count());
+		if (recenter_us >= 8000U)
+			std::fprintf(stderr,
+				"[Analytics][World] slow recenter center=(%d,%d) "
+				"loaded_before=%d loaded_after=%d duration_us=%llu\n",
+				this->center_chunk_x, this->center_chunk_z,
+				loaded_before_recenter, loaded_after_recenter,
+				static_cast<unsigned long long>(recenter_us));
+#endif
 	}
 	stream_radius = WorldCoordinates::render_distance_to_chunk_radius(this->active_render_distance);
-	return (this->chunk_streamer.update(generation_budget, stream_radius,
-			center_changed));
+	analytics_error = RuntimeAnalytics::begin_scope(
+		RuntimeAnalyticsScope::WORLD_STREAM_UPDATE);
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: world stream scope start failed (%d)\n",
+			analytics_error);
+	{
+		int32_t result = this->chunk_streamer.update(generation_budget,
+			stream_radius, center_changed);
+		analytics_error = RuntimeAnalytics::end_scope();
+		if (analytics_error != FT_ERR_SUCCESS)
+			std::fprintf(stderr, "Analytics: world stream scope end failed (%d)\n",
+			analytics_error);
+		return (result);
+	}
+}
+
+int32_t World::set_light_update_config(
+	const voxel_light_update_config &config) noexcept
+{
+	return (this->chunk_streamer.set_light_update_config(config));
+}
+
+const voxel_light_update_config &World::light_update_config() const noexcept
+{
+	return (this->chunk_streamer.light_update_config());
+}
+
+int32_t World::set_interactive_light_update_config(
+	const voxel_light_update_config &config) noexcept
+{
+	return (this->chunk_streamer.set_interactive_light_update_config(config));
+}
+
+const voxel_light_update_config &World::interactive_light_update_config()
+	const noexcept
+{
+	return (this->chunk_streamer.interactive_light_update_config());
 }
 
 int32_t World::stream_last_error() const
@@ -102,7 +288,46 @@ World::StreamDiagnostics World::stream_diagnostics() const
 	diagnostics.pending_count = source.pending_count;
 	diagnostics.retryable_count = source.retryable_count;
 	diagnostics.failed_count = source.failed_count;
+	diagnostics.playable_failed_count = source.playable_failed_count;
+	diagnostics.playable_required_count = source.playable_required_count;
+	diagnostics.playable_drawable_count = source.playable_drawable_count;
+	diagnostics.active_generation_count = source.active_generation_count;
+	diagnostics.remesh_queue_peak = source.remesh_queue_peak;
+	diagnostics.remesh_starvation_promotions =
+		source.remesh_starvation_promotions;
+	diagnostics.remesh_priority_queue_depth = source.remesh_priority_queue_depth;
+	diagnostics.interactive_remesh_queue_depth =
+		source.interactive_remesh_queue_depth;
+	diagnostics.oldest_remesh_queue_age = source.oldest_remesh_queue_age;
+	diagnostics.remesh_snapshot_bytes = source.remesh_snapshot_bytes;
+	diagnostics.remesh_capture_duration_nanoseconds =
+		source.remesh_capture_duration_nanoseconds;
+	diagnostics.remesh_capture_count = source.remesh_capture_count;
+	diagnostics.remesh_scanned_cells = source.remesh_scanned_cells;
+	diagnostics.remesh_propagated_cells = source.remesh_propagated_cells;
+	diagnostics.remesh_light_queue_peak = source.remesh_light_queue_peak;
+	diagnostics.remesh_completed_count = source.remesh_completed_count;
+	diagnostics.remesh_incremental_completed_count =
+		source.remesh_incremental_completed_count;
+	diagnostics.remesh_full_completed_count = source.remesh_full_completed_count;
+	diagnostics.remesh_geometry_only_count = source.remesh_geometry_only_count;
+	diagnostics.remesh_canceled_count = source.remesh_canceled_count;
+	diagnostics.stale_result_count = source.stale_result_count;
+	diagnostics.stale_stream_result_count = source.stale_stream_result_count;
+	diagnostics.stale_remesh_result_count = source.stale_remesh_result_count;
+	diagnostics.stale_remesh_capture_count =
+		source.stale_remesh_capture_count;
+	diagnostics.stale_remesh_dependency_count =
+		source.stale_remesh_dependency_count;
+	diagnostics.stale_remesh_pending_count =
+		source.stale_remesh_pending_count;
+	diagnostics.stale_remesh_revision_count =
+		source.stale_remesh_revision_count;
+	diagnostics.oldest_result_age_nanoseconds =
+		source.oldest_result_age_nanoseconds;
 	diagnostics.oldest_pending_age = source.oldest_pending_age;
+	diagnostics.deferred_edit_count = source.deferred_edit_count;
+	diagnostics.deferred_edit_cursor = source.deferred_edit_cursor;
 	diagnostics.last_error = source.last_error;
 	return (diagnostics);
 }
@@ -117,6 +342,7 @@ bool World::validate_visible_distance(double camera_x, double camera_z,
 bool World::surface_top_at(int32_t world_x, int32_t world_z,
 	double *surface_top) const
 {
+	std::shared_lock<std::shared_mutex> read_lock(this->world_data_mutex_);
 	return (WorldBlockQuery::surface_top_at(*this, world_x, world_z,
 			surface_top));
 }
@@ -124,12 +350,14 @@ bool World::surface_top_at(int32_t world_x, int32_t world_z,
 bool World::solid_block_at(int32_t world_x, int32_t world_y,
 	int32_t world_z) const
 {
+	std::shared_lock<std::shared_mutex> read_lock(this->world_data_mutex_);
 	return (WorldBlockQuery::solid_block_at(*this, world_x, world_y, world_z));
 }
 
 bool World::block_id_at(int32_t world_x, int32_t world_y, int32_t world_z,
 	uint32_t *block_id) const
 {
+	std::shared_lock<std::shared_mutex> read_lock(this->world_data_mutex_);
 	return (WorldBlockQuery::block_id_at(*this, world_x, world_y, world_z,
 			block_id));
 }
@@ -137,6 +365,7 @@ bool World::block_id_at(int32_t world_x, int32_t world_y, int32_t world_z,
 int32_t World::delete_block_at(int32_t world_x, int32_t world_y,
 	int32_t world_z)
 {
+	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
 	return (WorldBlockEditor::delete_block_at(*this, world_x, world_y,
 			world_z));
 }
@@ -144,22 +373,131 @@ int32_t World::delete_block_at(int32_t world_x, int32_t world_y,
 int32_t World::place_block_at(int32_t world_x, int32_t world_y, int32_t world_z,
 	uint32_t block_id)
 {
+	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
 	return (WorldBlockEditor::place_block_at(*this, world_x, world_y, world_z,
-			block_id));
+		block_id));
+}
+
+int32_t World::apply_authoritative_block_change(
+	const game_block_change_request &request, game_block_delta *delta_out)
+{
+	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
+	WorldChunk *world_chunk;
+	uint64_t previous_revision;
+	uint64_t current_revision;
+	uint32_t existing_block_id;
+	uint8_t existing_light;
+	ft_bool incremental_additive_light;
+	ft_bool incremental_removal_light;
+	game_block_edit_op edit;
+	WorldEditHistory::Record record;
+	int32_t error_code;
+
+	if (delta_out == nullptr || request.local_x >= GAME_VOXEL_CHUNK_WIDTH
+		|| request.local_y >= GAME_VOXEL_CHUNK_HEIGHT
+		|| request.local_z >= GAME_VOXEL_CHUNK_DEPTH)
+		return (FT_ERR_INVALID_ARGUMENT);
+	world_chunk = this->find_chunk_mutable(request.chunk_x, request.chunk_z);
+	if (world_chunk == nullptr)
+		return (FT_ERR_NOT_FOUND);
+	error_code = world_chunk->chunk.read_block(request.local_x,
+		request.local_y, request.local_z, &existing_block_id);
+	if (error_code != FT_ERR_SUCCESS)
+		return (error_code);
+	existing_light = world_chunk->light.get(request.local_x, request.local_y,
+		request.local_z);
+	previous_revision = world_chunk->chunk.get_revision();
+	error_code = world_chunk->chunk.apply_authoritative_block_change(request,
+		delta_out);
+	if (error_code != FT_ERR_SUCCESS)
+		return (error_code);
+	current_revision = world_chunk->chunk.get_revision();
+	if (current_revision == previous_revision)
+		return (FT_ERR_SUCCESS);
+	world_chunk->voxel_revision = current_revision;
+	world_chunk->content_version = world_light_version::next(
+		world_chunk->content_version);
+	world_chunk->mark_light_input_changed();
+	this->mark_geometry_changed();
+	this->chunk_streamer.mark_remesh_dirty(*world_chunk);
+	error_code = world_chunk->publish_read_state_after_block_edit(
+		static_cast<int32_t>(request.local_x),
+		static_cast<int32_t>(request.local_y),
+		static_cast<int32_t>(request.local_z), request.requested_block_id);
+	if (error_code != FT_ERR_SUCCESS)
+		return (error_code);
+	/* An accepted authoritative edit supersedes any capture or light solve
+	 * based on the previous voxel revision.  Cancel it before submitting the
+	 * new incremental request so its result cannot consume worker time or
+	 * compete with the edit publication. */
+	world_chunk->cancel_remesh_work();
+	edit.world_x = request.chunk_x * GAME_VOXEL_CHUNK_WIDTH
+		+ static_cast<int32_t>(request.local_x);
+	edit.world_y = static_cast<int32_t>(request.local_y);
+	edit.world_z = request.chunk_z * GAME_VOXEL_CHUNK_DEPTH
+		+ static_cast<int32_t>(request.local_z);
+	edit.block_type = request.requested_block_id;
+	edit.tick = this->current_tick;
+	record.edit = edit;
+	record.previous_block_id = request.expected_block_id;
+	this->edit_history.record(record);
+	this->chunk_streamer.mark_edit_remeshes(request.chunk_x,
+		request.chunk_z, static_cast<int32_t>(request.local_x),
+		static_cast<int32_t>(request.local_y),
+		static_cast<int32_t>(request.local_z));
+	incremental_additive_light = FT_FALSE;
+	incremental_removal_light = FT_FALSE;
+	if (request.requested_block_id == GAME_VOXEL_AIR_BLOCK)
+	{
+		if (voxel_block_emitted_light_level(existing_block_id) == 0U)
+			incremental_additive_light = FT_TRUE;
+		else
+			/* Removing an emitter is always a removal solve.  The old light
+			 * value may contain sky light as well as block light; that must not
+			 * downgrade this to a full rebuild (or leave the edit without an
+			 * incremental path).  The removal frontier preserves/restores the
+			 * sky channel independently while subtracting the emitter's block
+			 * contribution. */
+			incremental_removal_light = FT_TRUE;
+	}
+	else
+		incremental_removal_light = FT_TRUE;
+	this->chunk_streamer.prioritize_edit_border_remeshes(request.chunk_x,
+		request.chunk_z, static_cast<int32_t>(request.local_x),
+		static_cast<int32_t>(request.local_y),
+		static_cast<int32_t>(request.local_z), incremental_additive_light,
+		incremental_removal_light, existing_block_id,
+		request.requested_block_id, existing_light);
+	/* Authoritative edits follow the same immediate publication path as local
+	 * edits. If the single remesh slot is occupied, the priority queue retries
+	 * the request without losing the edit notification. */
+	if (this->chunk_streamer.queue_chunk_remesh(*world_chunk,
+		incremental_additive_light, incremental_removal_light,
+		static_cast<int32_t>(request.local_x),
+		static_cast<int32_t>(request.local_y),
+		static_cast<int32_t>(request.local_z), existing_block_id,
+		request.requested_block_id) != FT_ERR_SUCCESS
+		&& world_chunk->pending_mesh_request_id == 0U)
+		this->chunk_streamer.prioritize_chunk_remesh(request.chunk_x,
+			request.chunk_z);
+	return (FT_ERR_SUCCESS);
 }
 
 void World::advance_tick()
 {
+	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
 	this->current_tick += 1U;
 }
 
 int32_t World::undo_last_edit()
 {
+	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
 	return (this->edit_history.undo(*this));
 }
 
 int32_t World::redo_last_edit()
 {
+	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
 	return (this->edit_history.redo(*this));
 }
 
@@ -168,6 +506,7 @@ int32_t World::raycast_solid(double origin_x, double origin_y, double origin_z,
 	double max_distance, int32_t *block_x, int32_t *block_y,
 	int32_t *block_z) const
 {
+	std::shared_lock<std::shared_mutex> read_lock(this->world_data_mutex_);
 	return (WorldRaycaster::raycast_solid(*this, origin_x, origin_y, origin_z,
 			direction_x, direction_y, direction_z, max_distance, block_x,
 			block_y, block_z));
@@ -179,6 +518,7 @@ int32_t World::raycast_edit_target(double origin_x, double origin_y,
 	int32_t *hit_block_z, int32_t *place_block_x, int32_t *place_block_y,
 	int32_t *place_block_z, uint32_t *hit_block_id) const
 {
+	std::shared_lock<std::shared_mutex> read_lock(this->world_data_mutex_);
 	return (WorldRaycaster::raycast_edit_target(*this, origin_x, origin_y,
 			origin_z, direction_x, direction_y, direction_z, max_distance,
 			hit_block_x, hit_block_y, hit_block_z, place_block_x, place_block_y,
