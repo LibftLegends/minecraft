@@ -16,6 +16,11 @@ items, inventory, crafting, smelting, gear, food, health, hunger, and fauna—in
 the same roadmap, but give them a separate release gate so they do not delay
 validation or delivery of the central regeneration loop.
 
+Game 1.0 must also make worlds durable, portable, and configurable. Players
+must be able to save and resume multiple worlds, choose whether a character is
+owned by one world or can travel between worlds, and configure exactly which
+character ownership modes a world accepts.
+
 This roadmap distinguishes two milestones. **Regeneration 1.0** is the first
 complete, playable World Loom/card-driven regeneration release. **Game 1.0**
 is the broader survival release that builds on it with the full item,
@@ -211,7 +216,109 @@ or orphan the job: either deny removal until it finishes/cancels, or let the
 server retain the session and its original policy. The first implementation
 should deny removal while a session is active.
 
-## 6. Map, selection, and preview
+## 6. World saves, character scope, and admission rules
+
+World persistence and character admission are foundational Game 1.0 systems,
+not optional convenience settings. A world save must be sufficient to resume a
+world without regenerating or guessing authoritative state, while a character
+profile must clearly declare which world-owned state it is allowed to carry.
+
+### 6.1 World save lifecycle
+
+The world manager must support:
+
+- creating worlds with stable IDs, names, seeds, generator/ruleset versions,
+  difficulty, ownership, access policy, and spawn policy;
+- listing, renaming, backing up, restoring, exporting, importing, and deleting
+  worlds with explicit confirmation for destructive operations;
+- autosave, manual save, orderly-shutdown save, and crash recovery without
+  blocking the render thread or holding world/chunk locks during slow I/O;
+- saving terrain revisions, player edits, entities, inventories, progression,
+  stations, claims, regeneration sessions, world settings, admission policy,
+  and migration version; and
+- atomic snapshot publication with a journal or temporary-file recovery path.
+
+A failed save must leave the last known-good save intact and must not silently
+report success. World files are authoritative persistence, not render caches:
+meshes, GPU buffers, transient light queues, worker requests, and analytics
+records may be discarded and rebuilt. Imported saves must be validated for
+size, IDs, revisions, checksums, supported migrations, and content versions
+before they become selectable.
+
+### 6.2 Character ownership modes
+
+Every character has a stable character ID and an explicit ownership mode:
+
+| Mode | Meaning | Cross-world use |
+| --- | --- | --- |
+| `WORLD_BOUND` | Progression and inventory belong to one world ID. | Rejected by other worlds unless explicitly migrated by the owner. |
+| `PORTABLE` | Character is owned by the player/account and may join compatible worlds. | Allowed only when the destination policy accepts portable characters. |
+
+The mode is selected at character creation and is not silently changed by
+joining a world. Changing `WORLD_BOUND` to `PORTABLE` requires an explicit,
+validated transaction and a backup/audit record; the first implementation may
+make the mode immutable until migration safety exists.
+
+Portable characters must not smuggle world-owned state between worlds. Store
+character-owned state separately from world-owned state. The portable subset
+may include appearance, cosmetics, and explicitly marked recipes or abilities;
+claims, stations, containers, local discoveries, world currency, pets, and
+world-bound items remain with their source world unless a versioned transfer
+rule explicitly says otherwise.
+
+### 6.3 World admission policy
+
+Each world stores a versioned admission policy with at least these modes:
+
+1. `WORLD_BOUND_ONLY`: only characters already bound to this world may join.
+2. `PORTABLE_ALLOWED`: compatible portable characters may join.
+3. `APPROVAL_REQUIRED`: portable characters require an invitation, allowlist,
+   or explicit owner/admin approval.
+4. `FRESH_CHARACTER_ONLY`: only newly created characters are accepted; existing
+   progression is not imported.
+
+The policy must also control solo, invite-only, friends-only, allowlist, and
+public access; imported inventory, recipes, abilities, equipment, and
+cosmetics; progression and item/value caps; content-version ranges; spawn and
+death rules; concurrent sessions; and whether the owner can revoke, eject, or
+ban a character ID.
+
+The UI must show the effective policy before world creation and before joining:
+what the character may bring, what remains in the source world, what is denied,
+and whether approval is required. The server rechecks it at login, transfer,
+save, and commit boundaries. Client UI is informative only.
+
+### 6.4 Join transaction and conflict handling
+
+Joining is an idempotent server transaction:
+
+```text
+authenticate character
+    -> load world and policy versions
+    -> validate compatibility and admission
+    -> calculate portable/world-bound state split
+    -> reserve a safe spawn and required capacity
+    -> publish one authoritative character session
+    -> save resulting world and character revisions
+```
+
+If any step fails, neither side is partially changed. Duplicate requests,
+disconnects, crashes, and retries must resolve to one result. A per-character
+lease prevents a portable character from duplicating items by joining multiple
+worlds concurrently. Incompatible policy or content versions produce an
+explicit migration-required state instead of silently applying another ruleset.
+
+### 6.5 Required validators and tests
+
+Add deterministic tests for save/reload, autosave, backup/restore,
+import/export, corruption detection, interrupted-save recovery, every
+admission mode, world-bound rejection, portable joins without duplication,
+allowlist/approval, fresh-character-only worlds, incompatible versions,
+capacity overflow, duplicate join requests, disconnect recovery, leases, and
+preservation of world IDs, character modes, policies, revisions, edits,
+entities, inventories, and regeneration sessions.
+
+## 7. Map, selection, and preview
 
 The map is a chunk-level planning view, not a second editable world.
 
@@ -1630,6 +1737,20 @@ needed for this milestone and can later be adapted to the full item economy.
 5. Add optional minigame rewards through a separate idempotent reward ledger;
    never let match/replay retries duplicate dust, cards, unlocks, or gear.
 
+### Cross-cutting Game 1.0 world persistence and admission gate
+
+Before calling any later Game 1.0 phase complete:
+
+1. Ship world creation, multiple-world save/load, autosave, backup/restore,
+   import/export, crash recovery, migration, and corruption handling.
+2. Ship `WORLD_BOUND` and `PORTABLE` character profiles with a server-owned
+   portable-state split and per-character transfer lease.
+3. Ship world admission policies for world-bound-only, portable-allowed,
+   approval-required, and fresh-character-only worlds, with clear UI previews
+   and transactional join/leave behavior.
+4. Pass the save, reload, duplicate-join, policy, migration, and no-duplication
+   validators in section 6.5 before enabling public multiplayer worlds.
+
 ### Phase 6 — Game 1.0 player avatars and customization
 
 1. Add the final block-style player rig/model, default appearance, and
@@ -1774,6 +1895,14 @@ identity systems. It is accepted when:
 - players have a rendered character model and can customize an allowed,
   persistent appearance profile; appearance cannot change collision, reach,
   movement, damage, or other authoritative gameplay stats;
+- players can create, save, resume, back up, restore, import, and delete
+  multiple worlds safely; interrupted or corrupt saves recover to the last
+  known-good snapshot;
+- characters explicitly use either `WORLD_BOUND` or `PORTABLE` ownership, with
+  world-owned and portable state kept separate and protected from duplication;
+- each world exposes versioned admission rules for world-bound-only,
+  portable-allowed, approval-required, and fresh-character-only access, plus
+  clear controls for what a portable character may bring;
 - the custom-structure framework renders a village continuously across chunk
   borders; villagers have bounded gathering jobs, village-owned storage,
   negative responses to unauthorized taking, and persistent positive
