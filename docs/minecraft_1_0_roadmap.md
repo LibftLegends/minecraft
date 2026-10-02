@@ -4,6 +4,15 @@
 **Audience:** Minecraft implementation agent (Luna), reviewers, and future maintainers.
 **Date:** 2026-09-21
 
+**Libft implementation contract (2026-10-02):**
+[CardGame, Scripting, Inventory and Recipe-Book Integration](../Libft/Docs/card_game_scripting_inventory_crafting_integration_design.md)
+specifies existing versus proposed APIs, player actions and mandatory decisions,
+all current card effects, scripting bindings, transactional inventory/crafting,
+placeholder recipes, ownership boundaries, and repository-specific tests.
+As those tasks are delivered, update this roadmap and that document together,
+recording implementation, integration, and validation separately. The design
+document itself does not complete any roadmap feature.
+
 ## 1. Goal
 
 Turn world regeneration into an intentional, understandable game system rather
@@ -90,6 +99,22 @@ hashes, command records, replay/result storage, and player-view replay
 redaction. Minecraft should integrate this engine through a small adapter;
 do not build a second card-game runtime in Minecraft.
 
+The current Libft worktree also adds sequenced/replayable
+`CARD_GAME_INTENT_DRAW_CARD` commands (command-log format v5, with v1–v4 read
+compatibility and bounded multi-draw count), plus a first `submit_action`
+request-ID idempotency layer. It supports a configured discard/burn policy
+with deterministic discard reshuffle and typed empty/overflow host intents.
+Libft Scripting and its CardGame bridge now expose deterministic FNV-1a
+fingerprints for the ordered native binding ABI and registered serialized
+script-effect content. Equivalent content fingerprints match and content
+changes alter the result; session import enforcement and Minecraft host-schema
+and policy inclusion remain open. Minecraft-owned revisioned chunk
+selection, start-cost quoting, and 4–7-card opening-deal pricing are specified
+in the linked Libft integration design; none of those World Loom APIs or UI are
+implemented by this Libft work. Minecraft instability amounts,
+mandatory-discard obligations, the 20-card deck/content adapter, and the World
+Loom multiplayer card session remain unimplemented.
+
 Respect these current API boundaries when planning integration:
 
 - `card_game_deck_code` accepts up to 500 total cards, but the current active
@@ -156,18 +181,22 @@ asset can change; its stable gameplay role is a regeneration station.
 3. The player selects chunks. The UI immediately shows the number of paid
    chunks, any extra capacity supplied by cards, total dust cost, and why any
    chunk is protected or unavailable.
-4. The player spends magical dust (or the configured resource) to draw a
+4. The server exposes revisioned select/unselect operations and a read-only,
+   authoritative start-cost query for the selected set. The player chooses an
+   opening deal of four cards by default, with a supported range of four to
+   seven; see Section 7.1 for its separate price formula.
+5. The player spends magical dust (or the configured resource) to draw a
    chosen number of cards from the regeneration deck. The next draw costs more
    than the previous draw in the same draw action.
-5. The player plays cards onto the selected chunk set, chooses valid targets,
+6. The player plays cards onto the selected chunk set, chooses valid targets,
    and may use configured draw/discard or scope-modifying effects.
-6. The client requests a server preview. The preview includes the resulting
+7. The client requests a server preview. The preview includes the resulting
    biome/feature policy and a warning for any terrain, fluid, structure, or
    mob-state consequence the server can determine.
-7. On confirmation, the server revalidates the request, reserves its resources,
+8. On confirmation, the server revalidates the request, reserves its resources,
    prepares per-chunk jobs, and returns a session ID. The UI shows accepted,
    queued, generating, ready-to-commit, committed, skipped, or failed status.
-8. Each successful chunk is published atomically. The map and all clients
+9. Each successful chunk is published atomically. The map and all clients
    receive its new revision. Failed or cancelled chunks keep their prior world
    state and follow the refund rules below.
 
@@ -482,6 +511,35 @@ allow two additional selected chunks without charging the per-chunk resource.
 Such chunks still count against the hard per-session maximum, protection
 rules, and generation budget. The server records the card effect responsible
 for every bonus slot. Cards cannot make safe-zone or protected chunks eligible.
+
+#### Opening-deal price and session-start API
+
+Expose server-owned draft operations equivalent to
+`begin_regeneration_selection`, `select_regeneration_chunk`,
+`unselect_regeneration_chunk`, `query_regeneration_start_cost`, and
+`commit_regeneration_start`. Selection calls use a selection revision and
+request ID, validate each coordinate against the same bounds/protection/
+occupancy/reservation policy used at commit, and are idempotent on exact retry.
+The cost query is read-only and returns structured counts, currency ID,
+component costs, total, revision, and a rejection reason where applicable.
+This specifies the server API/data contract only; client UI design and
+implementation are not part of this contract.
+
+The opening deal defaults to four cards and accepts four through seven. Let
+`B4` be the configured total opening-deal price for four cards:
+
+```text
+opening_card_cost(n) = B4 * 2^(n - 4),  n in [4, 7]
+```
+
+The totals are `B4`, `2*B4`, `4*B4`, and `8*B4`. This opening-deal price is
+distinct from the subsequent per-draw geometric schedule below. Checked
+integer math and configured caps are mandatory. Commit revalidates the exact
+selection revision and quote, then atomically reserves/debits resources,
+starts the CardGame with that opening-hand size, persists the idempotency
+result, and freezes selection. Failure changes none of dust, selected chunks,
+reservations, barriers, or card zones. Once this commit succeeds, player
+cancellation is unavailable under the default regeneration policy.
 
 ### 7.4 Reservation and refunds
 
@@ -1218,6 +1276,30 @@ materials/cards or reroll a completed experiment. Confirm the normal Card Press
 UI remains a recipe book and never becomes an ingredient grid.
 
 ### 8.8 Libft CardGame adapter and World Loom integration
+
+**Implementation checkpoint (2026-10-02):** the linked Libft design document
+now has an implementation ledger for the current uncommitted worktree. Libft
+foundations for typed host intents, in-memory snapshot/delta preservation,
+basic script-to-intent bridging, a sequenced/replayable physical-instance
+discard command and policy-aware draw/overflow foundations, a persistent
+recipe-book with configured default unlocks, a read-only recipe-availability
+query, prepared all-or-nothing crafting, and all-or-nothing single-inventory
+item addition have started, but these are not yet an integrated Minecraft
+World Loom feature. Keep this roadmap item open until the
+Minecraft-owned action/session adapter, card catalogue, persistence,
+multiplayer lifecycle, and end-to-end validators below are implemented.
+
+The Minecraft worktree also has a partial, UI-independent World Loom API:
+explicit select/unselect calls, loaded-chunk and selection-cap checks on the
+revisioned selection path, compare-and-set selection revisions, and a
+read-only quote for selected-chunk currency plus a four-to-seven-card opening
+deal with doubling price steps. Protection changes invalidate stale quotes.
+`./ft_vox_analytics --validate-world-revision` now passes for this API slice.
+Pricing policy is still supplied by the caller; there is no actor/session identity, request-ID
+idempotency, occupancy/exclusion-ring validation, authoritative balance/debit,
+atomic CardGame startup, reservation/barrier commit, or multiplayer session
+yet. This defines backend API only, not UI, and is not a completed
+regeneration-start transaction.
 
 Use the checked-out Libft `CardGame` module as the rules-neutral runtime for
 card identity, ordered zones, draws/shuffles, effect dispatch, choices,
@@ -2411,6 +2493,10 @@ playable, without requiring the broader survival package:
   card identities, 20-card starter deck, 20-to-100 deck bounds, persistence,
   idempotency, cancellation, and refunds pass boundary and failure-injection
   tests;
+- the server-side selection API supports exact select/unselect, revisioned
+  cost quotes, and an opening hand of four through seven cards whose total
+  price doubles at each increment; quote and commit races, stale selections,
+  insufficient funds, and retries cannot partially reserve, charge, or deal;
 - starter cards have validated effects, deterministic policy resolution,
   preview warnings, and a versioned configuration digest; full Card Press
   manufacturing is not required for this gate;

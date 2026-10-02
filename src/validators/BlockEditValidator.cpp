@@ -914,7 +914,7 @@ int BlockEditValidator::validate_interior_emissive_edit(World &world) noexcept
 			static_cast<unsigned int>(baseline_light),
 			static_cast<unsigned int>(source_light),
 			static_cast<unsigned int>(restored_light),
-			static_cast<unsigned int>(restored_block),
+			restored_block,
 			static_cast<unsigned int>(chunk->content_version),
 			static_cast<unsigned int>(chunk->light_version),
 			static_cast<unsigned int>(chunk->light_input_version),
@@ -1077,7 +1077,7 @@ int BlockEditValidator::validate_boundary_edit(World &world) noexcept
 	{
 		std::fprintf(stderr,
 			"block-edit: boundary opaque setup block=%u y=%d\n",
-			static_cast<unsigned int>(edge_block_id), edge_y);
+			edge_block_id, edge_y);
 		return (ApplicationError::fail("block-edit boundary opaque setup", 1));
 	}
 	edge_before_light = target_chunk->light.get(
@@ -1328,8 +1328,7 @@ int BlockEditValidator::validate_solid_neighbor_geometry(World &world) noexcept
 	{
 		std::fprintf(stderr,
 			"block-edit: solid-neighbor setup target=%u neighbor=%u y=%d\n",
-			static_cast<unsigned int>(target_block),
-			static_cast<unsigned int>(neighbour_block), y);
+			target_block, neighbour_block, y);
 		return (ApplicationError::fail("block-edit solid-neighbor setup", 1));
 	}
 	target_chunk = world.find_chunk_mutable(chunk_x, chunk_z);

@@ -7,6 +7,7 @@
 #include "../../src/world/WorldLightVersion.hpp"
 #include "../../src/validators/IValidator.hpp"
 #include "../../Libft/Modules/CMA/CMA.hpp"
+#include "../../Libft/Modules/Basic/limits.hpp"
 #include "../../Libft/Modules/Voxel/voxel_api.hpp"
 #include <algorithm>
 #include <atomic>
@@ -83,14 +84,13 @@ namespace
 				return (FT_ERR_FILE_OPEN_FAILED);
 			if (std::fprintf(file,
 					"{\"type\":\"%s\",\"phase\":\"%s\","
-					"\"frame\":%llu,\"edit\":%llu,"
-					"\"stalled_seconds\":%llu,\"watchdog_seconds\":%llu}\n",
+					"\"frame\":" FT_UINT64_DECIMAL_FORMAT ",\"edit\":" FT_UINT64_DECIMAL_FORMAT ","
+					"\"stalled_seconds\":" FT_UINT64_DECIMAL_FORMAT ",\"watchdog_seconds\":" FT_UINT64_DECIMAL_FORMAT "}\n",
 					type, phase == nullptr ? "unknown" : phase,
-					static_cast<unsigned long long>(frame),
-					static_cast<unsigned long long>(edit),
-					static_cast<unsigned long long>(stalled_seconds),
-					static_cast<unsigned long long>(
-						LIGHT_HARNESS_WATCHDOG_SECONDS)) < 0)
+					frame,
+					edit,
+					stalled_seconds,
+					LIGHT_HARNESS_WATCHDOG_SECONDS) < 0)
 			{
 				std::fclose(file);
 				return (FT_ERR_IO);
@@ -138,12 +138,12 @@ namespace
 					continue ;
 
 				std::fprintf(stderr,
-					"lighting-harness: watchdog timeout phase=%s frame=%llu "
-					"edit=%llu stalled_seconds=%llu marker=%s\n",
+					"lighting-harness: watchdog timeout phase=%s frame=" FT_UINT64_DECIMAL_FORMAT " "
+					"edit=" FT_UINT64_DECIMAL_FORMAT " stalled_seconds=" FT_UINT64_DECIMAL_FORMAT " marker=%s\n",
 					phase == nullptr ? "unknown" : phase,
-					static_cast<unsigned long long>(frame),
-					static_cast<unsigned long long>(edit),
-					(now - last) / 1000000000ULL,
+					frame,
+					edit,
+					(now - last) / 1000000000U,
 					marker_path_ == nullptr ? "<none>" : marker_path_);
 				std::fflush(stderr);
 				const int32_t marker_error = this->write_marker(
@@ -318,15 +318,15 @@ namespace
 		}
 		std::sort(values.begin(), values.end());
 		std::fprintf(stderr,
-			"lighting-harness: latency stage=%s samples=%zu p50_ms=%llu "
-			"p95_ms=%llu p99_ms=%llu max_ms=%llu\n", name, values.size(),
-			static_cast<unsigned long long>(values[percentile_index(
-				values.size(), 50U)]),
-			static_cast<unsigned long long>(values[percentile_index(
-				values.size(), 95U)]),
-			static_cast<unsigned long long>(values[percentile_index(
-				values.size(), 99U)]),
-			static_cast<unsigned long long>(values.back()));
+			"lighting-harness: latency stage=%s samples=%zu p50_ms=" FT_UINT64_DECIMAL_FORMAT " "
+			"p95_ms=" FT_UINT64_DECIMAL_FORMAT " p99_ms=" FT_UINT64_DECIMAL_FORMAT " max_ms=" FT_UINT64_DECIMAL_FORMAT "\n", name, values.size(),
+			values[percentile_index(
+				values.size(), 50U)],
+			values[percentile_index(
+				values.size(), 95U)],
+			values[percentile_index(
+				values.size(), 99U)],
+			values.back());
 	}
 
 	struct ReferenceLightNode
@@ -770,20 +770,20 @@ namespace
 						std::fprintf(stderr,
 							"lighting-harness: oracle mismatch context=%s "
 							"chunk=(%d,%d) local=(%d,%d,%d) expected=%u "
-							"actual=%u voxel=%llu light=%llu content=%u "
+							"actual=%u voxel=" FT_UINT64_DECIMAL_FORMAT " light=" FT_UINT64_DECIMAL_FORMAT " content=%u "
 							"input=%u computed=%u "
 							"snapshot_block=%u snapshot_error=%d first_opaque_y=%d\n",
 							context, chunk_x, chunk_z,
 							local_x, local_y, local_z,
 							static_cast<unsigned int>(expected_value),
 							static_cast<unsigned int>(actual_value),
-							static_cast<unsigned long long>(chunk->voxel_revision),
-							static_cast<unsigned long long>(chunk->light_revision),
+							chunk->voxel_revision,
+							chunk->light_revision,
 							static_cast<unsigned int>(chunk->content_version),
 							static_cast<unsigned int>(chunk->light_input_version),
 							static_cast<unsigned int>(
 								chunk->computed_light_input_version),
-							static_cast<unsigned int>(snapshot_block_id),
+							snapshot_block_id,
 							snapshot_lookup_error,
 							first_opaque_y);
 						return (FT_ERR_INTERNAL);
@@ -868,8 +868,8 @@ namespace
 			{
 				std::fprintf(stderr,
 					"lighting-harness: neighborhood observation missing "
-					"edit=%llu chunk=(%d,%d) target=(%d,%d)\n",
-					static_cast<unsigned long long>(edit_id), observed_chunk_x,
+					"edit=" FT_UINT64_DECIMAL_FORMAT " chunk=(%d,%d) target=(%d,%d)\n",
+					edit_id, observed_chunk_x,
 					observed_chunk_z, chunk_x, chunk_z);
 				return (FT_ERR_NOT_FOUND);
 			}
@@ -901,8 +901,8 @@ namespace
 			{
 				std::fprintf(stderr,
 					"lighting-harness: opposite-border observation missing "
-					"edit=%llu chunk=(%d,%d)\n",
-					static_cast<unsigned long long>(edit_id), chunk_x, chunk_z);
+					"edit=" FT_UINT64_DECIMAL_FORMAT " chunk=(%d,%d)\n",
+					edit_id, chunk_x, chunk_z);
 				return (FT_ERR_NOT_FOUND);
 			}
 			if (harness.observe(world, chunk_x, chunk_z, frame, edit_id)
@@ -1006,31 +1006,30 @@ namespace
 		if (last_chunk == nullptr || !last_chunk->initialized)
 			return (FT_ERR_NOT_FOUND);
 		std::fprintf(stderr,
-			"lighting-harness: edit timeout id=%llu coordinate=(%d,%d,%d) "
+			"lighting-harness: edit timeout id=" FT_UINT64_DECIMAL_FORMAT " coordinate=(%d,%d,%d) "
 			"frames=" FT_UINT64_DECIMAL_FORMAT " elapsed_ms="
 			FT_UINT64_DECIMAL_FORMAT " content=%u light_version=%u "
 			"light_input=%u computed_input=%u light_revision="
 			FT_UINT64_DECIMAL_FORMAT " mesh_revision=" FT_UINT64_DECIMAL_FORMAT
-			" dirty=%d pending=%llu pending_voxel=" FT_UINT64_DECIMAL_FORMAT
+			" dirty=%d pending=" FT_UINT64_DECIMAL_FORMAT " pending_voxel=" FT_UINT64_DECIMAL_FORMAT
 			" pending_content=%u pending_input=%u ready=%d valid=%d current=%d "
 			"queue=%zu interactive=%zu active=%zu playable=%zu/%zu/%zu "
 			"deferred=%zu cursor=%zu candidates=%zu ready_candidates=%zu "
 			"pending_candidates=%zu retryable=%zu failed_candidates=%zu "
-			"stream_frame=%llu progress_frame=%llu oldest_pending=%llu "
-			"oldest_result_ns=%llu starvation=%llu geometry_only=%llu "
-			"scanned=%llu propagated=%llu last_error=%d\n",
-			static_cast<unsigned long long>(edit_id), world_x, world_y, world_z,
+			"stream_frame=" FT_UINT64_DECIMAL_FORMAT " progress_frame=" FT_UINT64_DECIMAL_FORMAT " oldest_pending=" FT_UINT64_DECIMAL_FORMAT " "
+			"oldest_result_ns=" FT_UINT64_DECIMAL_FORMAT " starvation=" FT_UINT64_DECIMAL_FORMAT " geometry_only=" FT_UINT64_DECIMAL_FORMAT " "
+			"scanned=" FT_UINT64_DECIMAL_FORMAT " propagated=" FT_UINT64_DECIMAL_FORMAT " last_error=%d\n",
+			edit_id, world_x, world_y, world_z,
 			frame - edit_frame, elapsed_milliseconds(started),
 			static_cast<unsigned int>(last_chunk->content_version),
 			static_cast<unsigned int>(last_chunk->light_version),
 			static_cast<unsigned int>(last_chunk->light_input_version),
 			static_cast<unsigned int>(last_chunk->computed_light_input_version),
-			static_cast<unsigned long long>(last_chunk->light_revision),
-			static_cast<unsigned long long>(last_chunk->mesh_revision),
+			last_chunk->light_revision,
+			last_chunk->mesh_revision,
 			last_chunk->mesh_dirty ? 1 : 0,
-			static_cast<unsigned long long>(last_chunk->pending_mesh_request_id),
-			static_cast<unsigned long long>(
-				last_chunk->pending_mesh_request_voxel_revision),
+			last_chunk->pending_mesh_request_id,
+			last_chunk->pending_mesh_request_voxel_revision,
 			static_cast<unsigned int>(
 				last_chunk->pending_mesh_request_content_version),
 			static_cast<unsigned int>(
@@ -1051,20 +1050,14 @@ namespace
 			timeout_diagnostics.pending_count,
 			timeout_diagnostics.retryable_count,
 			timeout_diagnostics.failed_count,
-			static_cast<unsigned long long>(timeout_diagnostics.frame),
-			static_cast<unsigned long long>(timeout_diagnostics.progress_frame),
-			static_cast<unsigned long long>(
-				timeout_diagnostics.oldest_pending_age),
-			static_cast<unsigned long long>(
-				timeout_diagnostics.oldest_result_age_nanoseconds),
-			static_cast<unsigned long long>(
-				timeout_diagnostics.remesh_starvation_promotions),
-			static_cast<unsigned long long>(
-				timeout_diagnostics.remesh_geometry_only_count),
-			static_cast<unsigned long long>(
-				timeout_diagnostics.remesh_scanned_cells),
-			static_cast<unsigned long long>(
-				timeout_diagnostics.remesh_propagated_cells),
+			timeout_diagnostics.frame,
+			timeout_diagnostics.progress_frame,
+			timeout_diagnostics.oldest_pending_age,
+			timeout_diagnostics.oldest_result_age_nanoseconds,
+			timeout_diagnostics.remesh_starvation_promotions,
+			timeout_diagnostics.remesh_geometry_only_count,
+			timeout_diagnostics.remesh_scanned_cells,
+			timeout_diagnostics.remesh_propagated_cells,
 			timeout_diagnostics.last_error);
 		return (FT_ERR_TIMEOUT);
 	}
@@ -1165,7 +1158,7 @@ namespace
 		std::fprintf(stderr,
 			"lighting-harness: transition begin name=%s coordinate=(%d,%d,%d) "
 			"block=%u\n", name, candidate_x, world_y, candidate_z,
-			static_cast<unsigned int>(block_id));
+		block_id);
 		error_code = run_edit(world, harness, edit_id++, candidate_x, world_y,
 			candidate_z, block_id, frame);
 		if (error_code == FT_ERR_SUCCESS)
@@ -1240,7 +1233,7 @@ namespace
 		std::fprintf(stderr,
 			"lighting-harness: section-boundary transition coordinate="
 			"(%d,%d,%d) block=%u\n", world_x, world_y, world_z,
-			static_cast<unsigned int>(block_id));
+		block_id);
 		error_code = run_edit(world, harness, edit_id++, world_x, world_y,
 			world_z, block_id, frame);
 		if (error_code == FT_ERR_SUCCESS)
@@ -1368,10 +1361,10 @@ namespace
 			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		}
 		std::fprintf(stderr,
-			"lighting-harness: superseded transition timeout first=%llu "
-			"second=%llu frames=%llu\n",
-			static_cast<unsigned long long>(first_edit_id),
-			static_cast<unsigned long long>(second_edit_id),
+			"lighting-harness: superseded transition timeout first=" FT_UINT64_DECIMAL_FORMAT " "
+			"second=" FT_UINT64_DECIMAL_FORMAT " frames=" FT_UINT64_DECIMAL_FORMAT "\n",
+			first_edit_id,
+			second_edit_id,
 			frame - start_frame);
 		return (FT_ERR_TIMEOUT);
 	}
@@ -1582,8 +1575,8 @@ namespace
 				std::fprintf(stderr,
 					"lighting-harness: queue pressure accepted=%u "
 					"rejected=%u peak=%zu\n",
-					static_cast<unsigned int>(accepted_count),
-					static_cast<unsigned int>(rejected_count),
+					accepted_count,
+					rejected_count,
 					diagnostics.remesh_queue_peak);
 				return (FT_ERR_SUCCESS);
 			}
@@ -1902,12 +1895,12 @@ namespace
 				"lighting-harness: allocation attempt limit=%zu error=%d "
 				"observed_block=%u first_failure=%d\n",
 				static_cast<std::size_t>(allocation_limits[index]), error_code,
-				static_cast<unsigned int>(observed_block_id), first_failure);
+				observed_block_id, first_failure);
 			index += 1U;
 		}
 		std::fprintf(stderr,
 			"lighting-harness: allocation failure sweep attempts=14 failures=%u\n",
-			static_cast<unsigned int>(failure_count));
+			failure_count);
 		if (failure_count == 0U && first_failure == FT_ERR_SUCCESS)
 			return (FT_ERR_INVALID_OPERATION);
 		if (first_failure != FT_ERR_SUCCESS)
@@ -2297,21 +2290,21 @@ int32_t LightingObservationHarness::observe(const World &world,
 					observation_invariant_error_ = transition_error;
 					std::fprintf(stderr,
 						"lighting-harness: online publication invariant failed "
-						"frame=%llu chunk=(%d,%d) previous=(voxel=%llu "
-						"light=%llu mesh=%llu valid=%d current=%d ready=%d) "
-						"current=(voxel=%llu light=%llu mesh=%llu valid=%d "
+						"frame=" FT_UINT64_DECIMAL_FORMAT " chunk=(%d,%d) previous=(voxel=" FT_UINT64_DECIMAL_FORMAT " "
+						"light=" FT_UINT64_DECIMAL_FORMAT " mesh=" FT_UINT64_DECIMAL_FORMAT " valid=%d current=%d ready=%d) "
+						"current=(voxel=" FT_UINT64_DECIMAL_FORMAT " light=" FT_UINT64_DECIMAL_FORMAT " mesh=" FT_UINT64_DECIMAL_FORMAT " valid=%d "
 						"current=%d ready=%d)\n",
-						static_cast<unsigned long long>(observation.frame_index),
+						observation.frame_index,
 						observation.chunk_x, observation.chunk_z,
-						static_cast<unsigned long long>(previous.voxel_revision),
-						static_cast<unsigned long long>(previous.light_revision),
-						static_cast<unsigned long long>(previous.mesh_revision),
+						previous.voxel_revision,
+						previous.light_revision,
+						previous.mesh_revision,
 						previous.light_buffer_valid ? 1 : 0,
 						previous.light_current ? 1 : 0,
 						previous.light_ready_for_render ? 1 : 0,
-						static_cast<unsigned long long>(observation.voxel_revision),
-						static_cast<unsigned long long>(observation.light_revision),
-						static_cast<unsigned long long>(observation.mesh_revision),
+						observation.voxel_revision,
+						observation.light_revision,
+						observation.mesh_revision,
 						observation.light_buffer_valid ? 1 : 0,
 						observation.light_current ? 1 : 0,
 						observation.light_ready_for_render ? 1 : 0);
@@ -2559,20 +2552,20 @@ int32_t LightingObservationHarness::validate_publication_invariants() const
 				&& current.mesh_revision > previous.mesh_revision))
 		{
 			std::fprintf(stderr,
-				"lighting-harness: publication invariant failed frame=%llu "
-				"chunk=(%d,%d) previous=(voxel=%llu light=%llu mesh=%llu "
-				"valid=%d ready=%d) current=(voxel=%llu light=%llu "
-				"mesh=%llu valid=%d ready=%d)\n",
-				static_cast<unsigned long long>(current.frame_index),
+				"lighting-harness: publication invariant failed frame=" FT_UINT64_DECIMAL_FORMAT " "
+				"chunk=(%d,%d) previous=(voxel=" FT_UINT64_DECIMAL_FORMAT " light=" FT_UINT64_DECIMAL_FORMAT " mesh=" FT_UINT64_DECIMAL_FORMAT " "
+				"valid=%d ready=%d) current=(voxel=" FT_UINT64_DECIMAL_FORMAT " light=" FT_UINT64_DECIMAL_FORMAT " "
+				"mesh=" FT_UINT64_DECIMAL_FORMAT " valid=%d ready=%d)\n",
+				current.frame_index,
 				current.chunk_x, current.chunk_z,
-				static_cast<unsigned long long>(previous.voxel_revision),
-				static_cast<unsigned long long>(previous.light_revision),
-				static_cast<unsigned long long>(previous.mesh_revision),
+				previous.voxel_revision,
+				previous.light_revision,
+				previous.mesh_revision,
 				previous.light_buffer_valid ? 1 : 0,
 				previous.light_ready_for_render ? 1 : 0,
-				static_cast<unsigned long long>(current.voxel_revision),
-				static_cast<unsigned long long>(current.light_revision),
-				static_cast<unsigned long long>(current.mesh_revision),
+				current.voxel_revision,
+				current.light_revision,
+				current.mesh_revision,
 				current.light_buffer_valid ? 1 : 0,
 				current.light_ready_for_render ? 1 : 0);
 			return (FT_ERR_INTERNAL);
@@ -2582,14 +2575,14 @@ int32_t LightingObservationHarness::validate_publication_invariants() const
 			&& current.nonzero_light_vertices == 0U)
 		{
 			std::fprintf(stderr,
-				"lighting-harness: zero-light publication failed frame=%llu "
-				"chunk=(%d,%d) previous_mesh=%llu current_mesh=%llu "
+				"lighting-harness: zero-light publication failed frame=" FT_UINT64_DECIMAL_FORMAT " "
+				"chunk=(%d,%d) previous_mesh=" FT_UINT64_DECIMAL_FORMAT " current_mesh=" FT_UINT64_DECIMAL_FORMAT " "
 				"previous_nonzero=%u current_nonzero=%u "
 				"input=%u computed=%u valid=%d current=%d ready=%d\n",
-				static_cast<unsigned long long>(current.frame_index),
+				current.frame_index,
 				current.chunk_x, current.chunk_z,
-				static_cast<unsigned long long>(previous.mesh_revision),
-				static_cast<unsigned long long>(current.mesh_revision),
+				previous.mesh_revision,
+				current.mesh_revision,
 				previous.nonzero_light_vertices,
 				current.nonzero_light_vertices,
 				static_cast<unsigned int>(current.light_input_version),
@@ -2610,13 +2603,13 @@ int32_t LightingObservationHarness::validate_publication_invariants() const
 				|| !current.light_ready_for_render))
 		{
 			std::fprintf(stderr,
-				"lighting-harness: fake-gpu publication failed frame=%llu "
-				"chunk=(%d,%d) previous_mesh=%llu current_mesh=%llu "
+				"lighting-harness: fake-gpu publication failed frame=" FT_UINT64_DECIMAL_FORMAT " "
+				"chunk=(%d,%d) previous_mesh=" FT_UINT64_DECIMAL_FORMAT " current_mesh=" FT_UINT64_DECIMAL_FORMAT " "
 				"valid=%d current=%d ready=%d input=%u computed=%u\n",
-				static_cast<unsigned long long>(current.frame_index),
+				current.frame_index,
 				current.chunk_x, current.chunk_z,
-				static_cast<unsigned long long>(previous.mesh_revision),
-				static_cast<unsigned long long>(current.mesh_revision),
+				previous.mesh_revision,
+				current.mesh_revision,
 				current.light_buffer_valid ? 1 : 0,
 				current.light_current ? 1 : 0,
 				current.light_ready_for_render ? 1 : 0,
@@ -2684,11 +2677,11 @@ int32_t LightingObservationHarness::validate_latency(uint64_t maximum_frames,
 		if (scanned_counter_rolled_back)
 		{
 			std::fprintf(stderr,
-				"lighting-harness: counter rollback id=%llu "
-				"start_scanned=%llu end_scanned=%llu\n",
-				static_cast<unsigned long long>(edit.edit_id),
-				static_cast<unsigned long long>(edit.start_scanned_cells),
-				static_cast<unsigned long long>(edit.end_scanned_cells));
+				"lighting-harness: counter rollback id=" FT_UINT64_DECIMAL_FORMAT " "
+				"start_scanned=" FT_UINT64_DECIMAL_FORMAT " end_scanned=" FT_UINT64_DECIMAL_FORMAT "\n",
+				edit.edit_id,
+				edit.start_scanned_cells,
+				edit.end_scanned_cells);
 			failed = true;
 		}
 		if (!edit.completed || edit.authoritative_frame == UINT64_MAX
@@ -2703,42 +2696,39 @@ int32_t LightingObservationHarness::validate_latency(uint64_t maximum_frames,
 			|| edit.elapsed_milliseconds > maximum_milliseconds)
 		{
 			std::fprintf(stderr,
-				"lighting-harness: latency gate failed id=%llu "
-				"authoritative_frame=%llu light_frame=%llu mesh_frame=%llu "
-				"visible_frame=%llu authoritative_ms=%llu light_ms=%llu "
-				"mesh_ms=%llu visible_ms=%llu "
-				"frames=%llu elapsed_ms=%llu limits=(%llu,%llu)\n",
-				static_cast<unsigned long long>(edit.edit_id),
-				static_cast<unsigned long long>(edit.authoritative_frame),
-				static_cast<unsigned long long>(edit.light_frame),
-				static_cast<unsigned long long>(edit.mesh_frame),
-				static_cast<unsigned long long>(edit.visible_frame),
-				static_cast<unsigned long long>(
-					edit.authoritative_elapsed_milliseconds),
-				static_cast<unsigned long long>(edit.light_elapsed_milliseconds),
-				static_cast<unsigned long long>(edit.mesh_elapsed_milliseconds),
-				static_cast<unsigned long long>(
-					edit.visible_elapsed_milliseconds),
-				static_cast<unsigned long long>(edit.observed_frames),
-				static_cast<unsigned long long>(edit.elapsed_milliseconds),
-				static_cast<unsigned long long>(maximum_frames),
-				static_cast<unsigned long long>(maximum_milliseconds));
+				"lighting-harness: latency gate failed id=" FT_UINT64_DECIMAL_FORMAT " "
+				"authoritative_frame=" FT_UINT64_DECIMAL_FORMAT " light_frame=" FT_UINT64_DECIMAL_FORMAT " mesh_frame=" FT_UINT64_DECIMAL_FORMAT " "
+				"visible_frame=" FT_UINT64_DECIMAL_FORMAT " authoritative_ms=" FT_UINT64_DECIMAL_FORMAT " light_ms=" FT_UINT64_DECIMAL_FORMAT " "
+				"mesh_ms=" FT_UINT64_DECIMAL_FORMAT " visible_ms=" FT_UINT64_DECIMAL_FORMAT " "
+				"frames=" FT_UINT64_DECIMAL_FORMAT " elapsed_ms=" FT_UINT64_DECIMAL_FORMAT " limits=(" FT_UINT64_DECIMAL_FORMAT "," FT_UINT64_DECIMAL_FORMAT ")\n",
+				edit.edit_id,
+				edit.authoritative_frame,
+				edit.light_frame,
+			edit.mesh_frame,
+			edit.visible_frame,
+			edit.authoritative_elapsed_milliseconds,
+			edit.light_elapsed_milliseconds,
+			edit.mesh_elapsed_milliseconds,
+			edit.visible_elapsed_milliseconds,
+				edit.observed_frames,
+				edit.elapsed_milliseconds,
+				maximum_frames,
+				maximum_milliseconds);
 			failed = true;
 		}
 		if (!edit.incremental_light_publication || incremental_completions == 0U
 			|| scanned_cells >= LIGHT_HARNESS_MAX_INCREMENTAL_SCANNED_CELLS)
 		{
 			std::fprintf(stderr,
-				"lighting-harness: incremental-light gate failed id=%llu "
-				"scanned=%llu incremental_completions=%llu full_completions=%llu "
-				"incremental_publication=%d scan_limit=%llu\n",
-				static_cast<unsigned long long>(edit.edit_id),
-				static_cast<unsigned long long>(scanned_cells),
-				static_cast<unsigned long long>(incremental_completions),
-				static_cast<unsigned long long>(full_completions),
+				"lighting-harness: incremental-light gate failed id=" FT_UINT64_DECIMAL_FORMAT " "
+				"scanned=" FT_UINT64_DECIMAL_FORMAT " incremental_completions=" FT_UINT64_DECIMAL_FORMAT " full_completions=" FT_UINT64_DECIMAL_FORMAT " "
+				"incremental_publication=%d scan_limit=" FT_UINT64_DECIMAL_FORMAT "\n",
+				edit.edit_id,
+				scanned_cells,
+				incremental_completions,
+				full_completions,
 				edit.incremental_light_publication ? 1 : 0,
-				static_cast<unsigned long long>(
-					LIGHT_HARNESS_MAX_INCREMENTAL_SCANNED_CELLS));
+				LIGHT_HARNESS_MAX_INCREMENTAL_SCANNED_CELLS);
 			failed = true;
 		}
 		if (edit.completed && edit.elapsed_milliseconds != UINT64_MAX)
@@ -2807,21 +2797,20 @@ int32_t LightingObservationHarness::validate_latency(uint64_t maximum_frames,
 		std::sort(deviations.begin(), deviations.end());
 
 		std::fprintf(stderr,
-			"lighting-harness: latency samples=%zu p50_ms=%llu "
-			"p90_ms=%llu p95_ms=%llu p99_ms=%llu max_ms=%llu mad_ms=%llu "
-			"gates=(%llu,%llu,%llu,%llu)\n",
+			"lighting-harness: latency samples=%zu p50_ms=" FT_UINT64_DECIMAL_FORMAT " "
+			"p90_ms=" FT_UINT64_DECIMAL_FORMAT " p95_ms=" FT_UINT64_DECIMAL_FORMAT " p99_ms=" FT_UINT64_DECIMAL_FORMAT " max_ms=" FT_UINT64_DECIMAL_FORMAT " mad_ms=" FT_UINT64_DECIMAL_FORMAT " "
+			"gates=(" FT_UINT64_DECIMAL_FORMAT "," FT_UINT64_DECIMAL_FORMAT "," FT_UINT64_DECIMAL_FORMAT "," FT_UINT64_DECIMAL_FORMAT ")\n",
 			sample_count,
-			static_cast<unsigned long long>(latencies[p50_index]),
-			static_cast<unsigned long long>(latencies[p90_index]),
-			static_cast<unsigned long long>(latencies[p95_index]),
-			static_cast<unsigned long long>(latencies[p99_index]),
-			static_cast<unsigned long long>(latencies.back()),
-			static_cast<unsigned long long>(
-				deviations[percentile_index(sample_count, 50U)]),
-			static_cast<unsigned long long>(LIGHT_HARNESS_P50_MAX_MILLISECONDS),
-			static_cast<unsigned long long>(LIGHT_HARNESS_P95_MAX_MILLISECONDS),
-			static_cast<unsigned long long>(LIGHT_HARNESS_P99_MAX_MILLISECONDS),
-			static_cast<unsigned long long>(maximum_milliseconds));
+			latencies[p50_index],
+			latencies[p90_index],
+			latencies[p95_index],
+			latencies[p99_index],
+			latencies.back(),
+			deviations[percentile_index(sample_count, 50U)],
+			LIGHT_HARNESS_P50_MAX_MILLISECONDS,
+			LIGHT_HARNESS_P95_MAX_MILLISECONDS,
+			LIGHT_HARNESS_P99_MAX_MILLISECONDS,
+			maximum_milliseconds);
 		if (latencies[p50_index] > LIGHT_HARNESS_P50_MAX_MILLISECONDS
 			|| latencies[p95_index] > LIGHT_HARNESS_P95_MAX_MILLISECONDS
 			|| latencies[p99_index] > LIGHT_HARNESS_P99_MAX_MILLISECONDS)
@@ -2954,19 +2943,19 @@ int32_t LightingObservationHarness::write_report(const char *path) const
 		mad_index = percentile_index(deviations.size(), 50U);
 	}
 	if (std::fprintf(file,
-			"{\"version\":%llu,\"type\":\"lighting_harness\"," 
+			"{\"version\":" FT_UINT64_DECIMAL_FORMAT ",\"type\":\"lighting_harness\","
 			"\"build_variant\":\"%s\",\"platform\":\"%s\","
 			"\"compiler\":\"%s\",\"cplusplus\":%lld,"
 			"\"pointer_bits\":%zu,\"seed\":\"lighting-harness\","
 			"\"clock\":\"steady_clock\",\"render_distance\":%d,"
-			"\"frames_retained\":%zu,\"frames_dropped\":%llu,"
+			"\"frames_retained\":%zu,\"frames_dropped\":" FT_UINT64_DECIMAL_FORMAT ","
 			"\"frame_retention_limit\":%zu,"
 			"\"online_publication_error\":%d,"
 			"\"edit_count\":%zu,\"completed_edits\":%zu,"
-			"\"max_edit_frames\":%llu,\"max_edit_ms\":%llu,"
-			"\"p50_gate_ms\":%llu,\"p95_gate_ms\":%llu,"
-			"\"p99_gate_ms\":%llu}\n",
-			static_cast<unsigned long long>(LIGHT_HARNESS_REPORT_VERSION),
+			"\"max_edit_frames\":" FT_UINT64_DECIMAL_FORMAT ",\"max_edit_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"p50_gate_ms\":" FT_UINT64_DECIMAL_FORMAT ",\"p95_gate_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"p99_gate_ms\":" FT_UINT64_DECIMAL_FORMAT "}\n",
+			LIGHT_HARNESS_REPORT_VERSION,
 			LIGHT_HARNESS_BUILD_VARIANT,
 			LIGHT_HARNESS_PLATFORM,
 			LIGHT_HARNESS_COMPILER,
@@ -2974,16 +2963,15 @@ int32_t LightingObservationHarness::write_report(const char *path) const
 			sizeof(void *) * 8U,
 			WorldCoordinates::MIN_RENDER_DISTANCE,
 			frames_.size(),
-			static_cast<unsigned long long>(dropped_frame_count_),
+			dropped_frame_count_,
 			frame_retention_limit_,
 			observation_invariant_error_,
 			edits_.size(), completed_count,
-			static_cast<unsigned long long>(LIGHT_HARNESS_MAX_EDIT_FRAMES),
-			static_cast<unsigned long long>(
-				LIGHT_HARNESS_MAX_EDIT_MILLISECONDS),
-			static_cast<unsigned long long>(LIGHT_HARNESS_P50_MAX_MILLISECONDS),
-			static_cast<unsigned long long>(LIGHT_HARNESS_P95_MAX_MILLISECONDS),
-			static_cast<unsigned long long>(LIGHT_HARNESS_P99_MAX_MILLISECONDS)) < 0)
+			LIGHT_HARNESS_MAX_EDIT_FRAMES,
+			LIGHT_HARNESS_MAX_EDIT_MILLISECONDS,
+			LIGHT_HARNESS_P50_MAX_MILLISECONDS,
+			LIGHT_HARNESS_P95_MAX_MILLISECONDS,
+			LIGHT_HARNESS_P99_MAX_MILLISECONDS) < 0)
 	{
 		std::fclose(file);
 		return (FT_ERR_IO);
@@ -2993,13 +2981,13 @@ int32_t LightingObservationHarness::write_report(const char *path) const
 	{
 		const LightingFrameObservation &frame = frames_[index];
 		if (std::fprintf(file,
-				"{\"type\":\"frame\",\"frame\":%llu,\"edit\":%llu,"
+				"{\"type\":\"frame\",\"frame\":" FT_UINT64_DECIMAL_FORMAT ",\"edit\":" FT_UINT64_DECIMAL_FORMAT ","
 				"\"chunk_x\":%d,"
-				"\"chunk_z\":%d,\"voxel\":%llu,\"light\":%llu,"
-				"\"mesh\":%llu,\"content\":%u,\"light_version\":%u,"
+				"\"chunk_z\":%d,\"voxel\":" FT_UINT64_DECIMAL_FORMAT ",\"light\":" FT_UINT64_DECIMAL_FORMAT ","
+				"\"mesh\":" FT_UINT64_DECIMAL_FORMAT ",\"content\":%u,\"light_version\":%u,"
 				"\"light_input\":%u,\"computed_input\":%u,"
-				"\"pending_request\":%llu,"
-				"\"pending_voxel\":%llu,\"pending_content\":%u,"
+				"\"pending_request\":" FT_UINT64_DECIMAL_FORMAT ","
+				"\"pending_voxel\":" FT_UINT64_DECIMAL_FORMAT ",\"pending_content\":%u,"
 				"\"pending_input\":%u,"
 				"\"valid\":%d,\"current\":%d,\"ready\":%d,"
 				"\"dirty\":%d,\"pending\":%d,\"light_min\":%u,"
@@ -3011,33 +2999,33 @@ int32_t LightingObservationHarness::write_report(const char *path) const
 				"\"deferred_edits\":%zu,\"deferred_cursor\":%zu,"
 				"\"candidates\":%zu,\"ready_candidates\":%zu,"
 				"\"pending_candidates\":%zu,\"retryable\":%zu,"
-				"\"failed_candidates\":%zu,\"stream_frame\":%llu,"
-				"\"stream_progress_frame\":%llu,"
-				"\"starvation_promotions\":%llu,"
-				"\"oldest_queue_age\":%llu,\"snapshot_bytes\":%llu,"
-				"\"capture_duration_ns\":%llu,\"capture_count\":%llu,"
-				"\"light_queue_peak\":%llu,\"geometry_only\":%llu,"
-				"\"oldest_result_age_ns\":%llu,\"oldest_pending_age\":%llu,"
-				"\"queue_peak\":%llu,"
-				"\"stale_remesh\":%llu,\"stale_capture\":%llu,"
-				"\"stale_dependency\":%llu,\"stale_pending\":%llu,"
-				"\"stale_revision\":%llu,\"completed\":%llu,"
-				"\"incremental_completed\":%llu,\"full_completed\":%llu,"
-				"\"canceled\":%llu,\"scanned\":%llu,"
-				"\"propagated\":%llu,\"stream_error\":%d}\n",
-				static_cast<unsigned long long>(frame.frame_index),
-				static_cast<unsigned long long>(frame.edit_id), frame.chunk_x,
+				"\"failed_candidates\":%zu,\"stream_frame\":" FT_UINT64_DECIMAL_FORMAT ","
+				"\"stream_progress_frame\":" FT_UINT64_DECIMAL_FORMAT ","
+				"\"starvation_promotions\":" FT_UINT64_DECIMAL_FORMAT ","
+				"\"oldest_queue_age\":" FT_UINT64_DECIMAL_FORMAT ",\"snapshot_bytes\":" FT_UINT64_DECIMAL_FORMAT ","
+				"\"capture_duration_ns\":" FT_UINT64_DECIMAL_FORMAT ",\"capture_count\":" FT_UINT64_DECIMAL_FORMAT ","
+				"\"light_queue_peak\":" FT_UINT64_DECIMAL_FORMAT ",\"geometry_only\":" FT_UINT64_DECIMAL_FORMAT ","
+				"\"oldest_result_age_ns\":" FT_UINT64_DECIMAL_FORMAT ",\"oldest_pending_age\":" FT_UINT64_DECIMAL_FORMAT ","
+				"\"queue_peak\":" FT_UINT64_DECIMAL_FORMAT ","
+				"\"stale_remesh\":" FT_UINT64_DECIMAL_FORMAT ",\"stale_capture\":" FT_UINT64_DECIMAL_FORMAT ","
+				"\"stale_dependency\":" FT_UINT64_DECIMAL_FORMAT ",\"stale_pending\":" FT_UINT64_DECIMAL_FORMAT ","
+				"\"stale_revision\":" FT_UINT64_DECIMAL_FORMAT ",\"completed\":" FT_UINT64_DECIMAL_FORMAT ","
+				"\"incremental_completed\":" FT_UINT64_DECIMAL_FORMAT ",\"full_completed\":" FT_UINT64_DECIMAL_FORMAT ","
+				"\"canceled\":" FT_UINT64_DECIMAL_FORMAT ",\"scanned\":" FT_UINT64_DECIMAL_FORMAT ","
+				"\"propagated\":" FT_UINT64_DECIMAL_FORMAT ",\"stream_error\":%d}\n",
+				frame.frame_index,
+				frame.edit_id, frame.chunk_x,
 				frame.chunk_z,
-				static_cast<unsigned long long>(frame.voxel_revision),
-				static_cast<unsigned long long>(frame.light_revision),
-				static_cast<unsigned long long>(frame.mesh_revision),
+				frame.voxel_revision,
+				frame.light_revision,
+				frame.mesh_revision,
 				static_cast<unsigned int>(frame.content_version),
 				static_cast<unsigned int>(frame.light_version),
 				static_cast<unsigned int>(frame.light_input_version),
 				static_cast<unsigned int>(frame.computed_light_input_version),
-				static_cast<unsigned long long>(frame.pending_mesh_request_id),
-				static_cast<unsigned long long>(
-					frame.pending_mesh_request_voxel_revision),
+				frame.pending_mesh_request_id,
+
+				frame.pending_mesh_request_voxel_revision,
 				static_cast<unsigned int>(
 					frame.pending_mesh_request_content_version),
 				static_cast<unsigned int>(
@@ -3056,35 +3044,29 @@ int32_t LightingObservationHarness::write_report(const char *path) const
 				frame.deferred_edit_cursor, frame.candidate_count,
 				frame.ready_count, frame.pending_count, frame.retryable_count,
 				frame.failed_count,
-				static_cast<unsigned long long>(frame.stream_frame),
-				static_cast<unsigned long long>(frame.stream_progress_frame),
-				static_cast<unsigned long long>(
-					frame.remesh_starvation_promotions),
-				static_cast<unsigned long long>(
-					frame.oldest_remesh_queue_age),
-				static_cast<unsigned long long>(frame.remesh_snapshot_bytes),
-				static_cast<unsigned long long>(
-					frame.remesh_capture_duration_nanoseconds),
-				static_cast<unsigned long long>(frame.remesh_capture_count),
-				static_cast<unsigned long long>(frame.remesh_light_queue_peak),
-				static_cast<unsigned long long>(
-					frame.remesh_geometry_only_count),
-				static_cast<unsigned long long>(
-					frame.oldest_result_age_nanoseconds),
-				static_cast<unsigned long long>(frame.oldest_pending_age),
-				static_cast<unsigned long long>(frame.remesh_queue_peak),
-				static_cast<unsigned long long>(frame.stale_remesh_count),
-				static_cast<unsigned long long>(frame.stale_remesh_capture_count),
-				static_cast<unsigned long long>(frame.stale_remesh_dependency_count),
-				static_cast<unsigned long long>(frame.stale_remesh_pending_count),
-				static_cast<unsigned long long>(frame.stale_remesh_revision_count),
-				static_cast<unsigned long long>(frame.remesh_completed_count),
-				static_cast<unsigned long long>(
-					frame.remesh_incremental_completed_count),
-				static_cast<unsigned long long>(frame.remesh_full_completed_count),
-				static_cast<unsigned long long>(frame.remesh_canceled_count),
-				static_cast<unsigned long long>(frame.remesh_scanned_cells),
-				static_cast<unsigned long long>(frame.remesh_propagated_cells),
+				frame.stream_frame,
+				frame.stream_progress_frame,
+				frame.remesh_starvation_promotions,
+				frame.oldest_remesh_queue_age,
+				frame.remesh_snapshot_bytes,
+				frame.remesh_capture_duration_nanoseconds,
+				frame.remesh_capture_count,
+				frame.remesh_light_queue_peak,
+				frame.remesh_geometry_only_count,
+				frame.oldest_result_age_nanoseconds,
+				frame.oldest_pending_age,
+				frame.remesh_queue_peak,
+				frame.stale_remesh_count,
+				frame.stale_remesh_capture_count,
+				frame.stale_remesh_dependency_count,
+				frame.stale_remesh_pending_count,
+				frame.stale_remesh_revision_count,
+				frame.remesh_completed_count,
+				frame.remesh_incremental_completed_count,
+				frame.remesh_full_completed_count,
+				frame.remesh_canceled_count,
+				frame.remesh_scanned_cells,
+				frame.remesh_propagated_cells,
 				frame.stream_last_error) < 0)
 		{
 			std::fclose(file);
@@ -3097,50 +3079,44 @@ int32_t LightingObservationHarness::write_report(const char *path) const
 	{
 		const LightingEditObservation &edit = edits_[index];
 		if (std::fprintf(file,
-				"{\"type\":\"edit\",\"edit\":%llu,"
+				"{\"type\":\"edit\",\"edit\":" FT_UINT64_DECIMAL_FORMAT ","
 				"\"world_x\":%d,\"world_y\":%d,\"world_z\":%d,"
-				"\"start_frame\":%llu,\"authoritative_frame\":%llu,"
-				"\"light_frame\":%llu,\"mesh_frame\":%llu,"
-				"\"visible_frame\":%llu,"
-				"\"authoritative_ms\":%llu,\"light_ms\":%llu,"
-				"\"light_stage_ms\":%llu,\"mesh_ms\":%llu,"
-				"\"visible_ms\":%llu,\"visible_stage_ms\":%llu,"
-				"\"elapsed_ms\":%llu,\"observed_frames\":%llu,"
-				"\"start_scanned\":%llu,\"end_scanned\":%llu,"
-				"\"start_incremental\":%llu,\"end_incremental\":%llu,"
-				"\"start_full\":%llu,\"end_full\":%llu,"
+				"\"start_frame\":" FT_UINT64_DECIMAL_FORMAT ",\"authoritative_frame\":" FT_UINT64_DECIMAL_FORMAT ","
+				"\"light_frame\":" FT_UINT64_DECIMAL_FORMAT ",\"mesh_frame\":" FT_UINT64_DECIMAL_FORMAT ","
+				"\"visible_frame\":" FT_UINT64_DECIMAL_FORMAT ","
+				"\"authoritative_ms\":" FT_UINT64_DECIMAL_FORMAT ",\"light_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+				"\"light_stage_ms\":" FT_UINT64_DECIMAL_FORMAT ",\"mesh_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+				"\"visible_ms\":" FT_UINT64_DECIMAL_FORMAT ",\"visible_stage_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+				"\"elapsed_ms\":" FT_UINT64_DECIMAL_FORMAT ",\"observed_frames\":" FT_UINT64_DECIMAL_FORMAT ","
+				"\"start_scanned\":" FT_UINT64_DECIMAL_FORMAT ",\"end_scanned\":" FT_UINT64_DECIMAL_FORMAT ","
+				"\"start_incremental\":" FT_UINT64_DECIMAL_FORMAT ",\"end_incremental\":" FT_UINT64_DECIMAL_FORMAT ","
+				"\"start_full\":" FT_UINT64_DECIMAL_FORMAT ",\"end_full\":" FT_UINT64_DECIMAL_FORMAT ","
 				"\"incremental_publication\":%d,\"superseded\":%d,"
-				"\"superseded_frame\":%llu,\"completed\":%d}\n",
-				static_cast<unsigned long long>(edit.edit_id), edit.world_x,
+				"\"superseded_frame\":" FT_UINT64_DECIMAL_FORMAT ",\"completed\":%d}\n",
+				edit.edit_id, edit.world_x,
 				edit.world_y, edit.world_z,
-				static_cast<unsigned long long>(edit.start_frame),
-				static_cast<unsigned long long>(edit.authoritative_frame),
-				static_cast<unsigned long long>(edit.light_frame),
-				static_cast<unsigned long long>(edit.mesh_frame),
-				static_cast<unsigned long long>(edit.visible_frame),
-				static_cast<unsigned long long>(
-					edit.authoritative_elapsed_milliseconds),
-				static_cast<unsigned long long>(edit.light_elapsed_milliseconds),
-				static_cast<unsigned long long>(
-					edit.light_stage_elapsed_milliseconds),
-				static_cast<unsigned long long>(edit.mesh_elapsed_milliseconds),
-				static_cast<unsigned long long>(
-					edit.visible_elapsed_milliseconds),
-				static_cast<unsigned long long>(
-					edit.visible_stage_elapsed_milliseconds),
-				static_cast<unsigned long long>(edit.elapsed_milliseconds),
-				static_cast<unsigned long long>(edit.observed_frames),
-				static_cast<unsigned long long>(edit.start_scanned_cells),
-				static_cast<unsigned long long>(edit.end_scanned_cells),
-				static_cast<unsigned long long>(
-					edit.start_incremental_completed_count),
-				static_cast<unsigned long long>(
-					edit.end_incremental_completed_count),
-				static_cast<unsigned long long>(edit.start_full_completed_count),
-				static_cast<unsigned long long>(edit.end_full_completed_count),
+				edit.start_frame,
+				edit.authoritative_frame,
+				edit.light_frame,
+				edit.mesh_frame,
+				edit.visible_frame,
+				edit.authoritative_elapsed_milliseconds,
+				edit.light_elapsed_milliseconds,
+				edit.light_stage_elapsed_milliseconds,
+				edit.mesh_elapsed_milliseconds,
+				edit.visible_elapsed_milliseconds,
+				edit.visible_stage_elapsed_milliseconds,
+				edit.elapsed_milliseconds,
+				edit.observed_frames,
+				edit.start_scanned_cells,
+				edit.end_scanned_cells,
+				edit.start_incremental_completed_count,
+				edit.end_incremental_completed_count,
+				edit.start_full_completed_count,
+				edit.end_full_completed_count,
 				edit.incremental_light_publication ? 1 : 0,
 				edit.superseded ? 1 : 0,
-				static_cast<unsigned long long>(edit.superseded_frame),
+				edit.superseded_frame,
 				edit.completed ? 1 : 0) < 0)
 		{
 			std::fclose(file);
@@ -3163,71 +3139,71 @@ int32_t LightingObservationHarness::write_report(const char *path) const
 		index += 1U;
 	}
 	if (std::fprintf(file,
-			"{\"type\":\"summary\",\"status\":\"%s\"," 
+			"{\"type\":\"summary\",\"status\":\"%s\","
 			"\"edit_count\":%zu,"
 			"\"completed_edits\":%zu,\"superseded_edits\":%zu,"
 			"\"incomplete_edits\":%zu,"
-			"\"frames_retained\":%zu,\"frames_dropped\":%llu,"
+			"\"frames_retained\":%zu,\"frames_dropped\":" FT_UINT64_DECIMAL_FORMAT ","
 			"\"online_publication_error\":%d,"
 			"\"storage_error\":%d,"
 			"\"scenario_count\":%zu,\"scenario_failures\":%zu,"
 			"\"minimum_statistical_samples\":%zu,"
 			"\"statistically_insufficient\":%d,"
-			"\"p50_ms\":%llu,\"p90_ms\":%llu,\"p95_ms\":%llu,"
-			"\"p99_ms\":%llu,\"max_ms\":%llu,\"mad_ms\":%llu,"
-			"\"p50_authoritative_ms\":%llu,"
-			"\"p90_authoritative_ms\":%llu,"
-			"\"p95_authoritative_ms\":%llu,"
-			"\"p99_authoritative_ms\":%llu,"
-			"\"max_authoritative_ms\":%llu,"
-			"\"p50_light_ms\":%llu,\"p90_light_ms\":%llu,"
-			"\"p95_light_ms\":%llu,\"p99_light_ms\":%llu,"
-			"\"max_light_ms\":%llu,"
-			"\"p50_light_stage_ms\":%llu,"
-			"\"p90_light_stage_ms\":%llu,"
-			"\"p95_light_stage_ms\":%llu,"
-			"\"p99_light_stage_ms\":%llu,"
-			"\"max_light_stage_ms\":%llu,"
-			"\"p50_mesh_ms\":%llu,\"p90_mesh_ms\":%llu,"
-			"\"p95_mesh_ms\":%llu,\"p99_mesh_ms\":%llu,"
-			"\"max_mesh_ms\":%llu,"
-			"\"p50_visible_ms\":%llu,\"p90_visible_ms\":%llu,"
-			"\"p95_visible_ms\":%llu,\"p99_visible_ms\":%llu,"
-			"\"max_visible_ms\":%llu,"
-			"\"p50_visible_stage_ms\":%llu,"
-			"\"p90_visible_stage_ms\":%llu,"
-			"\"p95_visible_stage_ms\":%llu,"
-			"\"p99_visible_stage_ms\":%llu,"
-			"\"max_visible_stage_ms\":%llu,"
-			"\"scan_limit_cells\":%llu,\"p50_scanned_cells\":%llu,"
-			"\"p90_scanned_cells\":%llu,"
-			"\"p95_scanned_cells\":%llu,"
-			"\"p99_scanned_cells\":%llu,"
-			"\"max_scanned_cells\":%llu}\n",
+			"\"p50_ms\":" FT_UINT64_DECIMAL_FORMAT ",\"p90_ms\":" FT_UINT64_DECIMAL_FORMAT ",\"p95_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"p99_ms\":" FT_UINT64_DECIMAL_FORMAT ",\"max_ms\":" FT_UINT64_DECIMAL_FORMAT ",\"mad_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"p50_authoritative_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"p90_authoritative_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"p95_authoritative_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"p99_authoritative_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"max_authoritative_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"p50_light_ms\":" FT_UINT64_DECIMAL_FORMAT ",\"p90_light_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"p95_light_ms\":" FT_UINT64_DECIMAL_FORMAT ",\"p99_light_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"max_light_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"p50_light_stage_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"p90_light_stage_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"p95_light_stage_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"p99_light_stage_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"max_light_stage_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"p50_mesh_ms\":" FT_UINT64_DECIMAL_FORMAT ",\"p90_mesh_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"p95_mesh_ms\":" FT_UINT64_DECIMAL_FORMAT ",\"p99_mesh_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"max_mesh_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"p50_visible_ms\":" FT_UINT64_DECIMAL_FORMAT ",\"p90_visible_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"p95_visible_ms\":" FT_UINT64_DECIMAL_FORMAT ",\"p99_visible_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"max_visible_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"p50_visible_stage_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"p90_visible_stage_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"p95_visible_stage_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"p99_visible_stage_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"max_visible_stage_ms\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"scan_limit_cells\":" FT_UINT64_DECIMAL_FORMAT ",\"p50_scanned_cells\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"p90_scanned_cells\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"p95_scanned_cells\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"p99_scanned_cells\":" FT_UINT64_DECIMAL_FORMAT ","
+			"\"max_scanned_cells\":" FT_UINT64_DECIMAL_FORMAT "}\n",
 			(storage_error_ == FT_ERR_SUCCESS
 				&& observation_invariant_error_ == FT_ERR_SUCCESS
 				&& scenario_failure_count == 0U && incomplete_count == 0U)
 				? "PASS" : "FAIL",
 			edits_.size(), completed_count, superseded_count, incomplete_count,
 			frames_.size(),
-			static_cast<unsigned long long>(dropped_frame_count_),
+			dropped_frame_count_,
 			observation_invariant_error_,
 			storage_error_,
 			scenarios_.size(), scenario_failure_count,
 			LIGHT_HARNESS_MINIMUM_STATISTICAL_SAMPLES,
 			completed_count < LIGHT_HARNESS_MINIMUM_STATISTICAL_SAMPLES ? 1 : 0,
-			latencies.empty() ? 0ULL
-				: static_cast<unsigned long long>(latencies[p50_index]),
-			latencies.empty() ? 0ULL
-				: static_cast<unsigned long long>(latencies[p90_index]),
-			latencies.empty() ? 0ULL
-				: static_cast<unsigned long long>(latencies[p95_index]),
-			latencies.empty() ? 0ULL
-				: static_cast<unsigned long long>(latencies[p99_index]),
-			latencies.empty() ? 0ULL
-				: static_cast<unsigned long long>(latencies.back()),
-			deviations.empty() ? 0ULL
-				: static_cast<unsigned long long>(deviations[mad_index]),
+			latencies.empty() ? 0U
+				: latencies[p50_index],
+			latencies.empty() ? 0U
+				: latencies[p90_index],
+			latencies.empty() ? 0U
+				: latencies[p95_index],
+			latencies.empty() ? 0U
+				: latencies[p99_index],
+			latencies.empty() ? 0U
+				: latencies.back(),
+			deviations.empty() ? 0U
+				: deviations[mad_index],
 			percentile_value(authoritative_latencies, 50U),
 			percentile_value(authoritative_latencies, 90U),
 			percentile_value(authoritative_latencies, 95U),
@@ -3260,8 +3236,7 @@ int32_t LightingObservationHarness::write_report(const char *path) const
 			percentile_value(visible_stage_latencies, 99U),
 			visible_stage_latencies.empty() ? 0U
 				: visible_stage_latencies.back(),
-			static_cast<unsigned long long>(
-				LIGHT_HARNESS_MAX_INCREMENTAL_SCANNED_CELLS),
+			LIGHT_HARNESS_MAX_INCREMENTAL_SCANNED_CELLS,
 			percentile_value(scanned_cells, 50U),
 			percentile_value(scanned_cells, 90U),
 			percentile_value(scanned_cells, 95U),
@@ -3409,17 +3384,17 @@ int LightingTestHarness::validate_initial_light_oracle() noexcept
 	if (first_failure != FT_ERR_SUCCESS)
 	{
 		std::fprintf(stderr,
-			"lighting-harness: startup oracle failed error=%d frame=%llu "
+			"lighting-harness: startup oracle failed error=%d frame=" FT_UINT64_DECIMAL_FORMAT " "
 			"scenarios=%u scenario_failures=%u\n", first_failure,
-			static_cast<unsigned long long>(frame),
-			static_cast<unsigned int>(scenario_count),
-			static_cast<unsigned int>(scenario_failure_count));
+			frame,
+			scenario_count,
+			scenario_failure_count);
 		return (1);
 	}
 	std::fprintf(stderr,
-		"lighting-harness: startup oracle passed scenarios=%u frame=%llu\n",
-		static_cast<unsigned int>(scenario_count),
-		static_cast<unsigned long long>(frame));
+		"lighting-harness: startup oracle passed scenarios=%u frame=" FT_UINT64_DECIMAL_FORMAT "\n",
+		scenario_count,
+		frame);
 	return (0);
 }
 
@@ -3619,7 +3594,7 @@ int LightingTestHarness::validate_edit_matrix() noexcept
 				" light=" FT_UINT64_DECIMAL_FORMAT " mesh="
 				FT_UINT64_DECIMAL_FORMAT " content=%u light_version=%u "
 				"input=%u computed=%u valid=%d current=%d ready=%d "
-				"dirty=%d pending=%llu light_range=%u..%u faces=%u\n",
+				"dirty=%d pending=" FT_UINT64_DECIMAL_FORMAT " light_range=%u..%u faces=%u\n",
 				last.frame_index, last.edit_id, last.chunk_x, last.chunk_z,
 				last.voxel_revision, last.light_revision, last.mesh_revision,
 				static_cast<unsigned int>(last.content_version),
@@ -3628,7 +3603,7 @@ int LightingTestHarness::validate_edit_matrix() noexcept
 				static_cast<unsigned int>(last.computed_light_input_version),
 				last.light_buffer_valid ? 1 : 0, last.light_current ? 1 : 0,
 				last.light_ready_for_render ? 1 : 0, last.mesh_dirty ? 1 : 0,
-				static_cast<unsigned long long>(last.pending_mesh_request_id),
+				last.pending_mesh_request_id,
 				static_cast<unsigned int>(last.minimum_vertex_light),
 				static_cast<unsigned int>(last.maximum_vertex_light),
 				last.visible_face_count);
@@ -3658,14 +3633,14 @@ int LightingTestHarness::validate_edit_matrix() noexcept
 			"lighting-harness: edit matrix failed error=%d edits="
 			FT_UINT64_DECIMAL_FORMAT " scenarios=%u scenario_failures=%u "
 			"frame=" FT_UINT64_DECIMAL_FORMAT "\n", error_code, edit_id - 1U,
-			static_cast<unsigned int>(scenario_count),
-			static_cast<unsigned int>(scenario_failure_count), frame);
+			scenario_count,
+			scenario_failure_count, frame);
 		return (1);
 	}
 	std::printf("lighting-harness: edit matrix passed edits="
 		FT_UINT64_DECIMAL_FORMAT " scenarios=%u frames="
 		FT_UINT64_DECIMAL_FORMAT "\n", edit_id - 1U,
-		static_cast<unsigned int>(scenario_count), frame);
+		scenario_count, frame);
 	return (0);
 }
 int LightingTestHarness::validate_stress(uint32_t edit_count,
@@ -3720,7 +3695,7 @@ int LightingTestHarness::validate_stress(uint32_t edit_count,
 		return (1);
 	std::fprintf(stderr,
 		"[Validator] lighting-%s: begin edits=%u report=%s\n",
-		report_suffix, static_cast<unsigned int>(edit_count), report_path);
+		report_suffix, edit_count, report_path);
 	LightingHarnessWatchdogScope watchdog(LIGHT_HARNESS_WATCHDOG_REPORT);
 
 	if (watchdog.start() != FT_ERR_SUCCESS)
@@ -3800,14 +3775,13 @@ int LightingTestHarness::validate_stress(uint32_t edit_count,
 			std::fprintf(stderr,
 				"[Validator] lighting-%s: progress edits=%u/%u "
 				"frame=" FT_UINT64_DECIMAL_FORMAT " queue=%zu "
-				"interactive=%zu active=%zu stale=%llu scanned=%llu\n",
+				"interactive=%zu active=%zu stale=" FT_UINT64_DECIMAL_FORMAT " scanned=" FT_UINT64_DECIMAL_FORMAT "\n",
 				report_suffix, index + 1U, edit_count, frame,
 				diagnostics.remesh_priority_queue_depth,
 				diagnostics.interactive_remesh_queue_depth,
 				diagnostics.active_generation_count,
-				static_cast<unsigned long long>(
-					diagnostics.stale_remesh_result_count),
-				static_cast<unsigned long long>(diagnostics.remesh_scanned_cells));
+				diagnostics.stale_remesh_result_count,
+				diagnostics.remesh_scanned_cells);
 			std::fflush(stderr);
 		}
 		index += 1U;
@@ -3835,9 +3809,7 @@ int LightingTestHarness::validate_stress(uint32_t edit_count,
 		FT_UINT64_DECIMAL_FORMAT " scenarios=%u scenario_failures=%u\n",
 		report_suffix,
 		first_failure == FT_ERR_SUCCESS ? "passed" : "failed",
-		static_cast<unsigned int>(edit_count), frame,
-		static_cast<unsigned int>(scenario_count),
-		static_cast<unsigned int>(scenario_failure_count));
+		edit_count, frame, scenario_count, scenario_failure_count);
 	return (first_failure == FT_ERR_SUCCESS ? 0 : 1);
 }
 
@@ -3893,7 +3865,7 @@ int LightingTestHarness::validate_lifecycle() noexcept
 			world.destroy();
 		std::fprintf(stderr,
 			"lighting-harness: lifecycle cycle=%u result=%d\n",
-			static_cast<unsigned int>(cycle), error_code);
+			cycle, error_code);
 		scenario_count += 1U;
 		if (error_code != FT_ERR_SUCCESS)
 			scenario_failure_count += 1U;
@@ -3997,8 +3969,8 @@ int LightingTestHarness::validate_lifecycle() noexcept
 		"[Validator] lighting-lifecycle: %s scenarios=%u "
 		"scenario_failures=%u\n",
 		first_failure == FT_ERR_SUCCESS ? "passed" : "failed",
-		static_cast<unsigned int>(scenario_count),
-		static_cast<unsigned int>(scenario_failure_count));
+		scenario_count,
+		scenario_failure_count);
 	return (first_failure == FT_ERR_SUCCESS ? 0 : 1);
 }
 

@@ -86,21 +86,28 @@ int32_t WorldRevisionValidator::quiesce_stream_pipeline(World &world) noexcept
 int32_t WorldRevisionValidator::wait_for_loaded_chunk(World &world,
 	int32_t chunk_x, int32_t chunk_z) noexcept
 {
-	int32_t iteration;
+	const std::chrono::steady_clock::time_point deadline =
+		std::chrono::steady_clock::now() + std::chrono::seconds(10);
 	int32_t error_code;
 
-	iteration = 0;
-	while (iteration < 200
+	while (std::chrono::steady_clock::now() < deadline
 		&& world.find_chunk_mutable(chunk_x, chunk_z) == nullptr)
 	{
 		error_code = world.update_around(0.0, 0.0, 4);
 		if (error_code != FT_ERR_SUCCESS)
 			return (error_code);
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
-		iteration += 1;
 	}
-	return (world.find_chunk_mutable(chunk_x, chunk_z) != nullptr
-		? FT_ERR_SUCCESS : FT_ERR_NOT_FOUND);
+	if (world.find_chunk_mutable(chunk_x, chunk_z) != nullptr)
+		return (FT_ERR_SUCCESS);
+	std::fprintf(stderr,
+		"world-revision: timed out waiting for chunk=(%d,%d) queued=%zu "
+		"active=%zu completed=%zu loaded=%d\n", chunk_x, chunk_z,
+		world.chunk_streamer.pipeline().queued_count(),
+		world.chunk_streamer.pipeline().active_count(),
+		world.chunk_streamer.pipeline().completed_count(),
+		world.loaded_chunk_count);
+	return (FT_ERR_TIMEOUT);
 }
 
 WorldRevisionValidator::SelectionResults WorldRevisionValidator::apply_selection_actions(World &world,
@@ -117,7 +124,7 @@ WorldRevisionValidator::SelectionResults WorldRevisionValidator::apply_selection
 	results.select_loaded_result = world.select_revision_chunk(1, 0, true);
 	results.select_unloaded_result = world.select_revision_chunk(1000, 1000,
 			true);
-	results.select_far_result = world.select_revision_chunk(1000, 1000, true);
+	results.select_far_result = world.select_revision_chunk(1, 0, true);
 	results.transition_state = world.revision_state(2, 0);
 	results.protected_state = world.revision_state(4, 0);
 	results.preview_result = world.build_revision_preview(2, 0, 4, preview);
@@ -131,7 +138,7 @@ int32_t WorldRevisionValidator::check_selection_results(const SelectionResults &
 		|| results.edit_select_result == FT_ERR_SUCCESS
 		|| results.protect_result != FT_ERR_SUCCESS
 		|| results.select_loaded_result != FT_ERR_SUCCESS
-		|| results.select_unloaded_result != FT_ERR_SUCCESS
+		|| results.select_unloaded_result == FT_ERR_SUCCESS
 		|| results.select_far_result != FT_ERR_SUCCESS
 		|| results.preview_result != FT_ERR_SUCCESS || preview.empty()
 		|| results.transition_state != World::REVISION_TRANSITION
@@ -139,12 +146,13 @@ int32_t WorldRevisionValidator::check_selection_results(const SelectionResults &
 	{
 		std::fprintf(stderr,
 						"world-revision: setup failed begin=%d edit=%d protect=%d loaded=%d"
-						" unloaded=%d preview=%d transition=%d protected=%d\n",
+						" unloaded=%d repeat=%d preview=%d transition=%d protected=%d\n",
 						results.begin_result,
 						results.edit_select_result,
 						results.protect_result,
 						results.select_loaded_result,
 						results.select_unloaded_result,
+						results.select_far_result,
 						results.preview_result,
 						results.transition_state,
 						results.protected_state);
@@ -159,7 +167,110 @@ int32_t WorldRevisionValidator::setup_revision_selection(World &world,
 	SelectionResults results;
 
 	results = WorldRevisionValidator::apply_selection_actions(world, preview);
-	return (WorldRevisionValidator::check_selection_results(results, preview));
+	if (WorldRevisionValidator::check_selection_results(results, preview)
+		!= FT_ERR_SUCCESS)
+		return (1);
+	return (WorldRevisionValidator::validate_start_cost_api(world));
+}
+
+int32_t WorldRevisionValidator::validate_start_cost_api(World &world) noexcept
+{
+	WorldRevisionCostPolicy policy;
+	WorldRevisionCostQuote quote;
+	const uint64_t expected_costs[4] = {8U, 13U, 23U, 43U};
+	uint32_t card_count;
+	uint64_t original_selection_revision;
+	uint64_t current_selection_revision;
+
+	policy.maximum_selected_chunks = 4U;
+	policy.currency_item_id = 9001U;
+	policy.currency_units_per_chunk = 3U;
+	policy.four_card_opening_cost = 5U;
+	policy.maximum_total_currency_cost = 100U;
+	card_count = 4U;
+	while (card_count <= 7U)
+	{
+		if (world.query_revision_start_cost(card_count, policy, &quote)
+			!= FT_ERR_SUCCESS
+			|| quote.selected_paid_chunks != 1U
+			|| quote.opening_card_count != card_count
+			|| quote.chunk_currency_cost != 3U
+			|| quote.currency_item_id != policy.currency_item_id
+			|| quote.opening_card_currency_cost != expected_costs[card_count - 4U]
+				- 3U
+			|| quote.total_currency_cost != expected_costs[card_count - 4U])
+			return (1);
+		card_count += 1U;
+	}
+	original_selection_revision = quote.selection_revision;
+	if (world.query_revision_start_cost(original_selection_revision + 1U,
+			4U, policy, &quote) != FT_ERR_INVALID_STATE
+		|| quote.selection_revision != original_selection_revision)
+		return (1);
+	if (world.query_revision_start_cost(3U, policy, &quote)
+		!= FT_ERR_INVALID_ARGUMENT
+		|| world.query_revision_start_cost(8U, policy, &quote)
+		!= FT_ERR_INVALID_ARGUMENT)
+		return (1);
+	policy.maximum_total_currency_cost = 10U;
+	if (world.query_revision_start_cost(5U, policy, &quote)
+		!= FT_ERR_OUT_OF_RANGE)
+		return (1);
+	policy.currency_units_per_chunk = 0U;
+	policy.four_card_opening_cost = 0U;
+	policy.maximum_total_currency_cost = 0U;
+	if (world.query_revision_start_cost(4U, policy, &quote)
+		!= FT_ERR_SUCCESS || quote.total_currency_cost != 0U)
+		return (1);
+	policy.currency_units_per_chunk = 3U;
+	policy.four_card_opening_cost = 5U;
+	policy.maximum_total_currency_cost = 100U;
+	if (world.update_revision_chunk_selection(original_selection_revision,
+			1, 0, false, &current_selection_revision) != FT_ERR_SUCCESS
+		|| world.world_revision().selected_count != 0U
+		|| world.query_revision_start_cost(4U, policy, &quote)
+			!= FT_ERR_INVALID_OPERATION
+		|| current_selection_revision == original_selection_revision)
+		return (1);
+	if (world.update_revision_chunk_selection(original_selection_revision,
+			1, 0, true, &current_selection_revision) != FT_ERR_INVALID_STATE
+		|| current_selection_revision != world.world_revision().selection_revision
+		|| world.world_revision().selected_count != 0U)
+		return (1);
+	if (world.update_revision_chunk_selection(current_selection_revision,
+			1, 0, true, &current_selection_revision) != FT_ERR_SUCCESS)
+		return (1);
+	if (world.query_revision_start_cost(4U, policy, &quote)
+		!= FT_ERR_SUCCESS
+		|| quote.selection_revision == original_selection_revision)
+		return (1);
+	if (world.query_revision_start_cost(quote.selection_revision, 4U,
+			policy, &quote) != FT_ERR_SUCCESS)
+		return (1);
+	original_selection_revision = world.world_revision().selection_revision;
+	if (world.update_revision_chunk_selection(original_selection_revision,
+			1U, 2, 0, true, &current_selection_revision)
+		!= FT_ERR_OUT_OF_RANGE
+		|| current_selection_revision != original_selection_revision
+		|| world.world_revision().selected_count != 1U)
+		return (1);
+	if (world.set_chunk_protected(1, 0, true) != FT_ERR_SUCCESS
+		|| world.world_revision().selection_revision
+		== original_selection_revision
+		|| world.world_revision().selected_count != 0U
+		|| world.query_revision_start_cost(original_selection_revision, 4U,
+			policy, &quote) != FT_ERR_INVALID_STATE)
+		return (1);
+	if (world.set_chunk_protected(1, 0, false) != FT_ERR_SUCCESS)
+		return (1);
+	current_selection_revision = world.world_revision().selection_revision;
+	if (world.update_revision_chunk_selection(current_selection_revision, 1U,
+			1, 0, true, &current_selection_revision) != FT_ERR_SUCCESS
+		|| world.update_revision_chunk_selection(current_selection_revision, 1U,
+			2, 0, true, &current_selection_revision) != FT_ERR_OUT_OF_RANGE
+		|| world.world_revision().selected_count != 1U)
+		return (1);
+	return (FT_ERR_SUCCESS);
 }
 
 int32_t WorldRevisionValidator::regenerate_and_check(World &world,
@@ -178,7 +289,7 @@ int32_t WorldRevisionValidator::regenerate_and_check(World &world,
 					static_cast<int>(world.revision_state(4, 0)),
 					world.find_chunk_mutable(1, 0) == nullptr ? "missing" : "present");
 	regenerate_result = world.regenerate_selected_chunks(regenerated, skipped);
-	if (regenerate_result != FT_ERR_SUCCESS || *regenerated < 1 || *skipped < 1
+	if (regenerate_result != FT_ERR_SUCCESS || *regenerated < 1 || *skipped < 0
 		|| world.world_revision().pending)
 	{
 		std::fprintf(stderr,

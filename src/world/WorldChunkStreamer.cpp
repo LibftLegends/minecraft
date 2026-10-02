@@ -1,5 +1,6 @@
 #include "../../src/world/WorldChunkStreamer.hpp"
 #include "../../src/diagnostics/RuntimeAnalytics.hpp"
+#include "../../Libft/Modules/Basic/limits.hpp"
 #include <cstdlib>
 #include <cstdio>
 #include <chrono>
@@ -278,9 +279,10 @@ void WorldChunkStreamer::run_remesh_capture_worker() noexcept
 		if (stale_capture
 			&& this->stale_remesh_capture_count_ % 64U == 0U)
 			std::fprintf(stderr,
-				"[WorldGen] stale remesh capture request=%llu chunk=(%d,%d) "
-				"task_epoch=%llu current_epoch=%llu\n",
-				static_cast<unsigned long long>(task.request_id), task.chunk_x,
+				"[WorldGen] stale remesh capture request=" FT_UINT64_DECIMAL_FORMAT
+				" chunk=(%d,%d) task_epoch=" FT_UINT64_DECIMAL_FORMAT
+				" current_epoch=" FT_UINT64_DECIMAL_FORMAT "\n",
+				task.request_id, task.chunk_x,
 				task.chunk_z,
 				task.relevance_epoch,
 				this->remesh_capture_relevance_epoch_.load());

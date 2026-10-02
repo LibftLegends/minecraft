@@ -14,6 +14,7 @@
 #include "../../src/queries/WorldRaycaster.hpp"
 #include "../../src/validators/WorldVisibilityValidator.hpp"
 #include "../../src/world/WorldGenerationPipeline.hpp"
+#include "../../src/world/WorldRevisionPricing.hpp"
 #include <chrono>
 #include <shared_mutex>
 
@@ -42,6 +43,7 @@ class World
 	struct							WorldRevision
 	{
 		uint32_t					identifier;
+		uint64_t				selection_revision;
 		uint32_t					stage_mask;
 		RegenerationMode			mode;
 		bool						pending;
@@ -222,6 +224,20 @@ class World
 	WorldRevision world_revision() const;
 	int32_t select_revision_chunk(int32_t chunk_x, int32_t chunk_z,
 		bool selected);
+	int32_t update_revision_chunk_selection(
+		uint64_t expected_selection_revision, int32_t chunk_x, int32_t chunk_z,
+		bool selected, uint64_t *current_selection_revision);
+	int32_t update_revision_chunk_selection(
+		uint64_t expected_selection_revision, uint32_t maximum_selected_chunks,
+		int32_t chunk_x, int32_t chunk_z, bool selected,
+		uint64_t *current_selection_revision);
+	int32_t unselect_revision_chunk(int32_t chunk_x, int32_t chunk_z);
+	int32_t query_revision_start_cost(uint32_t opening_card_count,
+		const WorldRevisionCostPolicy &policy,
+		WorldRevisionCostQuote *quote) const;
+	int32_t query_revision_start_cost(uint64_t expected_selection_revision,
+		uint32_t opening_card_count, const WorldRevisionCostPolicy &policy,
+		WorldRevisionCostQuote *quote) const;
 	int32_t set_chunk_protected(int32_t chunk_x, int32_t chunk_z,
 		bool protected_state);
 	bool is_chunk_protected(int32_t chunk_x, int32_t chunk_z) const;

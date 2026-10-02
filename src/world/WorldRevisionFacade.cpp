@@ -16,6 +16,7 @@ World::WorldRevision World::world_revision() const
 	WorldRevision result;
 
 	result.identifier = this->revision_manager.identifier();
+	result.selection_revision = this->revision_manager.selection_revision();
 	result.stage_mask = this->revision_manager.stage_mask();
 	result.mode = static_cast<RegenerationMode>(this->revision_manager.mode());
 	result.pending = this->revision_manager.pending();
@@ -29,6 +30,44 @@ int32_t World::select_revision_chunk(int32_t chunk_x, int32_t chunk_z,
 	bool selected)
 {
 	return (this->revision_manager.select_chunk(chunk_x, chunk_z, selected));
+}
+
+int32_t World::update_revision_chunk_selection(
+	uint64_t expected_selection_revision, int32_t chunk_x, int32_t chunk_z,
+	bool selected, uint64_t *current_selection_revision)
+{
+	return (this->revision_manager.select_chunk(expected_selection_revision,
+			chunk_x, chunk_z, selected, current_selection_revision));
+}
+
+int32_t World::update_revision_chunk_selection(
+	uint64_t expected_selection_revision, uint32_t maximum_selected_chunks,
+	int32_t chunk_x, int32_t chunk_z, bool selected,
+	uint64_t *current_selection_revision)
+{
+	return (this->revision_manager.select_chunk(expected_selection_revision,
+			maximum_selected_chunks, chunk_x, chunk_z, selected,
+			current_selection_revision));
+}
+
+int32_t World::unselect_revision_chunk(int32_t chunk_x, int32_t chunk_z)
+{
+	return (this->revision_manager.unselect_chunk(chunk_x, chunk_z));
+}
+
+int32_t World::query_revision_start_cost(uint32_t opening_card_count,
+	const WorldRevisionCostPolicy &policy, WorldRevisionCostQuote *quote) const
+{
+	return (this->revision_manager.query_start_cost(opening_card_count, policy,
+			quote));
+}
+
+int32_t World::query_revision_start_cost(uint64_t expected_selection_revision,
+	uint32_t opening_card_count, const WorldRevisionCostPolicy &policy,
+	WorldRevisionCostQuote *quote) const
+{
+	return (this->revision_manager.query_start_cost(expected_selection_revision,
+			opening_card_count, policy, quote));
 }
 
 int32_t World::set_chunk_protected(int32_t chunk_x, int32_t chunk_z,

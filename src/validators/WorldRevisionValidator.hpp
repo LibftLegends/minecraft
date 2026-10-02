@@ -30,6 +30,7 @@ class WorldRevisionValidator : public IValidator
 		const std::vector<World::RevisionPreviewEntry> &preview) noexcept;
 	static int32_t setup_revision_selection(World &world,
 		std::vector<World::RevisionPreviewEntry> &preview) noexcept;
+	static int32_t validate_start_cost_api(World &world) noexcept;
 	static int32_t regenerate_and_check(World &world, int32_t *regenerated,
 		int32_t *skipped) noexcept;
 	static int32_t roundtrip_metadata(World &world) noexcept;

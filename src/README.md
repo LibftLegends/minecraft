@@ -83,6 +83,25 @@ unchanged categories for a map client. Revision identifiers and manual
 protection can be persisted with `save_revision_metadata` and restored with
 `load_revision_metadata`.
 
+`unselect_revision_chunk` explicitly removes one selected coordinate, and
+`update_revision_chunk_selection` is the compare-and-set API: it requires the
+64-bit expected selection revision and returns the current revision, rejecting
+stale selection updates without applying them. The revision is visible through
+`World::world_revision()`.
+`query_revision_start_cost` returns a read-only quote from the authoritative
+selected set and a caller-supplied `WorldRevisionCostPolicy`. The quote keeps
+paid chunk count, currency item ID, chunk cost, opening-card count/cost, total
+currency cost, regeneration ID and selection revision in separate fields. The
+policy supplies a nonzero currency item ID, per-chunk units, opening-deal base
+price and total cap. Any actual selection
+change advances the selection revision; callers can pass that revision to the
+query overload to reject a stale quote request. Opening deals accept 4–7 cards;
+if `B4` is the
+configured four-card price, their total prices are `B4`, `2*B4`, `4*B4`, and
+`8*B4`. Arithmetic and total-cost caps are checked. These APIs do not debit a
+player balance, start a CardGame session, reserve chunks, or specify a client
+UI; those belong to the future authoritative regeneration-session adapter.
+
 Network or multiplayer adapters should submit a `World::RevisionRequest` to
 `World::apply_revision_request`; it performs the server-side validation and
 returns a `RevisionRequestResult` rather than requiring clients to mutate the

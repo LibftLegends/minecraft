@@ -3,6 +3,7 @@
 
 # include "../../src/world/WorldChunkStreamer.hpp"
 # include "../../src/world/WorldRegenerationProgress.hpp"
+# include "../../src/world/WorldRevisionPricing.hpp"
 
 class WorldRevisionManager
 {
@@ -16,6 +17,7 @@ class WorldRevisionManager
 	World &world_;
 	bool						pending_;
 	uint32_t					revision_id_;
+	uint64_t				selection_revision_;
 	uint32_t					stage_mask_;
 	int32_t						mode_;
 	voxel_generation_config	config_;
@@ -38,9 +40,23 @@ class WorldRevisionManager
 	bool pending() const noexcept;
 	bool regenerating() const noexcept;
 	std::size_t selected_count() const noexcept;
+	uint64_t selection_revision() const noexcept;
 	std::size_t manually_protected_count() const noexcept;
 	int32_t select_chunk(int32_t chunk_x, int32_t chunk_z,
 		bool selected) noexcept;
+	int32_t select_chunk(uint64_t expected_selection_revision,
+		int32_t chunk_x, int32_t chunk_z, bool selected,
+		uint64_t *current_selection_revision) noexcept;
+	int32_t select_chunk(uint64_t expected_selection_revision,
+		uint32_t maximum_selected_chunks, int32_t chunk_x, int32_t chunk_z,
+		bool selected, uint64_t *current_selection_revision) noexcept;
+	int32_t unselect_chunk(int32_t chunk_x, int32_t chunk_z) noexcept;
+	int32_t query_start_cost(uint32_t opening_card_count,
+		const WorldRevisionCostPolicy &policy,
+		WorldRevisionCostQuote *quote) const noexcept;
+	int32_t query_start_cost(uint64_t expected_selection_revision,
+		uint32_t opening_card_count, const WorldRevisionCostPolicy &policy,
+		WorldRevisionCostQuote *quote) const noexcept;
 	int32_t set_chunk_protected(int32_t chunk_x, int32_t chunk_z,
 		bool protected_state) noexcept;
 	bool is_chunk_protected(int32_t chunk_x, int32_t chunk_z) const noexcept;
