@@ -40,6 +40,21 @@ bool PlayerMovement::player_in_water(const Camera &camera, const World &world)
 		&& blk == VOXEL_GENERATOR_WATER_BLOCK);
 }
 
+bool PlayerMovement::player_on_ladder(const Camera &camera, const World &world)
+{
+	const int32_t x = static_cast<int32_t>(std::floor(camera.x));
+	const int32_t z = static_cast<int32_t>(std::floor(camera.z));
+	const int32_t feet_y = static_cast<int32_t>(std::floor(camera.y - 1.5));
+	for (int32_t y = feet_y; y <= feet_y + 2; ++y)
+	{
+		uint32_t block = 0U;
+		if (world.block_id_at(x, y, z, &block)
+			&& block == VOXEL_GENERATOR_LADDER_BLOCK)
+			return (true);
+	}
+	return (false);
+}
+
 PlayerMovement::LocalDirection PlayerMovement::local_direction_from_input(
 	const CameraInput &input)
 {
@@ -222,7 +237,13 @@ void PlayerMovement::update_player_vertical_motion(Camera *camera,
 	if (camera == nullptr || delta_seconds <= 0.0)
 		return ;
 	in_water = player_in_water(*camera, world);
-	if (in_water == true)
+	if (player_on_ladder(*camera, world))
+	{
+		camera->vertical_velocity = input.jump_held ? 4.0
+			: (input.move_backward ? -4.0 : 0.0);
+		camera->on_ground = false;
+	}
+	else if (in_water == true)
 		update_water_velocity(camera, input, delta_seconds);
 	else
 		update_air_velocity(camera, input, delta_seconds);

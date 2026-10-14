@@ -25,6 +25,10 @@ class WorldReplicationClientRuntime
 		void *user_data) noexcept;
 	int32_t set_replica_store(WorldReplicationReplicaStore *store) noexcept;
 	int32_t set_cursor_store(WorldReplicationCursorStore *store) noexcept;
+	int32_t set_world_item_snapshot_callback(
+		world_replication_world_item_snapshot_callback callback,
+		void *user_data) noexcept;
+	int32_t set_world_item_replica_store(WorldItemReplicaStore *store) noexcept;
 	int32_t restore_cursor(uint64_t subscription_id,
 		networking_replication_peer_cursor &cursor) const;
 	int32_t persist_cursor(

@@ -44,6 +44,7 @@ class BlockEditValidator : public IValidator
 	static int validate_neighbor_arrival_after_completed_edit(
 		World &world) noexcept;
 	static int validate_authoritative_edit(World &world) noexcept;
+	static int validate_paper_reed_regrowth_tick() noexcept;
 	static int report_mesh_result(size_t before, size_t after_place,
 		size_t after_delete);
 
@@ -54,6 +55,8 @@ class BlockEditValidator : public IValidator
 	BlockEditValidator &operator=(const BlockEditValidator &other);
 
 	virtual int validate() const override;
+	static int validate_mining_drop() noexcept;
+	static int validate_wheat_crop() noexcept;
 };
 
 #endif

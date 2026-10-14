@@ -22,6 +22,7 @@ class WorldGenerationPipeline
 {
   public:
 	static constexpr int32_t LIGHT_SNAPSHOT_HALO = 15;
+	static constexpr std::size_t DEFAULT_MAXIMUM_QUEUED_REQUESTS = 256U;
 	enum class WorldGenerationOperation : uint8_t
 	{
 		STREAM = 0,
@@ -97,6 +98,54 @@ class WorldGenerationPipeline
 		int32_t z;
 		uint8_t channel;
 		uint8_t level;
+	};
+
+	struct GenerationFeaturePlan
+	{
+		static const uint32_t MAXIMUM_SPAWNER_DEFINITIONS = 16U;
+		static const uint32_t MAXIMUM_LOOT_DROPS = 16U;
+		static const uint32_t MAXIMUM_FEATURE_PLANS_PER_REQUEST = 4096U;
+		struct SpawnerDefinition
+		{
+			double x;
+			double y;
+			double z;
+			uint32_t entity_type;
+			uint32_t maximum_alive;
+			uint32_t spawn_interval_ticks;
+			uint32_t loot_table_id;
+		};
+		struct LootDrop
+		{
+			int32_t item_id;
+			int32_t quantity;
+			double x;
+			double y;
+			double z;
+		};
+		enum : uint32_t
+		{
+			VILLAGE = 1U,
+			SURFACE_MAGMA_POOL = 2U,
+			VOLCANO = 3U,
+			RUINED_VILLAGE = 4U,
+			SHIPWRECK = 5U,
+			DESERT_PYRAMID = 6U,
+			ANCIENT_CANOPY = 7U,
+			SPIDER_NEST = 8U,
+			INSTABILITY_OVERLAY = 9U
+		};
+		uint32_t kind;
+		uint64_t host_intent_sequence;
+		uint32_t ordinal;
+		int32_t volcano_anchor_chunk_x;
+		int32_t volcano_anchor_chunk_z;
+		uint32_t volcano_footprint_chunks;
+		/* Host-authored world positions; the result applier publishes only
+		 * definitions owned by the chunk currently being committed. */
+		std::vector<SpawnerDefinition> spawner_definitions;
+		/* Optional host-owned ground rewards published with the chunk. */
+		std::vector<LootDrop> loot_drops;
 	};
 
 	struct IncrementalLightDelta
@@ -190,6 +239,7 @@ class WorldGenerationPipeline
 		std::unique_ptr<voxel_light_chunk> light;
 		std::vector<IncrementalLightDelta> incremental_light_deltas;
 		std::vector<WorldDeferredBlockEdit> deferred_edits;
+		std::vector<GenerationFeaturePlan> applied_feature_plans;
 
 		~Result() noexcept;
 	};
@@ -253,6 +303,23 @@ class WorldGenerationPipeline
 		uint64_t cancellation_token_value;
 		std::unique_ptr<WorldChunkSnapshot> snapshot;
 		std::vector<WorldDeferredBlockEdit> deferred_edits;
+		std::vector<GenerationFeaturePlan> feature_plans;
+	};
+
+	struct GenerationSubmission
+	{
+		uint64_t request_id;
+		uint64_t world_epoch;
+		uint64_t relevance_epoch;
+		uint32_t generation_revision;
+		int32_t chunk_x;
+		int32_t chunk_z;
+		const char *seed;
+		const voxel_generation_config *config;
+		uint32_t stage_mask;
+		WorldGenerationOperation operation;
+		const WorldChunkSnapshot *source_snapshot;
+		const std::vector<GenerationFeaturePlan> *feature_plans;
 	};
 
 	WorldGenerationPipeline() noexcept;
@@ -263,6 +330,8 @@ class WorldGenerationPipeline
 	int32_t initialize(std::size_t worker_count,
 		std::size_t maximum_queued) noexcept;
 	int32_t destroy() noexcept;
+	int32_t submit_generation_batch(
+		const std::vector<GenerationSubmission> &submissions) noexcept;
 	int32_t submit_generation(uint64_t request_id, uint64_t world_epoch,
 		uint64_t relevance_epoch, uint32_t generation_revision, int32_t chunk_x,
 		int32_t chunk_z, const char *seed,

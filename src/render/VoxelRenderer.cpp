@@ -1,6 +1,11 @@
 #include "../../src/render/VoxelRenderer.hpp"
 #include "../../src/diagnostics/RuntimeAnalytics.hpp"
+#include "../../src/physics/PlayerGeometry.hpp"
+#include <algorithm>
+#include <cstddef>
 #include <cstdio>
+#include <cmath>
+#include <vector>
 #if defined(LIBFT_ENABLE_ANALYTICS)
 # include <chrono>
 #endif
@@ -13,7 +18,12 @@ VoxelRenderer::VoxelRenderer()
 	_overlay_fb.width = OVERLAY_W;
 	_overlay_fb.height = OVERLAY_H;
 	_overlay_fb.pixels = _overlay_buf;
+	_debug_overlay_fb.width = OVERLAY_W;
+	_debug_overlay_fb.height = OVERLAY_H;
+	_debug_overlay_fb.pixels = _debug_overlay_buf;
 	_overlay_frame = 0U;
+	_gpu_debug_overlay_valid = false;
+	_gpu_item_overlay_visible = false;
 	_software_diagnostic_frame = 0U;
 	_software_visibility_cache_valid = false;
 	_software_visibility_geometry_signature = 0U;
@@ -36,7 +46,12 @@ VoxelRenderer::VoxelRenderer(const VoxelRenderer &other)
 	_overlay_fb.width = OVERLAY_W;
 	_overlay_fb.height = OVERLAY_H;
 	_overlay_fb.pixels = _overlay_buf;
+	_debug_overlay_fb.width = OVERLAY_W;
+	_debug_overlay_fb.height = OVERLAY_H;
+	_debug_overlay_fb.pixels = _debug_overlay_buf;
 	_overlay_frame = 0U;
+	_gpu_debug_overlay_valid = false;
+	_gpu_item_overlay_visible = false;
 	_software_diagnostic_frame = 0U;
 	_software_visibility_cache_valid = false;
 	_software_visibility_geometry_signature = 0U;
@@ -63,27 +78,157 @@ VoxelRenderer &VoxelRenderer::operator=(const VoxelRenderer &other)
 	return (*this);
 }
 
-void VoxelRenderer::render_gpu_overlay(const RenderDebug *debug)
+void VoxelRenderer::render_gpu_overlay(const RenderDebug *debug,
+	const Camera &camera, const World &world)
 {
-	if (debug == nullptr)
-		return ;
 	_overlay_frame += 1U;
-	if (_overlay_frame % 15U == 1U)
+	bool debug_overlay_changed = false;
+	if (debug == nullptr)
+	{
+		debug_overlay_changed = _gpu_debug_overlay_valid;
+		std::fill_n(_debug_overlay_buf, OVERLAY_W * OVERLAY_H, 0U);
+		_gpu_debug_overlay_valid = false;
+	}
+	else if (!_gpu_debug_overlay_valid || _overlay_frame % 15U == 1U)
 	{
 		int32_t analytics_error = RuntimeAnalytics::begin_scope(
 			RuntimeAnalyticsScope::GPU_OVERLAY);
 		if (analytics_error != FT_ERR_SUCCESS)
 			std::fprintf(stderr, "Analytics: overlay scope start failed (%d)\n",
 				analytics_error);
-		std::fill_n(_overlay_buf, OVERLAY_W * OVERLAY_H, 0U);
-		DebugOverlayRenderer::draw_debug_overlay(_overlay_fb, debug);
-		this->gpu.upload_overlay(_overlay_buf, OVERLAY_W, OVERLAY_H);
+		std::fill_n(_debug_overlay_buf, OVERLAY_W * OVERLAY_H, 0U);
+		DebugOverlayRenderer::draw_debug_overlay(_debug_overlay_fb, debug);
+		_gpu_debug_overlay_valid = true;
+		debug_overlay_changed = true;
 		analytics_error = RuntimeAnalytics::end_scope();
 		if (analytics_error != FT_ERR_SUCCESS)
 			std::fprintf(stderr, "Analytics: overlay scope end failed (%d)\n",
 				analytics_error);
 	}
-	this->gpu.draw_overlay();
+	std::copy(_debug_overlay_buf,
+		_debug_overlay_buf + OVERLAY_W * OVERLAY_H, _overlay_buf);
+	const bool items_visible = draw_world_item_markers(_overlay_fb,
+		camera, world);
+	if (debug_overlay_changed || items_visible || _gpu_item_overlay_visible)
+	{
+		this->gpu.upload_overlay(_overlay_buf, OVERLAY_W, OVERLAY_H);
+		this->gpu.draw_overlay();
+	}
+	_gpu_item_overlay_visible = items_visible;
+}
+
+bool VoxelRenderer::draw_world_item_markers(ft_render_framebuffer &framebuffer,
+	const Camera &camera, const World &world) const
+{
+	const WorldItemStore *items = world.item_store();
+	std::vector<WorldItemSnapshot> visible_items;
+	if (framebuffer.pixels == nullptr || framebuffer.width <= 0
+		|| framebuffer.height <= 0 || items == nullptr
+		|| items->query_renderable(camera.x, camera.y, camera.z, 32.0,
+			&visible_items) != FT_ERR_SUCCESS)
+		return (false);
+	if (visible_items.empty())
+		return (false);
+	std::sort(visible_items.begin(), visible_items.end(),
+		[&camera](const WorldItemSnapshot &left,
+			const WorldItemSnapshot &right)
+		{
+			const double left_x = left.x - camera.x;
+			const double left_y = left.y - camera.y;
+			const double left_z = left.z - camera.z;
+			const double right_x = right.x - camera.x;
+			const double right_y = right.y - camera.y;
+			const double right_z = right.z - camera.z;
+			const double left_distance = left_x * left_x + left_y * left_y
+				+ left_z * left_z;
+			const double right_distance = right_x * right_x
+				+ right_y * right_y + right_z * right_z;
+			return (left_distance < right_distance
+				|| (left_distance == right_distance
+					&& left.entity_id < right.entity_id));
+		});
+	const std::size_t marker_count = std::min<std::size_t>(
+		visible_items.size(), 48U);
+	static const double tangent_half_fov = 0.83909963117728;
+	double forward_x = 0.0;
+	double forward_y = 0.0;
+	double forward_z = 0.0;
+	PlayerGeometry::camera_forward(camera, &forward_x, &forward_y, &forward_z);
+	const double right_x = std::cos(camera.yaw);
+	const double right_z = -std::sin(camera.yaw);
+	const double up_x = -forward_y * std::sin(camera.yaw);
+	const double up_y = std::cos(camera.pitch);
+	const double up_z = -forward_y * std::cos(camera.yaw);
+	const double focal_length = static_cast<double>(framebuffer.width)
+		/ (2.0 * tangent_half_fov);
+	bool rendered = false;
+	for (std::size_t index = 0U; index < marker_count; ++index)
+	{
+		const WorldItemSnapshot &item = visible_items[index];
+		const double offset_x = item.x - camera.x;
+		const double offset_y = item.y + 0.12 - camera.y;
+		const double offset_z = item.z - camera.z;
+		const double depth = offset_x * forward_x + offset_y * forward_y
+			+ offset_z * forward_z;
+		if (depth < 0.25 || depth > 32.0)
+			continue ;
+		const double distance = std::sqrt(offset_x * offset_x
+			+ offset_y * offset_y + offset_z * offset_z);
+		if (distance > 0.45)
+		{
+			int32_t block_x = 0;
+			int32_t block_y = 0;
+			int32_t block_z = 0;
+			const int32_t ray_result = world.raycast_solid(camera.x, camera.y,
+				camera.z, offset_x / distance, offset_y / distance,
+				offset_z / distance, distance - 0.3, &block_x, &block_y,
+				&block_z);
+			if (ray_result == FT_ERR_SUCCESS
+				|| (ray_result != FT_ERR_INVALID_ARGUMENT
+					&& ray_result != FT_ERR_NOT_FOUND))
+				continue ;
+		}
+		const double right_projection = offset_x * right_x
+			+ offset_z * right_z;
+		const double up_projection = offset_x * up_x
+			+ offset_y * up_y + offset_z * up_z;
+		const int32_t screen_x = static_cast<int32_t>(
+			static_cast<double>(framebuffer.width) * 0.5
+			+ right_projection * focal_length / depth);
+		const int32_t screen_y = static_cast<int32_t>(
+			static_cast<double>(framebuffer.height) * 0.5
+			- up_projection * focal_length / depth);
+		const int32_t radius = std::max(2, std::min(5,
+			static_cast<int32_t>(7.0 / std::sqrt(depth))));
+		if (screen_x + radius < 0 || screen_y + radius < 0
+			|| screen_x - radius >= framebuffer.width
+			|| screen_y - radius >= framebuffer.height)
+			continue ;
+		const uint32_t hash = static_cast<uint32_t>(item.item_id) * 2654435761U;
+		const uint32_t color = RendererColor::rgba(
+			static_cast<uint8_t>(75U + (hash & 0x9FU)),
+			static_cast<uint8_t>(75U + ((hash >> 8U) & 0x9FU)),
+			static_cast<uint8_t>(75U + ((hash >> 16U) & 0x9FU)));
+		for (int32_t y = screen_y - radius; y <= screen_y + radius; ++y)
+		{
+			if (y < 0 || y >= framebuffer.height)
+				continue ;
+			for (int32_t x = screen_x - radius; x <= screen_x + radius; ++x)
+			{
+				if (x < 0 || x >= framebuffer.width)
+					continue ;
+				const bool border = x == screen_x - radius
+					|| x == screen_x + radius || y == screen_y - radius
+					|| y == screen_y + radius;
+				framebuffer.pixels[static_cast<std::size_t>(y)
+					* static_cast<std::size_t>(framebuffer.width)
+					+ static_cast<std::size_t>(x)] = border
+					? RendererColor::rgba(20U, 20U, 20U) : color;
+			}
+		}
+		rendered = true;
+	}
+	return (rendered);
 }
 
 void VoxelRenderer::render_world_gpu(const Camera &camera, const World &world,
@@ -103,7 +248,7 @@ void VoxelRenderer::render_world_gpu(const Camera &camera, const World &world,
 			static_cast<int32_t>(std::floor(camera.z)), &eye_block)
 		&& eye_block == VOXEL_GENERATOR_WATER_BLOCK)
 		this->gpu.draw_tint(0.05f, 0.35f, 0.75f, 0.35f);
-	render_gpu_overlay(debug);
+	render_gpu_overlay(debug, camera, world);
 	analytics_error = RuntimeAnalytics::end_scope();
 	if (analytics_error != FT_ERR_SUCCESS)
 		std::fprintf(stderr, "Analytics: GPU render scope end failed (%d)\n",
@@ -293,6 +438,7 @@ void VoxelRenderer::render_world_software(ft_render_framebuffer &framebuffer,
 	this->target.blit_to(framebuffer);
 	if (debug != nullptr)
 	DebugOverlayRenderer::draw_debug_overlay(framebuffer, &local_debug);
+	(void)this->draw_world_item_markers(framebuffer, camera, world);
 	DebugOverlayRenderer::draw_crosshair(framebuffer);
 	analytics_error = RuntimeAnalytics::end_scope();
 	if (analytics_error != FT_ERR_SUCCESS)

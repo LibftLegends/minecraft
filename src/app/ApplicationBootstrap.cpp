@@ -49,6 +49,16 @@ int ApplicationBootstrap::run_validators(const ApplicationOptions &options)
 		return (ApplicationValidator::validate_voxel_configuration());
 	if (options.validate_world_revision_mode)
 		return (ApplicationValidator::validate_world_revision());
+	if (options.validate_item_catalog_mode)
+		return (ApplicationValidator::validate_item_catalog());
+	if (options.validate_world_items_mode)
+		return (ApplicationValidator::validate_world_items());
+	if (options.validate_wheat_crop_mode)
+		return (ApplicationValidator::validate_wheat_crop());
+	if (options.validate_transaction_journal_mode)
+		return (ApplicationValidator::validate_transaction_journal());
+	if (options.validate_regeneration_cards_mode)
+		return (ApplicationValidator::validate_regeneration_cards());
 	if (options.validate_async_generation_mode)
 		return (ApplicationValidator::validate_async_generation());
 	if (options.validate_network_repair_mode)

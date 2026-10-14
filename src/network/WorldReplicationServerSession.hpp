@@ -3,6 +3,9 @@
 
 # include "ProtocolChunkAcknowledgementMessage.hpp"
 # include "ProtocolEditIntentMessage.hpp"
+# include "ProtocolBoatMoveIntentMessage.hpp"
+# include "ProtocolBoatMoveResultMessage.hpp"
+# include "ProtocolEntityUpdateMessage.hpp"
 # include "ProtocolChunkRequestMessage.hpp"
 # include "ProtocolChunkSyncRequestMessage.hpp"
 # include "ProtocolChunkInterestMessage.hpp"
@@ -24,6 +27,16 @@ typedef int32_t (*world_replication_repair_request_callback)(
 typedef int32_t (*world_replication_sync_request_callback)(
 	const ProtocolChunkSyncRequestMessage &request,
 	uint64_t connection_id, void *user_data) noexcept;
+/* Host resolves the authenticated key and applies the move. On a handled
+ * request, return SUCCESS and put the domain outcome in result.result_code;
+ * successful results must include the committed entity snapshot/revision. */
+typedef int32_t (*world_replication_boat_move_callback)(
+	const uint8_t authenticated_public_key[32],
+	const ProtocolBoatMoveIntentMessage &intent,
+	ProtocolBoatMoveResultMessage &result, void *user_data) noexcept;
+typedef int32_t (*world_replication_entity_broadcast_callback)(
+	const EntityState &entity, uint64_t source_connection_id,
+	void *user_data) noexcept;
 
 class WorldReplicationServerSession
 {
@@ -53,12 +66,20 @@ class WorldReplicationServerSession
 		world_replication_repair_request_callback callback, void *user_data);
 	int32_t set_sync_request_callback(
 		world_replication_sync_request_callback callback, void *user_data);
+	int32_t set_boat_move_callback(
+		world_replication_boat_move_callback callback, void *user_data);
+	int32_t set_entity_broadcast_callback(
+		world_replication_entity_broadcast_callback callback,
+		void *user_data);
+	int32_t publish_entity_update(const EntityState &entity);
 	int32_t publish_block_delta(const game_block_delta &delta);
 	int32_t publish_light_delta(
 		const ProtocolChunkLightDeltaMessage &delta);
 	int32_t publish_hash_manifest(
 		const ProtocolChunkHashManifestMessage &manifest);
 	int32_t send_snapshot(int32_t chunk_x, int32_t chunk_z);
+	int32_t refresh_item_snapshots(uint32_t maximum_snapshots,
+		uint32_t &processed_snapshots);
 	int32_t destroy();
 
   private:
@@ -73,7 +94,9 @@ class WorldReplicationServerSession
 	uint64_t acknowledged_light_revision_[WORLD_REPLICATION_MAX_SUBSCRIPTIONS];
 	uint64_t acknowledged_generation_epoch_[WORLD_REPLICATION_MAX_SUBSCRIPTIONS];
 	uint8_t snapshot_acknowledged_[WORLD_REPLICATION_MAX_SUBSCRIPTIONS];
+	uint64_t item_snapshot_revision_[WORLD_REPLICATION_MAX_SUBSCRIPTIONS];
 	uint32_t subscription_count_;
+	uint32_t next_item_snapshot_cursor_;
 	game_block_change_request recent_edit_requests_[
 		WORLD_REPLICATION_MAX_EDIT_RESULTS];
 	ProtocolEditResultMessage recent_edit_results_[
@@ -86,6 +109,10 @@ class WorldReplicationServerSession
 	void *repair_request_user_data_;
 	world_replication_sync_request_callback sync_request_callback_;
 	void *sync_request_user_data_;
+	world_replication_boat_move_callback boat_move_callback_;
+	void *boat_move_user_data_;
+	world_replication_entity_broadcast_callback entity_broadcast_callback_;
+	void *entity_broadcast_user_data_;
 	bool initialized_;
 
 	int32_t process_edit_intent(ft_byte_buffer &payload,
@@ -95,6 +122,7 @@ class WorldReplicationServerSession
 	int32_t process_chunk_interest(ft_byte_buffer &payload);
 	int32_t process_acknowledgement(ft_byte_buffer &payload);
 	int32_t process_repair_request(ft_byte_buffer &payload);
+	int32_t process_boat_move_intent(ft_byte_buffer &payload);
 	int32_t process_cached_edit(const ProtocolEditIntentMessage &intent,
 		uint32_t cache_index);
 	int32_t cache_edit_result(const ProtocolEditIntentMessage &intent,
@@ -107,6 +135,7 @@ class WorldReplicationServerSession
 	int32_t unsubscribe_chunk(int32_t chunk_x, int32_t chunk_z);
 	int32_t acknowledge_chunk(
 		const ProtocolChunkAcknowledgementMessage &acknowledgement);
+	int32_t send_item_snapshot(int32_t chunk_x, int32_t chunk_z);
 };
 
 #endif

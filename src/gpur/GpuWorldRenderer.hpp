@@ -13,6 +13,7 @@
 # include "../../src/world/World.hpp"
 # include "../../Libft/Modules/Voxel/voxel_shadow.hpp"
 # include "../ft_vox.hpp"
+# include <vector>
 
 class GpuWorldRenderer
 {
@@ -36,6 +37,7 @@ class GpuWorldRenderer
 	ft_gpu_shader _sky_shader;
 	ft_gpu_shader _crosshair_shader;
 	ft_gpu_shader _shadow_shader;
+	ft_gpu_shader _barrier_shader;
 	GpuTextureAtlas _atlas;
 	GpuGeometryBatch _batch;
 
@@ -44,6 +46,8 @@ class GpuWorldRenderer
 	GLuint _crosshair_vbo;
 	GLuint _shadow_vao;
 	GLuint _shadow_vbo;
+	GLuint _barrier_vao;
+	GLuint _barrier_vbo;
 	int _width;
 	int _height;
 
@@ -64,6 +68,10 @@ class GpuWorldRenderer
 	GLint _u_shadow_radius;
 	GLint _u_shadow_y;
 	GLint _u_shadow_alpha;
+	GLint _u_barrier_mvp;
+	uint64_t _barrier_selection_revision;
+	bool _barrier_geometry_valid;
+	std::vector<float> _barrier_vertices;
 
 	bool compile_shaders(const std::string &shader_dir);
 	void cache_uniforms();
@@ -73,6 +81,7 @@ class GpuWorldRenderer
 	void draw_crosshair() const;
 	void draw_player_shadow(const Camera &camera, const World &world,
 		const float *mvp);
+	void draw_revision_barriers(const World &world, const float *mvp);
 
 	static bool compile_shader_from_file(ft_gpu_shader &shader,
 		const char *vert_path, const char *frag_path);

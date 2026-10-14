@@ -83,6 +83,17 @@ uint64_t WorldReplicationService::world_id() const
 	return (this->world_id_);
 }
 
+uint64_t WorldReplicationService::world_item_change_revision() const noexcept
+{
+	const WorldItemStore *store;
+	if (!this->initialized_ || this->world_ == nullptr)
+		return (0U);
+	store = this->world_->item_store();
+	if (store == nullptr || !store->is_initialized())
+		return (0U);
+	return (store->change_revision());
+}
+
 void WorldReplicationService::destroy()
 {
 	this->world_ = nullptr;
@@ -316,6 +327,56 @@ int32_t WorldReplicationService::create_chunk_hash_manifest(
 	if (error_code == FT_ERR_SUCCESS)
 		error_code = destroy_error;
 	return (error_code);
+}
+
+int32_t WorldReplicationService::create_world_item_snapshot(int32_t chunk_x,
+	int32_t chunk_z, uint64_t session_id,
+	ProtocolWorldItemSnapshotMessage &snapshot) const
+{
+	const WorldItemStore *store;
+	std::vector<WorldItemSnapshot> nearby;
+	std::size_t index;
+	int32_t error;
+
+	if (!this->initialized_ || this->world_ == nullptr)
+		return (FT_ERR_NOT_INITIALISED);
+	if (session_id == 0U)
+		return (FT_ERR_INVALID_ARGUMENT);
+	store = this->world_->item_store();
+	if (store == nullptr || !store->is_initialized())
+	{
+		snapshot.items.clear();
+		snapshot.session_id = session_id;
+		snapshot.world_id = this->world_id_;
+		snapshot.chunk_x = chunk_x;
+		snapshot.chunk_z = chunk_z;
+		return (FT_ERR_SUCCESS);
+	}
+	error = store->query_renderable(static_cast<double>(chunk_x) * 16.0 + 8.0,
+		0.0, static_cast<double>(chunk_z) * 16.0 + 8.0, 16.0, &nearby);
+	if (error != FT_ERR_SUCCESS)
+		return (error);
+	snapshot.items.clear();
+	for (index = 0U; index < nearby.size(); ++index)
+	{
+		if (nearby[index].chunk_x != chunk_x || nearby[index].chunk_z != chunk_z)
+			continue ;
+		if (snapshot.items.size() == 256U)
+			return (FT_ERR_OUT_OF_RANGE);
+		try
+		{
+			WorldItemSnapshot public_item = nearby[index];
+			public_item.owner_id = 0U;
+			public_item.owner_lock_until_tick = 0U;
+			snapshot.items.push_back(public_item);
+		}
+		catch (...) { return (FT_ERR_NO_MEMORY); }
+	}
+	snapshot.session_id = session_id;
+	snapshot.world_id = this->world_id_;
+	snapshot.chunk_x = chunk_x;
+	snapshot.chunk_z = chunk_z;
+	return (FT_ERR_SUCCESS);
 }
 
 int32_t WorldReplicationService::create_canonical_chunk_payload(
@@ -575,6 +636,35 @@ int32_t WorldReplicationService::send_chunk_snapshot(
 	if (error_code == FT_ERR_SUCCESS)
 		error_code = destroy_error;
 	return (error_code);
+}
+
+int32_t WorldReplicationService::send_world_item_snapshot(
+	networking_message_connection &connection,
+	const ProtocolWorldItemSnapshotMessage &snapshot, uint64_t session_id,
+	uint64_t message_sequence) const
+{
+	ft_byte_buffer payload;
+	int32_t error;
+	int32_t destroy_error;
+
+	if (!this->initialized_)
+		return (FT_ERR_NOT_INITIALISED);
+	if (session_id == 0U || message_sequence == 0U
+		|| snapshot.session_id != session_id
+		|| snapshot.world_id != this->world_id_)
+		return (FT_ERR_INVALID_ARGUMENT);
+	error = payload.initialize();
+	if (error == FT_ERR_SUCCESS) error = snapshot.serialize(payload);
+	if (error == FT_ERR_SUCCESS)
+	{
+		networking_replication_sender sender;
+		error = sender.send_reliable_snapshot(connection,
+			static_cast<uint16_t>(ProtocolMessageHeader::Type::WORLD_ITEM_SNAPSHOT),
+			payload, this->server_instance_id_, session_id, message_sequence);
+	}
+	destroy_error = payload.destroy();
+	if (error == FT_ERR_SUCCESS) error = destroy_error;
+	return (error);
 }
 
 int32_t WorldReplicationService::send_chunk_repair_response(

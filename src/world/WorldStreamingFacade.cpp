@@ -1,8 +1,92 @@
 #include "../../src/world/World.hpp"
+#include "../../src/coordinates/WorldCoordinates.hpp"
 #include "../../src/diagnostics/RuntimeAnalytics.hpp"
+#include <algorithm>
 #include <cstdio>
+#include <cstring>
+#include <limits>
 #include <mutex>
 #include <shared_mutex>
+#include <utility>
+
+namespace
+{
+	template <typename T>
+	static bool fluid_override_less(const T &left, const T &right)
+	{
+		const int32_t left_chunk_x = WorldCoordinates::floor_divide(
+			left.world_x, GAME_VOXEL_CHUNK_WIDTH);
+		const int32_t right_chunk_x = WorldCoordinates::floor_divide(
+			right.world_x, GAME_VOXEL_CHUNK_WIDTH);
+		const int32_t left_chunk_z = WorldCoordinates::floor_divide(
+			left.world_z, GAME_VOXEL_CHUNK_DEPTH);
+		const int32_t right_chunk_z = WorldCoordinates::floor_divide(
+			right.world_z, GAME_VOXEL_CHUNK_DEPTH);
+		if (left_chunk_x != right_chunk_x)
+			return (left_chunk_x < right_chunk_x);
+		if (left_chunk_z != right_chunk_z)
+			return (left_chunk_z < right_chunk_z);
+		if (left.world_y != right.world_y)
+			return (left.world_y < right.world_y);
+		if (left.world_x != right.world_x)
+			return (left.world_x < right.world_x);
+		return (left.world_z < right.world_z);
+	}
+
+	template <typename T>
+	static bool fluid_override_same_cell(const T &left, const T &right)
+	{
+		return (left.world_x == right.world_x && left.world_y == right.world_y
+			&& left.world_z == right.world_z);
+	}
+
+	static void fluid_state_append_u32(std::vector<uint8_t> &bytes,
+		uint32_t value)
+	{
+		for (uint32_t shift = 0U; shift < 32U; shift += 8U)
+			bytes.push_back(static_cast<uint8_t>(value >> shift));
+	}
+
+	static void fluid_state_append_i32(std::vector<uint8_t> &bytes,
+		int32_t value)
+	{
+		fluid_state_append_u32(bytes, static_cast<uint32_t>(value));
+	}
+
+	static uint32_t fluid_state_read_u32(const uint8_t *bytes,
+		std::size_t offset)
+	{
+		return (static_cast<uint32_t>(bytes[offset])
+			| (static_cast<uint32_t>(bytes[offset + 1U]) << 8U)
+			| (static_cast<uint32_t>(bytes[offset + 2U]) << 16U)
+			| (static_cast<uint32_t>(bytes[offset + 3U]) << 24U));
+	}
+
+	static int32_t fluid_state_read_i32(const uint8_t *bytes,
+		std::size_t offset)
+	{
+		return (static_cast<int32_t>(fluid_state_read_u32(bytes, offset)));
+	}
+
+	static uint64_t fluid_state_checksum(const uint8_t *bytes,
+		std::size_t size)
+	{
+		uint64_t hash = 14695981039346656037ULL;
+		for (std::size_t index = 0U; index < size; ++index)
+		{
+			hash ^= bytes[index];
+			hash *= 1099511628211ULL;
+		}
+		return (hash);
+	}
+
+	static void fluid_state_append_u64(std::vector<uint8_t> &bytes,
+		uint64_t value)
+	{
+		for (uint32_t shift = 0U; shift < 64U; shift += 8U)
+			bytes.push_back(static_cast<uint8_t>(value >> shift));
+	}
+}
 
 void World::register_chunk_index(const WorldChunk &chunk)
 {
@@ -362,20 +446,493 @@ bool World::block_id_at(int32_t world_x, int32_t world_y, int32_t world_z,
 			block_id));
 }
 
+bool World::light_level_at(int32_t world_x, int32_t world_y, int32_t world_z,
+	uint8_t *light_level) const
+{
+	std::shared_lock<std::shared_mutex> read_lock(this->world_data_mutex_);
+	return (WorldBlockQuery::light_level_at(*this, world_x, world_y, world_z,
+			light_level));
+}
+
 int32_t World::delete_block_at(int32_t world_x, int32_t world_y,
 	int32_t world_z)
 {
 	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
-	return (WorldBlockEditor::delete_block_at(*this, world_x, world_y,
-			world_z));
+	std::vector<FluidCellOverride> staged;
+	int32_t result;
+	if (world_y < 0 || world_y >= GAME_VOXEL_CHUNK_HEIGHT)
+		return (FT_ERR_INVALID_ARGUMENT);
+	try
+	{
+		staged = this->fluid_cell_overrides_;
+		std::size_t index = 0U;
+		for (; index < staged.size(); ++index)
+			if (staged[index].world_x == world_x
+				&& staged[index].world_y == world_y
+				&& staged[index].world_z == world_z)
+				break ;
+		if (index == staged.size())
+		{
+			if (staged.size() >= 16384U)
+				return (FT_ERR_FULL);
+			staged.push_back({world_x, world_y, world_z, GAME_VOXEL_AIR_BLOCK});
+		}
+		else
+			staged[index].block_id = GAME_VOXEL_AIR_BLOCK;
+		std::sort(staged.begin(), staged.end(),
+			[](const FluidCellOverride &left, const FluidCellOverride &right)
+			{
+				return (fluid_override_less(left, right));
+			});
+	}
+	catch (...)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	result = WorldBlockEditor::delete_block_at(*this, world_x, world_y,
+		world_z);
+	if (result == FT_ERR_SUCCESS)
+		this->fluid_cell_overrides_.swap(staged);
+	return (result);
 }
 
 int32_t World::place_block_at(int32_t world_x, int32_t world_y, int32_t world_z,
 	uint32_t block_id)
 {
 	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
-	return (WorldBlockEditor::place_block_at(*this, world_x, world_y, world_z,
-		block_id));
+	std::vector<FluidCellOverride> staged;
+	int32_t result;
+	if (world_y < 0 || world_y >= GAME_VOXEL_CHUNK_HEIGHT)
+		return (FT_ERR_INVALID_ARGUMENT);
+	try
+	{
+		staged = this->fluid_cell_overrides_;
+		std::size_t index = 0U;
+		for (; index < staged.size(); ++index)
+			if (staged[index].world_x == world_x
+				&& staged[index].world_y == world_y
+				&& staged[index].world_z == world_z)
+				break ;
+		if (index == staged.size())
+		{
+			if (staged.size() >= 16384U)
+				return (FT_ERR_FULL);
+			staged.push_back({world_x, world_y, world_z, block_id});
+		}
+		else
+			staged[index].block_id = block_id;
+		std::sort(staged.begin(), staged.end(),
+			[](const FluidCellOverride &left, const FluidCellOverride &right)
+			{
+				return (fluid_override_less(left, right));
+			});
+	}
+	catch (...)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	result = WorldBlockEditor::place_block_at(*this, world_x, world_y,
+		world_z, block_id);
+	if (result == FT_ERR_SUCCESS)
+		this->fluid_cell_overrides_.swap(staged);
+	return (result);
+}
+
+int32_t World::replace_fluid_source_at(int32_t world_x, int32_t world_y,
+	int32_t world_z, uint32_t expected_block_id,
+	uint32_t replacement_block_id, uint64_t expected_voxel_revision)
+{
+	if ((expected_block_id != GAME_VOXEL_AIR_BLOCK
+			&& voxel_block_is_fluid_source(expected_block_id) != FT_TRUE)
+		|| (replacement_block_id != GAME_VOXEL_AIR_BLOCK
+			&& voxel_block_is_fluid_source(replacement_block_id) != FT_TRUE))
+		return (FT_ERR_INVALID_ARGUMENT);
+	return (this->replace_block_state_at(world_x, world_y, world_z,
+		expected_block_id, replacement_block_id, expected_voxel_revision));
+}
+
+int32_t World::replace_block_state_at(int32_t world_x, int32_t world_y,
+	int32_t world_z, uint32_t expected_block_id,
+	uint32_t replacement_block_id, uint64_t expected_voxel_revision)
+{
+	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
+	std::vector<FluidCellOverride> staged;
+	std::size_t existing_index = 0U;
+	bool found = false;
+	int32_t result;
+
+	if (world_y < 0 || world_y >= GAME_VOXEL_CHUNK_HEIGHT)
+		return (FT_ERR_INVALID_ARGUMENT);
+	try
+	{
+		staged = this->fluid_cell_overrides_;
+		while (existing_index < staged.size())
+		{
+			if (staged[existing_index].world_x == world_x
+				&& staged[existing_index].world_y == world_y
+				&& staged[existing_index].world_z == world_z)
+			{
+				staged[existing_index].block_id = replacement_block_id;
+				found = true;
+				break;
+			}
+			++existing_index;
+		}
+		if (!found)
+		{
+			if (staged.size() >= 16384U)
+				return (FT_ERR_FULL);
+			staged.push_back({world_x, world_y, world_z,
+				replacement_block_id});
+		}
+		std::sort(staged.begin(), staged.end(),
+			[](const FluidCellOverride &left, const FluidCellOverride &right)
+			{
+				return (fluid_override_less(left, right));
+			});
+	}
+	catch (...)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	result = WorldBlockEditor::replace_block_state(*this, world_x, world_y,
+		world_z, expected_block_id, replacement_block_id,
+		expected_voxel_revision);
+	if (result == FT_ERR_SUCCESS)
+		this->fluid_cell_overrides_.swap(staged);
+	return (result);
+}
+
+int32_t World::till_farmland_at(int32_t world_x, int32_t world_y,
+	int32_t world_z, uint64_t expected_voxel_revision)
+{
+	const int32_t chunk_x = WorldCoordinates::floor_divide(world_x,
+		GAME_VOXEL_CHUNK_WIDTH);
+	const int32_t chunk_z = WorldCoordinates::floor_divide(world_z,
+		GAME_VOXEL_CHUNK_DEPTH);
+	const WorldChunk *chunk = this->find_chunk(chunk_x, chunk_z);
+	uint32_t soil_block_id = GAME_VOXEL_AIR_BLOCK;
+	if (world_y < 0 || world_y >= GAME_VOXEL_CHUNK_HEIGHT
+		|| expected_voxel_revision == 0U || chunk == nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
+	if (chunk->voxel_revision != expected_voxel_revision)
+		return (FT_ERR_INVALID_STATE);
+	if (!this->block_id_at(world_x, world_y, world_z, &soil_block_id))
+		return (FT_ERR_INVALID_ARGUMENT);
+	if (soil_block_id != VOXEL_GENERATOR_DIRT_BLOCK_ID
+		&& soil_block_id != VOXEL_GENERATOR_GRASS_BLOCK_ID)
+		return (FT_ERR_PERMISSION_DENIED);
+	return (this->replace_block_state_at(world_x, world_y, world_z,
+		soil_block_id, VOXEL_GENERATOR_FARMLAND_BLOCK_ID,
+		expected_voxel_revision));
+}
+
+bool World::farmland_is_hydrated(int32_t world_x, int32_t world_y,
+	int32_t world_z, uint8_t horizontal_radius) const
+{
+	std::shared_lock<std::shared_mutex> read_lock(this->world_data_mutex_);
+	const int32_t radius = static_cast<int32_t>(horizontal_radius);
+	uint32_t soil_block_id = GAME_VOXEL_AIR_BLOCK;
+	if (horizontal_radius > 8U || world_y < 0
+		|| world_y >= GAME_VOXEL_CHUNK_HEIGHT
+		|| world_x < std::numeric_limits<int32_t>::min() + radius
+		|| world_x > std::numeric_limits<int32_t>::max() - radius
+		|| world_z < std::numeric_limits<int32_t>::min() + radius
+		|| world_z > std::numeric_limits<int32_t>::max() - radius
+		|| !WorldBlockQuery::block_id_at(*this, world_x, world_y, world_z,
+			&soil_block_id)
+		|| soil_block_id != VOXEL_GENERATOR_FARMLAND_BLOCK_ID)
+		return (false);
+	for (int32_t water_y = std::max(0, world_y - 1);
+		water_y <= std::min(GAME_VOXEL_CHUNK_HEIGHT - 1, world_y + 1);
+		++water_y)
+	{
+		for (int32_t water_z = world_z - radius; water_z <= world_z + radius;
+			++water_z)
+		{
+			for (int32_t water_x = world_x - radius; water_x <= world_x + radius;
+				++water_x)
+			{
+				uint32_t block_id = GAME_VOXEL_AIR_BLOCK;
+				if (WorldBlockQuery::block_id_at(*this, water_x, water_y,
+					water_z, &block_id)
+					&& block_id == VOXEL_GENERATOR_WATER_BLOCK_ID)
+					return (true);
+			}
+		}
+	}
+	return (false);
+}
+
+bool World::has_water_source_near(int32_t world_x, int32_t soil_y,
+	int32_t world_z, uint8_t horizontal_radius) const
+{
+	std::shared_lock<std::shared_mutex> read_lock(this->world_data_mutex_);
+	const int32_t radius = static_cast<int32_t>(horizontal_radius);
+	if (horizontal_radius > 8U || soil_y < 0
+		|| soil_y >= GAME_VOXEL_CHUNK_HEIGHT
+		|| world_x < std::numeric_limits<int32_t>::min() + radius
+		|| world_x > std::numeric_limits<int32_t>::max() - radius
+		|| world_z < std::numeric_limits<int32_t>::min() + radius
+		|| world_z > std::numeric_limits<int32_t>::max() - radius)
+		return (false);
+	for (int32_t water_y = std::max(0, soil_y - 1);
+		water_y <= std::min(GAME_VOXEL_CHUNK_HEIGHT - 1, soil_y + 1);
+		++water_y)
+	{
+		for (int32_t water_z = world_z - radius; water_z <= world_z + radius;
+			++water_z)
+		{
+			for (int32_t water_x = world_x - radius; water_x <= world_x + radius;
+				++water_x)
+			{
+				uint32_t block_id = GAME_VOXEL_AIR_BLOCK;
+				if (WorldBlockQuery::block_id_at(*this, water_x, water_y,
+					water_z, &block_id)
+					&& block_id == VOXEL_GENERATOR_WATER_BLOCK_ID)
+					return (true);
+			}
+		}
+	}
+	return (false);
+}
+
+int32_t World::set_block_state_override(int32_t world_x, int32_t world_y,
+	int32_t world_z, uint32_t block_id) noexcept
+{
+	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
+	std::vector<FluidCellOverride> staged;
+	std::size_t existing_index = 0U;
+	bool found = false;
+	if (world_y < 0 || world_y >= GAME_VOXEL_CHUNK_HEIGHT
+		|| voxel_block_is_known(block_id) != FT_TRUE
+		|| voxel_block_is_flowing_fluid(block_id) == FT_TRUE)
+		return (FT_ERR_INVALID_ARGUMENT);
+	try
+	{
+		staged = this->fluid_cell_overrides_;
+		while (existing_index < staged.size())
+		{
+			if (staged[existing_index].world_x == world_x
+				&& staged[existing_index].world_y == world_y
+				&& staged[existing_index].world_z == world_z)
+			{
+				staged[existing_index].block_id = block_id;
+				found = true;
+				break ;
+			}
+			++existing_index;
+		}
+		if (!found)
+		{
+			if (staged.size() >= 16384U)
+				return (FT_ERR_FULL);
+			staged.push_back({world_x, world_y, world_z, block_id});
+		}
+		std::sort(staged.begin(), staged.end(),
+			[](const FluidCellOverride &left, const FluidCellOverride &right)
+			{
+				return (fluid_override_less(left, right));
+			});
+	}
+	catch (...)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	this->fluid_cell_overrides_.swap(staged);
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t World::serialize_fluid_state(std::vector<uint8_t> &bytes_out) const noexcept
+{
+	std::shared_lock<std::shared_mutex> read_lock(this->world_data_mutex_);
+	std::vector<uint8_t> staged;
+	try
+	{
+		if (this->fluid_cell_overrides_.size() > 16384U)
+			return (FT_ERR_FULL);
+		staged.reserve(20U + this->fluid_cell_overrides_.size() * 16U);
+		staged.push_back('F');
+		staged.push_back('L');
+		staged.push_back('S');
+		staged.push_back('1');
+		fluid_state_append_u32(staged, 2U);
+		fluid_state_append_u32(staged,
+			static_cast<uint32_t>(this->fluid_cell_overrides_.size()));
+		for (const FluidCellOverride &entry : this->fluid_cell_overrides_)
+		{
+			fluid_state_append_i32(staged, entry.world_x);
+			fluid_state_append_i32(staged, entry.world_y);
+			fluid_state_append_i32(staged, entry.world_z);
+			fluid_state_append_u32(staged, entry.block_id);
+		}
+		fluid_state_append_u64(staged,
+			fluid_state_checksum(staged.data(), staged.size()));
+		bytes_out.swap(staged);
+	}
+	catch (...)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t World::deserialize_fluid_state(const uint8_t *bytes,
+	std::size_t byte_count) noexcept
+{
+	std::vector<FluidCellOverride> staged;
+	uint32_t count;
+	uint32_t version;
+	std::size_t expected_size;
+	uint64_t stored_checksum = 0U;
+	uint64_t computed_checksum;
+
+	if (bytes == nullptr && byte_count != 0U)
+		return (FT_ERR_INVALID_ARGUMENT);
+	if (byte_count == 0U)
+	{
+		std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
+		this->fluid_cell_overrides_.clear();
+		return (FT_ERR_SUCCESS);
+	}
+	if (byte_count < 20U || byte_count > 1024U * 1024U
+		|| std::memcmp(bytes, "FLS1", 4U) != 0)
+		return (FT_ERR_INVALID_ARGUMENT);
+	version = fluid_state_read_u32(bytes, 4U);
+	if (version != 1U && version != 2U)
+		return (FT_ERR_INVALID_ARGUMENT);
+	count = fluid_state_read_u32(bytes, 8U);
+	if (count > 16384U)
+		return (FT_ERR_INVALID_ARGUMENT);
+	expected_size = 12U + static_cast<std::size_t>(count) * 16U + 8U;
+	if (byte_count != expected_size)
+		return (FT_ERR_INVALID_ARGUMENT);
+	for (uint32_t shift = 0U; shift < 64U; shift += 8U)
+		stored_checksum |= static_cast<uint64_t>(bytes[byte_count - 8U
+			+ shift / 8U]) << shift;
+	computed_checksum = fluid_state_checksum(bytes, byte_count - 8U);
+	if (stored_checksum != computed_checksum)
+		return (FT_ERR_INVALID_ARGUMENT);
+	try
+	{
+		staged.reserve(count);
+		for (uint32_t index = 0U; index < count; ++index)
+		{
+			const std::size_t offset = 12U
+				+ static_cast<std::size_t>(index) * 16U;
+			FluidCellOverride entry = {fluid_state_read_i32(bytes, offset),
+				fluid_state_read_i32(bytes, offset + 4U),
+				fluid_state_read_i32(bytes, offset + 8U),
+				fluid_state_read_u32(bytes, offset + 12U)};
+			if (entry.world_y < 0 || entry.world_y >= GAME_VOXEL_CHUNK_HEIGHT
+				|| voxel_block_is_known(entry.block_id) != FT_TRUE
+				|| voxel_block_is_flowing_fluid(entry.block_id) == FT_TRUE
+				|| (version == 1U
+					&& entry.block_id != GAME_VOXEL_AIR_BLOCK
+					&& voxel_block_is_fluid_source(entry.block_id) != FT_TRUE))
+				return (FT_ERR_INVALID_ARGUMENT);
+			staged.push_back(entry);
+		}
+		std::sort(staged.begin(), staged.end(),
+			[](const FluidCellOverride &left, const FluidCellOverride &right)
+			{
+				return (fluid_override_less(left, right));
+			});
+		for (std::size_t index = 1U; index < staged.size(); ++index)
+			if (fluid_override_same_cell(staged[index - 1U], staged[index]))
+				return (FT_ERR_ALREADY_EXISTS);
+	}
+	catch (...)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
+	this->fluid_cell_overrides_.swap(staged);
+	for (int32_t index = 0; index < this->chunk_count; ++index)
+	{
+		bool changed = false;
+		if (!this->chunks[index].initialized)
+			continue ;
+		const int32_t apply_result = this->apply_fluid_state_to_chunk(
+			this->chunks[index], &changed);
+		if (apply_result != FT_ERR_SUCCESS)
+			return (apply_result);
+		if (changed)
+		{
+			this->chunk_streamer.mark_remesh_dirty(this->chunks[index]);
+			const int32_t queue_result = this->chunk_streamer.queue_chunk_remesh(
+				this->chunks[index]);
+			if (queue_result != FT_ERR_SUCCESS && queue_result != FT_ERR_FULL)
+				this->chunk_streamer.prioritize_chunk_remesh(
+					this->chunks[index].chunk_x, this->chunks[index].chunk_z);
+		}
+	}
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t World::apply_fluid_state_to_chunk(WorldChunk &chunk,
+	bool *changed_out) noexcept
+{
+	bool changed = false;
+	const int32_t target_chunk_x = chunk.chunk_x;
+	const int32_t target_chunk_z = chunk.chunk_z;
+	const auto first = std::lower_bound(this->fluid_cell_overrides_.begin(),
+		this->fluid_cell_overrides_.end(),
+		std::make_pair(target_chunk_x, target_chunk_z),
+		[](const FluidCellOverride &entry,
+			const std::pair<int32_t, int32_t> &target)
+		{
+			const int32_t entry_chunk_x = WorldCoordinates::floor_divide(
+				entry.world_x, GAME_VOXEL_CHUNK_WIDTH);
+			const int32_t entry_chunk_z = WorldCoordinates::floor_divide(
+				entry.world_z, GAME_VOXEL_CHUNK_DEPTH);
+			return (entry_chunk_x < target.first
+				|| (entry_chunk_x == target.first
+					&& entry_chunk_z < target.second));
+		});
+	if (changed_out != nullptr)
+		*changed_out = false;
+	for (auto current = first; current != this->fluid_cell_overrides_.end();
+		++current)
+	{
+		const FluidCellOverride &entry = *current;
+		if (WorldCoordinates::floor_divide(entry.world_x,
+				GAME_VOXEL_CHUNK_WIDTH) != target_chunk_x
+			|| WorldCoordinates::floor_divide(entry.world_z,
+				GAME_VOXEL_CHUNK_DEPTH) != target_chunk_z)
+			break ;
+		const int64_t offset_x = static_cast<int64_t>(entry.world_x)
+			- static_cast<int64_t>(chunk.world_x);
+		const int64_t offset_z = static_cast<int64_t>(entry.world_z)
+			- static_cast<int64_t>(chunk.world_z);
+		uint32_t current_block = 0U;
+		int32_t result;
+
+		if (offset_x < 0 || offset_x >= GAME_VOXEL_CHUNK_WIDTH
+			|| offset_z < 0 || offset_z >= GAME_VOXEL_CHUNK_DEPTH)
+			continue ;
+		result = chunk.chunk.read_block(static_cast<int32_t>(offset_x),
+			entry.world_y, static_cast<int32_t>(offset_z), &current_block);
+		if (result != FT_ERR_SUCCESS)
+			return (result);
+		if (current_block == entry.block_id)
+			continue ;
+		result = chunk.chunk.write_block(static_cast<int32_t>(offset_x),
+			entry.world_y, static_cast<int32_t>(offset_z), entry.block_id);
+		if (result != FT_ERR_SUCCESS)
+			return (result);
+		chunk.mark_content_changed();
+		changed = true;
+	}
+	if (!changed)
+		return (FT_ERR_SUCCESS);
+	int32_t result = chunk.publish_read_state();
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	chunk.cancel_remesh_work();
+	if (changed_out != nullptr)
+		*changed_out = true;
+	return (FT_ERR_SUCCESS);
 }
 
 int32_t World::apply_authoritative_block_change(
@@ -404,6 +961,12 @@ int32_t World::apply_authoritative_block_change(
 		request.local_y, request.local_z, &existing_block_id);
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
+	if (request.requested_block_id != GAME_VOXEL_AIR_BLOCK
+		&& voxel_block_is_known(request.requested_block_id) != FT_TRUE)
+		return (FT_ERR_INVALID_ARGUMENT);
+	if (voxel_block_is_liquid(existing_block_id) == FT_TRUE
+		|| voxel_block_is_liquid(request.requested_block_id) == FT_TRUE)
+		return (FT_ERR_PERMISSION_DENIED);
 	existing_light = world_chunk->light.get(request.local_x, request.local_y,
 		request.local_z);
 	previous_revision = world_chunk->chunk.get_revision();
@@ -426,6 +989,13 @@ int32_t World::apply_authoritative_block_change(
 		static_cast<int32_t>(request.local_z), request.requested_block_id);
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
+	(void)this->invalidate_loom_station_if_block_changed(
+		request.chunk_x * GAME_VOXEL_CHUNK_WIDTH
+			+ static_cast<int32_t>(request.local_x),
+		static_cast<int32_t>(request.local_y),
+		request.chunk_z * GAME_VOXEL_CHUNK_DEPTH
+			+ static_cast<int32_t>(request.local_z),
+		request.requested_block_id);
 	/* An accepted authoritative edit supersedes any capture or light solve
 	 * based on the previous voxel revision.  Cancel it before submitting the
 	 * new incremental request so its result cannot consume worker time or

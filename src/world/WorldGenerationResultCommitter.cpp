@@ -751,6 +751,7 @@ int32_t WorldGenerationResultCommitter::create_chunk_from_stream_result(WorldChu
 	WorldChunk *slot;
 	int32_t error_code;
 	int32_t cleanup_error;
+	bool fluid_state_changed = false;
 #if defined(LIBFT_ENABLE_ANALYTICS)
 	std::chrono::steady_clock::time_point phase_start;
 	uint64_t transfer_us;
@@ -821,6 +822,24 @@ int32_t WorldGenerationResultCommitter::create_chunk_from_stream_result(WorldChu
 			slot->light_ready_for_render ? 1 : 0);
 	}
 	#endif
+	error_code = world.apply_fluid_state_to_chunk(*slot,
+		&fluid_state_changed);
+	if (error_code != FT_ERR_SUCCESS)
+	{
+		cleanup_error = chunk_mesh_destroy(slot->mesh);
+		const int32_t chunk_cleanup_error = slot->chunk.destroy();
+		if (cleanup_error == FT_ERR_SUCCESS)
+			cleanup_error = chunk_cleanup_error;
+		(void)slot->light.destroy();
+		if (world.loaded_chunk_count > 0)
+			world.loaded_chunk_count -= 1;
+		slot->reset_coordinates();
+		candidate.state = WorldChunkStreamer::CANDIDATE_FAILED_RETRYABLE;
+		candidate.last_error = cleanup_error == FT_ERR_SUCCESS
+			? error_code : cleanup_error;
+		candidate.retry_frames = 1;
+		return (FT_ERR_SUCCESS);
+	}
 	error_code = slot->publish_read_state();
 	if (error_code != FT_ERR_SUCCESS)
 	{
@@ -844,6 +863,14 @@ int32_t WorldGenerationResultCommitter::create_chunk_from_stream_result(WorldChu
 	}
 	#endif
 	world.register_chunk_index(*slot);
+	if (fluid_state_changed)
+	{
+		world.mark_geometry_changed();
+		streamer.mark_remesh_dirty(*slot);
+		const int32_t remesh_result = streamer.queue_chunk_remesh(*slot);
+		if (remesh_result != FT_ERR_SUCCESS && remesh_result != FT_ERR_FULL)
+			streamer.prioritize_chunk_remesh(slot->chunk_x, slot->chunk_z);
+	}
 	#if defined(LIBFT_ENABLE_ANALYTICS)
 	index_us = static_cast<uint64_t>(std::chrono::duration_cast<
 		std::chrono::microseconds>(std::chrono::steady_clock::now()

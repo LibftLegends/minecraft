@@ -50,8 +50,11 @@ ApplicationPhaseController::Phase ApplicationPhaseController::tick_menu(Phase ph
 	menu.update(in);
 	if (phase == Phase::MAIN_MENU)
 	{
-		if (menu.wants_start() && session.start(menu.start_seed(), window,
-				renderer) == FT_ERR_SUCCESS)
+		if (menu.wants_start()
+			&& session.configure_local_processing_station_authorizer()
+				== FT_ERR_SUCCESS
+			&& session.start(menu.start_seed(), window, renderer)
+				== FT_ERR_SUCCESS)
 		{
 			menu.show_loading();
 			menu.clear_flags();

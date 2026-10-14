@@ -16,6 +16,12 @@ World::World() : chunk_streamer_storage_(new WorldChunkStreamer(*this)),
 	voxel_default_generation_config(this->voxel_config);
 	this->voxel_generation_started = false;
 	this->lifecycle_active_ = false;
+	this->entity_store_ = nullptr;
+	this->spawner_store_ = nullptr;
+	this->item_store_ = nullptr;
+	this->item_catalog_ = nullptr;
+	this->generation_checkpoint_callback_ = nullptr;
+	this->generation_checkpoint_user_data_ = nullptr;
 	this->current_tick = 0U;
 	this->geometry_revision = 1U;
 	this->clear_chunk_index();
@@ -28,6 +34,12 @@ World::World(const World &other) : chunk_streamer_storage_(new WorldChunkStreame
 	this->geometry_revision = 1U;
 	this->voxel_generation_started = false;
 	this->lifecycle_active_ = false;
+	this->entity_store_ = nullptr;
+	this->spawner_store_ = nullptr;
+	this->item_store_ = nullptr;
+	this->item_catalog_ = nullptr;
+	this->generation_checkpoint_callback_ = nullptr;
+	this->generation_checkpoint_user_data_ = nullptr;
 	(void)other;
 }
 
@@ -55,6 +67,26 @@ void World::mark_geometry_changed() noexcept
 	this->geometry_revision += 1U;
 	if (this->geometry_revision == 0U)
 		this->geometry_revision = 1U;
+}
+
+int32_t World::set_generation_checkpoint_callback(
+	WorldGenerationCheckpointCallback callback, void *user_data) noexcept
+{
+	if (!this->lifecycle_active_)
+		return (FT_ERR_INVALID_OPERATION);
+	if (callback == nullptr && user_data != nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
+	this->generation_checkpoint_callback_ = callback;
+	this->generation_checkpoint_user_data_ = user_data;
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t World::checkpoint_generation_commit() noexcept
+{
+	if (this->generation_checkpoint_callback_ == nullptr)
+		return (FT_ERR_SUCCESS);
+	return (this->generation_checkpoint_callback_(
+		this->generation_checkpoint_user_data_));
 }
 
 void World::clear_chunk_index()
@@ -235,8 +267,16 @@ int32_t World::save_voxel_config(const char *file_path) const
 
 void World::destroy()
 {
+	this->generation_checkpoint_callback_ = nullptr;
+	this->generation_checkpoint_user_data_ = nullptr;
+	this->detach_entity_stores();
+	this->chunk_instability_store_.clear_records();
 	if (!this->lifecycle_active_)
+	{
+		std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
+		this->fluid_cell_overrides_.clear();
 		return ;
+	}
 	this->lifecycle_active_ = false;
     {
         std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
@@ -250,6 +290,7 @@ void World::destroy()
     (void)this->generation_pipeline_.destroy();
     std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
     int32_t index;
+	this->fluid_cell_overrides_.clear();
 
     index = 0;
     while (index < this->chunk_count)
@@ -273,6 +314,7 @@ void World::destroy()
     this->revision_generation_error_ = FT_ERR_SUCCESS;
     this->revision_selected_.clear();
     this->revision_manual_protected_.clear();
+    this->revision_manager.reset();
     this->deferred_edits_.clear();
     (void)this->voxel_context.destroy();
     this->voxel_generation_started = false;

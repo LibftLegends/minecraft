@@ -12,6 +12,11 @@
 # include "ProtocolChunkRepairResponseMessage.hpp"
 # include "ProtocolEditIntentMessage.hpp"
 # include "ProtocolEditResultMessage.hpp"
+# include "ProtocolBoatMoveIntentMessage.hpp"
+# include "ProtocolBoatMoveResultMessage.hpp"
+# include "ProtocolEntityUpdateMessage.hpp"
+# include "ProtocolWorldItemSnapshotMessage.hpp"
+# include "WorldItemReplicaStore.hpp"
 # include "ProtocolMessageHeader.hpp"
 # include "WorldReplicationReplicaStore.hpp"
 # include "../../Libft/Modules/Networking/networking_replication_client.hpp"
@@ -25,6 +30,12 @@ typedef int32_t (*world_replication_light_delta_callback)(
 	const ProtocolChunkLightDeltaMessage &delta, void *user_data) noexcept;
 typedef int32_t (*world_replication_edit_result_callback)(
 	const ProtocolEditResultMessage &result, void *user_data) noexcept;
+typedef int32_t (*world_replication_boat_move_result_callback)(
+	const ProtocolBoatMoveResultMessage &result, void *user_data) noexcept;
+typedef int32_t (*world_replication_entity_update_callback)(
+	const EntityState &entity, void *user_data) noexcept;
+typedef int32_t (*world_replication_world_item_snapshot_callback)(
+	const ProtocolWorldItemSnapshotMessage &snapshot, void *user_data) noexcept;
 typedef int32_t (*world_replication_repair_callback)(
 	const ProtocolChunkRepairResponseMessage &response,
 	void *user_data) noexcept;
@@ -60,6 +71,19 @@ class WorldReplicationClient
 	int32_t send_edit_intent(networking_message_connection &connection,
 		const ProtocolEditIntentMessage &intent,
 		uint64_t message_sequence) const;
+	int32_t send_boat_move_intent(networking_message_connection &connection,
+		const ProtocolBoatMoveIntentMessage &intent,
+		uint64_t message_sequence) const;
+	int32_t set_boat_move_result_callback(
+		world_replication_boat_move_result_callback callback,
+		void *user_data) noexcept;
+	int32_t set_entity_update_callback(
+		world_replication_entity_update_callback callback,
+		void *user_data) noexcept;
+	int32_t set_world_item_snapshot_callback(
+		world_replication_world_item_snapshot_callback callback,
+		void *user_data) noexcept;
+	int32_t set_world_item_replica_store(WorldItemReplicaStore *store) noexcept;
 	int32_t request_chunk(networking_message_connection &connection,
 		int32_t chunk_x, int32_t chunk_z, uint64_t message_sequence) const;
 	int32_t request_chunk_sync(networking_message_connection &connection,
@@ -93,12 +117,19 @@ class WorldReplicationClient
 	world_replication_block_delta_callback block_delta_callback_;
 	world_replication_light_delta_callback light_delta_callback_;
 	world_replication_edit_result_callback edit_result_callback_;
+	world_replication_boat_move_result_callback boat_move_result_callback_;
+	world_replication_entity_update_callback entity_update_callback_;
+	world_replication_world_item_snapshot_callback world_item_snapshot_callback_;
 	world_replication_repair_callback repair_callback_;
 	world_replication_hash_manifest_callback hash_manifest_callback_;
 	void *callback_user_data_;
+	void *boat_move_result_callback_user_data_;
+	void *entity_update_callback_user_data_;
+	void *world_item_snapshot_callback_user_data_;
 	void *repair_callback_user_data_;
 	void *hash_manifest_callback_user_data_;
 	WorldReplicationReplicaStore *replica_store_;
+	WorldItemReplicaStore *world_item_replica_store_;
 	uint64_t server_instance_id_;
 	uint64_t session_id_;
 	uint64_t world_id_;
@@ -116,6 +147,9 @@ class WorldReplicationClient
 	static int32_t apply_light_delta_payload(const ft_byte_buffer &payload,
 		void *user_data) noexcept;
 	int32_t apply_edit_result_payload(const ft_byte_buffer &payload);
+	int32_t apply_boat_move_result_payload(const ft_byte_buffer &payload);
+	int32_t apply_entity_update_payload(const ft_byte_buffer &payload);
+	int32_t apply_world_item_snapshot_payload(const ft_byte_buffer &payload);
 	int32_t apply_repair_response_payload(const ft_byte_buffer &payload);
 	int32_t apply_hash_manifest_payload(const ft_byte_buffer &payload);
 	void clear_received_messages();

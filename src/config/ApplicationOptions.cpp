@@ -11,7 +11,11 @@ ApplicationOptions::ApplicationOptions() : perf_test_mode(false),
 	validate_visible_distance_mode(false),
 	validate_voxel_determinism_mode(false), validate_world_scale_mode(false),
 	validate_caves_mode(false), validate_voxel_configuration_mode(false),
-	validate_world_revision_mode(false), validate_async_generation_mode(false),
+	validate_world_revision_mode(false),
+	validate_item_catalog_mode(false), validate_world_items_mode(false),
+	validate_wheat_crop_mode(false),
+	validate_transaction_journal_mode(false),
+	validate_regeneration_cards_mode(false), validate_async_generation_mode(false),
 	validate_network_repair_mode(false),
 	validate_renderer_publication_mode(false),
 	validate_lighting_harness_mode(false),
@@ -34,7 +38,11 @@ ApplicationOptions::ApplicationOptions(const ApplicationOptions &other) : perf_t
 	validate_visible_distance_mode(false),
 	validate_voxel_determinism_mode(false), validate_world_scale_mode(false),
 	validate_caves_mode(false), validate_voxel_configuration_mode(false),
-	validate_world_revision_mode(false), validate_async_generation_mode(false),
+	validate_world_revision_mode(false),
+	validate_item_catalog_mode(false), validate_world_items_mode(false),
+	validate_wheat_crop_mode(false),
+	validate_transaction_journal_mode(false),
+	validate_regeneration_cards_mode(false), validate_async_generation_mode(false),
 	validate_network_repair_mode(false),
 	validate_lighting_harness_mode(false),
 	validate_lighting_stress_mode(false),
@@ -74,6 +82,13 @@ ApplicationOptions &ApplicationOptions::operator=(const ApplicationOptions &othe
 		validate_caves_mode = other.validate_caves_mode;
 		validate_voxel_configuration_mode = other.validate_voxel_configuration_mode;
 		validate_world_revision_mode = other.validate_world_revision_mode;
+		validate_item_catalog_mode = other.validate_item_catalog_mode;
+		validate_world_items_mode = other.validate_world_items_mode;
+		validate_wheat_crop_mode = other.validate_wheat_crop_mode;
+		validate_transaction_journal_mode =
+			other.validate_transaction_journal_mode;
+		validate_regeneration_cards_mode =
+			other.validate_regeneration_cards_mode;
 		validate_async_generation_mode = other.validate_async_generation_mode;
 		validate_network_repair_mode = other.validate_network_repair_mode;
 		validate_renderer_publication_mode = other.validate_renderer_publication_mode;
@@ -127,6 +142,16 @@ int ApplicationOptions::parse(int argc, char **argv)
 			"--validate-terrain-configuration");
 	validate_world_revision_mode = CommandLine::has_flag(argc, argv,
 			"--validate-world-revision");
+	validate_item_catalog_mode = CommandLine::has_flag(argc, argv,
+			"--validate-item-catalog");
+	validate_world_items_mode = CommandLine::has_flag(argc, argv,
+			"--validate-world-items");
+	validate_wheat_crop_mode = CommandLine::has_flag(argc, argv,
+			"--validate-wheat-crop");
+	validate_transaction_journal_mode = CommandLine::has_flag(argc, argv,
+			"--validate-transaction-journal");
+	validate_regeneration_cards_mode = CommandLine::has_flag(argc, argv,
+			"--validate-regeneration-cards");
 	validate_async_generation_mode = CommandLine::has_flag(argc, argv,
 			"--validate-async-generation");
 	validate_network_repair_mode = CommandLine::has_flag(argc, argv,

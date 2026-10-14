@@ -11,11 +11,15 @@
 # include "../../src/validators/TerrainDeterminismValidator.hpp"
 # include "../../src/validators/WorldAsyncGenerationValidator.hpp"
 # include "../../src/validators/WorldRevisionValidator.hpp"
+# include "../../src/validators/RegenerationCardValidator.hpp"
 # include "../../src/validators/WorldScaleValidator.hpp"
 # include "../../src/validators/WorldVisibilityValidator.hpp"
 # include "../../src/validators/WorldReplicationValidator.hpp"
 # include "../../src/validators/RendererPublicationValidator.hpp"
 # include "../../src/validators/LightingTestHarness.hpp"
+# include "../../src/validators/ItemCatalogValidator.hpp"
+# include "../../src/validators/WorldItemStoreValidator.hpp"
+# include "../../src/validators/GameTransactionJournalValidator.hpp"
 
 class ApplicationValidator
 {
@@ -36,6 +40,11 @@ class ApplicationValidator
 	static int validate_caves();
 	static int validate_voxel_configuration();
 	static int validate_world_revision();
+	static int validate_item_catalog();
+	static int validate_world_items();
+	static int validate_wheat_crop();
+	static int validate_transaction_journal();
+	static int validate_regeneration_cards();
 	static int validate_async_generation();
 	static int validate_network_repair();
 	static int validate_renderer_publication();

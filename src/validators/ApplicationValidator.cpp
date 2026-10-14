@@ -76,6 +76,34 @@ int ApplicationValidator::validate_world_revision()
 	return (WorldRevisionValidator().validate());
 }
 
+int ApplicationValidator::validate_item_catalog()
+{
+	return (ItemCatalogValidator().validate());
+}
+
+int ApplicationValidator::validate_world_items()
+{
+	int result = BlockEditValidator::validate_mining_drop();
+	if (result != 0)
+		return (result);
+	return (WorldItemStoreValidator().validate());
+}
+
+int ApplicationValidator::validate_wheat_crop()
+{
+	return (BlockEditValidator::validate_wheat_crop());
+}
+
+int ApplicationValidator::validate_transaction_journal()
+{
+	return (GameTransactionJournalValidator().validate());
+}
+
+int ApplicationValidator::validate_regeneration_cards()
+{
+	return (RegenerationCardValidator().validate());
+}
+
 int ApplicationValidator::validate_async_generation()
 {
 	return (WorldAsyncGenerationValidator().validate());
@@ -188,6 +216,36 @@ int ApplicationValidator::validate_all()
 	if (error_code != 0)
 	{
 		std::fprintf(stderr, "[Validator] world-revision failed: %d\n", error_code);
+		failure_count += 1;
+	}
+	std::fprintf(stderr, "[Validator] item-catalog: begin\n");
+	error_code = ApplicationValidator::validate_item_catalog();
+	if (error_code != 0)
+	{
+		std::fprintf(stderr, "[Validator] item-catalog failed: %d\n", error_code);
+		failure_count += 1;
+	}
+	std::fprintf(stderr, "[Validator] world-items: begin\n");
+	error_code = ApplicationValidator::validate_world_items();
+	if (error_code != 0)
+	{
+		std::fprintf(stderr, "[Validator] world-items failed: %d\n", error_code);
+		failure_count += 1;
+	}
+	std::fprintf(stderr, "[Validator] transaction-journal: begin\n");
+	error_code = ApplicationValidator::validate_transaction_journal();
+	if (error_code != 0)
+	{
+		std::fprintf(stderr, "[Validator] transaction-journal failed: %d\n",
+			error_code);
+		failure_count += 1;
+	}
+	std::fprintf(stderr, "[Validator] regeneration-cards: begin\n");
+	error_code = ApplicationValidator::validate_regeneration_cards();
+	if (error_code != 0)
+	{
+		std::fprintf(stderr, "[Validator] regeneration-cards failed: %d\n",
+			error_code);
 		failure_count += 1;
 	}
 	std::fprintf(stderr, "[Validator] async-generation: begin\n");

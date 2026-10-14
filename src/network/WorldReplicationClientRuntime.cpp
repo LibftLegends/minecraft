@@ -89,6 +89,23 @@ int32_t WorldReplicationClientRuntime::set_cursor_store(
 	return (FT_ERR_SUCCESS);
 }
 
+int32_t WorldReplicationClientRuntime::set_world_item_snapshot_callback(
+	world_replication_world_item_snapshot_callback callback,
+	void *user_data) noexcept
+{
+	if (!this->initialized_)
+		return (FT_ERR_NOT_INITIALISED);
+	return (this->client_.set_world_item_snapshot_callback(callback, user_data));
+}
+
+int32_t WorldReplicationClientRuntime::set_world_item_replica_store(
+	WorldItemReplicaStore *store) noexcept
+{
+	if (!this->initialized_)
+		return (FT_ERR_NOT_INITIALISED);
+	return (this->client_.set_world_item_replica_store(store));
+}
+
 int32_t WorldReplicationClientRuntime::restore_cursor(
 	uint64_t subscription_id,
 	networking_replication_peer_cursor &cursor) const

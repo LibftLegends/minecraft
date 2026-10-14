@@ -22,6 +22,8 @@ class WorldReplicationServerRuntime
 		networking_message_connection &connection, uint64_t session_id);
 	int32_t set_repair_request_callback(
 		world_replication_repair_request_callback callback, void *user_data);
+	int32_t set_boat_move_callback(
+		world_replication_boat_move_callback callback, void *user_data);
 	int32_t create_chunk_hash_manifest(int32_t chunk_x, int32_t chunk_z,
 		uint64_t session_id, ProtocolChunkHashManifestMessage &manifest) const;
 	int32_t broadcast_hash_manifest(

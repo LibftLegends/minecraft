@@ -10,6 +10,7 @@
 # include "ProtocolChunkRepairResponseMessage.hpp"
 # include "ProtocolChunkRepairRequestMessage.hpp"
 # include "ProtocolChunkHashManifestMessage.hpp"
+# include "ProtocolWorldItemSnapshotMessage.hpp"
 # include "ProtocolMessageHeader.hpp"
 # include "../world/World.hpp"
 # include "../../Libft/Modules/Networking/networking_replication_protocol.hpp"
@@ -26,6 +27,7 @@ class WorldReplicationService
 		uint64_t world_id);
 	uint64_t server_instance_id() const;
 	uint64_t world_id() const;
+	uint64_t world_item_change_revision() const noexcept;
 	int32_t handle_edit_intent(const ProtocolEditIntentMessage &intent,
 		ProtocolEditResultMessage &result);
 	int32_t validate_chunk_acknowledgement(
@@ -33,6 +35,8 @@ class WorldReplicationService
 		uint64_t session_id) const;
 	int32_t create_chunk_snapshot(int32_t chunk_x, int32_t chunk_z,
 		uint64_t session_id, ProtocolChunkSnapshotMessage &snapshot);
+	int32_t create_world_item_snapshot(int32_t chunk_x, int32_t chunk_z,
+		uint64_t session_id, ProtocolWorldItemSnapshotMessage &snapshot) const;
 	int32_t create_chunk_hash_manifest(int32_t chunk_x, int32_t chunk_z,
 		uint64_t session_id, ProtocolChunkHashManifestMessage &manifest) const;
 	int32_t create_chunk_repair_response(
@@ -50,6 +54,9 @@ class WorldReplicationService
 	int32_t send_chunk_snapshot(networking_message_connection &connection,
 		const ProtocolChunkSnapshotMessage &snapshot, uint64_t session_id,
 		uint64_t message_sequence) const;
+	int32_t send_world_item_snapshot(networking_message_connection &connection,
+		const ProtocolWorldItemSnapshotMessage &snapshot,
+		uint64_t session_id, uint64_t message_sequence) const;
 	int32_t send_chunk_repair_response(
 		networking_message_connection &connection,
 		const ProtocolChunkRepairResponseMessage &response,

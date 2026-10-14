@@ -1,17 +1,19 @@
 #include "../../src/network/WorldReplicationServer.hpp"
 
 WorldReplicationServer::WorldReplicationServer()
-	: service_(nullptr), peers_(), peer_active_(), delta_journal_(),
-	light_journal_(), initialized_(false)
-	, repair_request_callback_(nullptr), repair_request_user_data_(nullptr)
+	: service_(nullptr), peers_(), peer_active_(), next_item_peer_cursor_(0U),
+	delta_journal_(), light_journal_(), initialized_(false)
+	, repair_request_callback_(nullptr), repair_request_user_data_(nullptr),
+	boat_move_callback_(nullptr), boat_move_user_data_(nullptr)
 {
 }
 
 WorldReplicationServer::WorldReplicationServer(
 	const WorldReplicationServer &other)
-	: service_(nullptr), peers_(), peer_active_(), delta_journal_(),
-	light_journal_(), initialized_(false)
-	, repair_request_callback_(nullptr), repair_request_user_data_(nullptr)
+	: service_(nullptr), peers_(), peer_active_(), next_item_peer_cursor_(0U),
+	delta_journal_(), light_journal_(), initialized_(false)
+	, repair_request_callback_(nullptr), repair_request_user_data_(nullptr),
+	boat_move_callback_(nullptr), boat_move_user_data_(nullptr)
 {
 	(void)other;
 }
@@ -119,6 +121,13 @@ int32_t WorldReplicationServer::add_peer_internal(
 		&& this->repair_request_callback_ != nullptr)
 		error_code = this->peers_[index].set_repair_request_callback(
 			this->repair_request_callback_, this->repair_request_user_data_);
+	if (error_code == FT_ERR_SUCCESS
+		&& this->boat_move_callback_ != nullptr)
+		error_code = this->peers_[index].set_boat_move_callback(
+			this->boat_move_callback_, this->boat_move_user_data_);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = this->peers_[index].set_entity_broadcast_callback(
+			&WorldReplicationServer::broadcast_entity_update, this);
 	if (error_code != FT_ERR_SUCCESS)
 	{
 		int32_t cleanup_error = this->peers_[index].destroy();
@@ -154,6 +163,32 @@ int32_t WorldReplicationServer::set_repair_request_callback(
 		}
 		index += 1U;
 	}
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t WorldReplicationServer::set_boat_move_callback(
+	world_replication_boat_move_callback callback, void *user_data)
+{
+	uint32_t index = 0U;
+	int32_t result;
+
+	if (!this->initialized_)
+		return (FT_ERR_NOT_INITIALISED);
+	if (callback == nullptr)
+		return (FT_ERR_INVALID_POINTER);
+	while (index < WORLD_REPLICATION_MAX_PEERS)
+	{
+		if (this->peer_active_[index] != 0U)
+		{
+			result = this->peers_[index].set_boat_move_callback(
+				callback, user_data);
+			if (result != FT_ERR_SUCCESS)
+				return (result);
+		}
+		++index;
+	}
+	this->boat_move_callback_ = callback;
+	this->boat_move_user_data_ = user_data;
 	return (FT_ERR_SUCCESS);
 }
 
@@ -277,6 +312,43 @@ int32_t WorldReplicationServer::broadcast_hash_manifest(
 	return (this->fanout_hash_manifest(manifest));
 }
 
+int32_t WorldReplicationServer::refresh_world_item_snapshots(
+	uint32_t maximum_snapshots, uint32_t &processed_snapshots) noexcept
+{
+	uint32_t index;
+	uint32_t peer_processed;
+	uint32_t start_index;
+	int32_t error;
+	processed_snapshots = 0U;
+	if (!this->initialized_)
+		return (FT_ERR_NOT_INITIALISED);
+	if (maximum_snapshots == 0U)
+		return (FT_ERR_INVALID_ARGUMENT);
+	this->next_item_peer_cursor_ %= WORLD_REPLICATION_MAX_PEERS;
+	start_index = this->next_item_peer_cursor_;
+	uint32_t scanned = 0U;
+	while (scanned < WORLD_REPLICATION_MAX_PEERS
+		&& processed_snapshots < maximum_snapshots)
+	{
+		index = (start_index + scanned)
+			% WORLD_REPLICATION_MAX_PEERS;
+		if (this->peer_active_[index] != 0U)
+		{
+			peer_processed = 0U;
+			error = this->peers_[index].refresh_item_snapshots(
+				maximum_snapshots - processed_snapshots, peer_processed);
+			processed_snapshots += peer_processed;
+			if (error != FT_ERR_SUCCESS)
+				return (error);
+			if (peer_processed > 0U)
+				this->next_item_peer_cursor_ = (index + 1U)
+					% WORLD_REPLICATION_MAX_PEERS;
+		}
+		scanned += 1U;
+	}
+	return (FT_ERR_SUCCESS);
+}
+
 int32_t WorldReplicationServer::synchronize_light_peer(
 	uint64_t connection_id, int32_t chunk_x, int32_t chunk_z,
 	uint64_t base_revision)
@@ -371,6 +443,42 @@ int32_t WorldReplicationServer::synchronize_request(
 		error_code = server->synchronize_light_peer(connection_id,
 		request.chunk_x, request.chunk_z, request.light_revision);
 	return (error_code);
+}
+
+int32_t WorldReplicationServer::broadcast_entity_update(
+	const EntityState &entity, uint64_t source_connection_id,
+	void *user_data) noexcept
+{
+	WorldReplicationServer *server;
+
+	if (user_data == nullptr)
+		return (FT_ERR_INVALID_POINTER);
+	server = static_cast<WorldReplicationServer *>(user_data);
+	return (server->fanout_entity_update(entity, source_connection_id));
+}
+
+int32_t WorldReplicationServer::fanout_entity_update(
+	const EntityState &entity, uint64_t source_connection_id) noexcept
+{
+	uint32_t index;
+	int32_t first_error;
+	int32_t error_code;
+
+	first_error = FT_ERR_SUCCESS;
+	index = 0U;
+	while (index < WORLD_REPLICATION_MAX_PEERS)
+	{
+		if (this->peer_active_[index] != 0U
+			&& this->peers_[index].connection_id() != source_connection_id)
+		{
+			error_code = this->peers_[index].publish_entity_update(entity);
+			if (first_error == FT_ERR_SUCCESS
+				&& error_code != FT_ERR_SUCCESS)
+				first_error = error_code;
+		}
+		index += 1U;
+	}
+	return (first_error);
 }
 
 int32_t WorldReplicationServer::fanout_block_delta(
@@ -551,6 +659,8 @@ int32_t WorldReplicationServer::destroy()
 	this->service_ = nullptr;
 	this->repair_request_callback_ = nullptr;
 	this->repair_request_user_data_ = nullptr;
+	this->boat_move_callback_ = nullptr;
+	this->boat_move_user_data_ = nullptr;
 	if (this->delta_journal_.destroy() != FT_ERR_SUCCESS
 		&& first_error == FT_ERR_SUCCESS)
 		first_error = FT_ERR_INTERNAL;

@@ -1,4 +1,11 @@
 #include "../../src/validators/BlockEditValidator.hpp"
+#include "../../src/interaction/BlockInteractor.hpp"
+#include "../../src/inventory/MinecraftItemCatalog.hpp"
+#include "../../src/inventory/MinecraftLootCatalog.hpp"
+#include "../../src/entities/WorldItemStore.hpp"
+#include "../../src/transactions/WorldFarmlandTransaction.hpp"
+#include "../../src/camera/Camera.hpp"
+#include "../../src/app/GameSession.hpp"
 #include <algorithm>
 #include <chrono>
 #include <memory>
@@ -144,6 +151,427 @@ namespace
 			|| light[4][2] != 1U)
 			return (1);
 		return (0);
+	}
+
+	static int32_t validate_mining_drop_merge(World &world, int32_t x,
+		int32_t y, int32_t z, uint32_t mined_block_id,
+		uint32_t expected_block_after = GAME_VOXEL_AIR_BLOCK) noexcept
+	{
+		MinecraftItemCatalog catalog;
+		WorldItemStore items;
+		MinecraftBlockItemRule rule = {};
+		ft_sharedptr<game_item> nearby_stack;
+		uint64_t nearby_entity_id = 0U;
+		uint32_t block_after = GAME_VOXEL_AIR_BLOCK;
+		int32_t result;
+
+		result = catalog.initialize();
+		if (result == FT_ERR_SUCCESS)
+			result = items.initialize();
+		if (result == FT_ERR_SUCCESS)
+			result = catalog.resolve_block_item_rule(
+			mined_block_id, &rule);
+		if (result == FT_ERR_SUCCESS
+			&& rule.policy != MINECRAFT_BLOCK_ACQUISITION_SELF_ITEM
+			&& rule.policy != MINECRAFT_BLOCK_ACQUISITION_OTHER_ITEM)
+			result = FT_ERR_INVALID_STATE;
+		if (result == FT_ERR_SUCCESS)
+			result = catalog.create_item(rule.item_id, 5, &nearby_stack);
+		if (result == FT_ERR_SUCCESS)
+			result = items.spawn(nearby_stack, static_cast<double>(x) + 1.0,
+				static_cast<double>(y) + 0.5, static_cast<double>(z) + 0.5,
+				1U, 42U, 0U, &nearby_entity_id);
+		if (result == FT_ERR_SUCCESS)
+			result = world.place_block_at(x, y, z, mined_block_id);
+		Camera camera;
+		camera.initialize();
+		camera.x = static_cast<double>(x) + 0.5;
+		camera.y = static_cast<double>(y) + 2.5;
+		camera.z = static_cast<double>(z) + 0.5;
+		camera.yaw = 0.0;
+		camera.pitch = -1.5707963267948966;
+		if (result == FT_ERR_SUCCESS)
+			result = BlockInteractor::try_delete_target_block(&world, camera,
+				catalog, items, 42U, 2U);
+		if (result == FT_ERR_SUCCESS
+			&& (!world.block_id_at(x, y, z, &block_after)
+				|| block_after != expected_block_after))
+			result = FT_ERR_INVALID_STATE;
+		if (result == FT_ERR_SUCCESS)
+		{
+			std::vector<WorldItemSnapshot> nearby;
+			result = items.query_nearby(static_cast<double>(x) + 0.5,
+				static_cast<double>(y) + 0.5, static_cast<double>(z) + 0.5,
+				1.0, 42U, 2U, &nearby);
+			if (result == FT_ERR_SUCCESS
+				&& (nearby.size() != 1U
+					|| nearby[0].entity_id != nearby_entity_id
+					|| nearby[0].item_id != rule.item_id
+					|| nearby[0].quantity != 6))
+				result = FT_ERR_INVALID_STATE;
+		}
+		if (result == FT_ERR_SUCCESS)
+			std::printf("block-edit: mining-drop=published-and-merged block=%u item=%d\n",
+				mined_block_id, rule.item_id);
+		else
+			std::fprintf(stderr, "block-edit: mining-drop failed block=%u "
+				"policy=%u item=%d result=%d expected-after=%u actual-after=%u\n",
+				mined_block_id, static_cast<unsigned int>(rule.policy),
+				rule.item_id, result, expected_block_after,
+				static_cast<unsigned int>(block_after));
+		return (result);
+	}
+
+	static int32_t validate_mature_wheat_harvest(World &world, int32_t x,
+		int32_t y, int32_t z) noexcept
+	{
+		MinecraftItemCatalog catalog;
+		WorldItemStore items;
+		uint32_t block_after = GAME_VOXEL_AIR_BLOCK;
+		const char *failed_stage = "catalog-initialize";
+		int32_t result = catalog.initialize();
+		if (result == FT_ERR_SUCCESS)
+			failed_stage = "store-initialize";
+		if (result == FT_ERR_SUCCESS)
+			result = items.initialize();
+		if (result == FT_ERR_SUCCESS)
+			failed_stage = "crop-place";
+		if (result == FT_ERR_SUCCESS)
+		{
+			result = world.place_block_at(x, y, z,
+				VOXEL_GENERATOR_WHEAT_CROP_MATURE_BLOCK_ID);
+		}
+		if (result == FT_ERR_SUCCESS)
+			failed_stage = "crop-harvest";
+		Camera camera;
+		camera.initialize();
+		camera.x = static_cast<double>(x) + 0.5;
+		camera.y = static_cast<double>(y) + 2.5;
+		camera.z = static_cast<double>(z) + 0.5;
+		camera.yaw = 0.0;
+		camera.pitch = -1.5707963267948966;
+		if (result == FT_ERR_SUCCESS)
+			result = BlockInteractor::try_delete_target_block(&world, camera,
+				catalog, items, 42U, 2U);
+		if (result != FT_ERR_SUCCESS)
+			std::fprintf(stderr, "block-edit: wheat stage=%s error=%d id=%u\n",
+				failed_stage, result,
+				VOXEL_GENERATOR_WHEAT_CROP_MATURE_BLOCK_ID);
+		if (result == FT_ERR_SUCCESS
+			&& (!world.block_id_at(x, y, z, &block_after)
+				|| block_after != GAME_VOXEL_AIR_BLOCK))
+			result = FT_ERR_INVALID_STATE;
+		if (result == FT_ERR_SUCCESS)
+		{
+			failed_stage = "ground-drop-query";
+			std::vector<WorldItemSnapshot> nearby;
+			result = items.query_nearby(static_cast<double>(x) + 0.5,
+				static_cast<double>(y) + 0.5, static_cast<double>(z) + 0.5,
+				1.0, 42U, 2U, &nearby);
+			bool found_wheat = false;
+			bool found_seeds = false;
+			for (const WorldItemSnapshot &entry : nearby)
+			{
+				found_wheat = found_wheat
+					|| (entry.item_id == MinecraftItemCatalog::WHEAT_ITEM_ID
+						&& entry.quantity == 1);
+				found_seeds = found_seeds
+					|| (entry.item_id == MinecraftItemCatalog::SEEDS_ITEM_ID
+						&& entry.quantity == 1);
+			}
+			if (result == FT_ERR_SUCCESS
+				&& (nearby.size() != 2U || !found_wheat || !found_seeds))
+				result = FT_ERR_INVALID_STATE;
+		}
+		if (result == FT_ERR_SUCCESS)
+			std::printf("block-edit: wheat mature harvest=1 wheat,1 seeds\n");
+		return (result);
+	}
+
+	static int32_t validate_tree_fruit_harvest(World &world, int32_t x,
+		int32_t y, int32_t z, uint32_t leaf_block_id,
+		int32_t fruit_item_id) noexcept
+	{
+	MinecraftItemCatalog catalog;
+	WorldItemStore items;
+	MinecraftLootDrop expected_fruit = {};
+	uint64_t harvest_tick = 0U;
+	uint32_t block_after = GAME_VOXEL_AIR_BLOCK;
+	int32_t result = catalog.initialize();
+	if (result == FT_ERR_SUCCESS)
+		result = items.initialize();
+	if (result == FT_ERR_SUCCESS)
+	{
+		for (uint64_t tick = 2U; tick < 4096U; ++tick)
+		{
+			if (MinecraftLootCatalog::resolve_tree_fruit(leaf_block_id, x, y, z,
+					tick, &expected_fruit) == FT_ERR_SUCCESS
+				&& expected_fruit.item_id == fruit_item_id)
+			{
+				harvest_tick = tick;
+				break;
+			}
+		}
+		if (harvest_tick == 0U)
+			result = FT_ERR_INVALID_STATE;
+	}
+	if (result == FT_ERR_SUCCESS)
+		result = world.place_block_at(x, y, z, leaf_block_id);
+	Camera camera;
+	camera.initialize();
+	camera.x = static_cast<double>(x) + 0.5;
+	camera.y = static_cast<double>(y) + 2.5;
+	camera.z = static_cast<double>(z) + 0.5;
+	camera.yaw = 0.0;
+	camera.pitch = -1.5707963267948966;
+	if (result == FT_ERR_SUCCESS)
+		result = BlockInteractor::try_delete_target_block(&world, camera,
+			catalog, items, 42U, harvest_tick);
+	if (result == FT_ERR_SUCCESS
+		&& (!world.block_id_at(x, y, z, &block_after)
+			|| block_after != GAME_VOXEL_AIR_BLOCK))
+		result = FT_ERR_INVALID_STATE;
+	if (result == FT_ERR_SUCCESS)
+	{
+		std::vector<WorldItemSnapshot> nearby;
+		result = items.query_nearby(static_cast<double>(x) + 0.5,
+			static_cast<double>(y) + 0.5, static_cast<double>(z) + 0.5,
+			1.0, 42U, harvest_tick, &nearby);
+		bool found_leaf = false;
+		bool found_fruit = false;
+		for (const WorldItemSnapshot &entry : nearby)
+		{
+			found_leaf = found_leaf
+				|| (entry.item_id == MinecraftItemCatalog::BLOCK_ITEM_ID_BASE
+					+ static_cast<int32_t>(leaf_block_id)
+					&& entry.quantity == 1);
+			found_fruit = found_fruit
+				|| (entry.item_id == fruit_item_id && entry.quantity == 1);
+		}
+		if (result == FT_ERR_SUCCESS
+			&& (nearby.size() != 2U || !found_leaf || !found_fruit))
+			result = FT_ERR_INVALID_STATE;
+	}
+	return (result);
+	}
+
+	struct FarmlandSnapshotFixture
+	{
+		uint32_t calls;
+		uint32_t fail_on_call;
+	};
+
+	static int32_t farmland_snapshot_callback(void *context) noexcept
+	{
+		FarmlandSnapshotFixture *fixture =
+			static_cast<FarmlandSnapshotFixture *>(context);
+		if (fixture == nullptr)
+			return (FT_ERR_INVALID_ARGUMENT);
+		++fixture->calls;
+		if (fixture->calls == fixture->fail_on_call)
+			return (FT_ERR_IO);
+		return (FT_ERR_SUCCESS);
+	}
+
+	static void farmland_test_append_u32(std::vector<uint8_t> &bytes,
+		uint32_t value)
+	{
+		for (uint32_t shift = 0U; shift < 32U; shift += 8U)
+			bytes.push_back(static_cast<uint8_t>(value >> shift));
+	}
+
+	static void farmland_test_append_u64(std::vector<uint8_t> &bytes,
+		uint64_t value)
+	{
+		for (uint32_t shift = 0U; shift < 64U; shift += 8U)
+			bytes.push_back(static_cast<uint8_t>(value >> shift));
+	}
+
+	static bool find_farmland_test_soil(World &world, int32_t start_x,
+		int32_t z, int32_t *x_out, int32_t *y_out) noexcept
+	{
+		if (x_out == nullptr || y_out == nullptr)
+			return (false);
+		for (int32_t x = start_x; x < start_x + 16; ++x)
+		{
+			for (int32_t y = GAME_VOXEL_CHUNK_HEIGHT - 1; y >= 0; --y)
+			{
+				uint32_t block_id = GAME_VOXEL_AIR_BLOCK;
+				if (world.block_id_at(x, y, z, &block_id)
+					&& (block_id == VOXEL_GENERATOR_DIRT_BLOCK_ID
+						|| block_id == VOXEL_GENERATOR_GRASS_BLOCK_ID))
+				{
+					*x_out = x;
+					*y_out = y;
+					return (true);
+				}
+			}
+		}
+		return (false);
+	}
+
+	static int32_t validate_farmland_transaction(World &world,
+		int32_t start_x, int32_t z) noexcept
+	{
+		MinecraftItemCatalog catalog;
+		game_character character;
+		GameTransactionJournal journal;
+		ft_sharedptr<game_item> hoe_item;
+		game_inventory_snapshot inventory = {};
+		FarmlandSnapshotFixture snapshot_state = {0U, 0U};
+		GameSessionSnapshotWriter snapshot_writer = {
+			&farmland_snapshot_callback, &snapshot_state};
+		uint64_t request_id = 0U;
+		bool replayed = false;
+		int32_t soil_x;
+		int32_t soil_y;
+		int32_t result = catalog.initialize();
+		if (result == FT_ERR_SUCCESS)
+			result = character.initialize();
+		if (result == FT_ERR_SUCCESS)
+			result = journal.initialize();
+		if (result == FT_ERR_SUCCESS)
+			result = catalog.create_item(MinecraftItemCatalog::WOOD_HOE_ITEM_ID,
+				1, &hoe_item);
+		if (result == FT_ERR_SUCCESS)
+			result = character.get_inventory().add_item(hoe_item);
+		if (result == FT_ERR_SUCCESS)
+			result = character.get_inventory().get_snapshot(inventory);
+		if (result != FT_ERR_SUCCESS)
+			return (result);
+		auto hoe = std::find_if(inventory.items.begin(), inventory.items.end(),
+			[](const game_inventory_item_snapshot &item)
+			{
+				return (item.item_id == MinecraftItemCatalog::WOOD_HOE_ITEM_ID);
+			});
+		if (hoe == inventory.items.end()
+			|| !find_farmland_test_soil(world, start_x, z, &soil_x, &soil_y))
+			return (FT_ERR_NOT_FOUND);
+		const int32_t first_chunk_x = WorldCoordinates::floor_divide(soil_x,
+			GAME_VOXEL_CHUNK_WIDTH);
+		const int32_t chunk_z = WorldCoordinates::floor_divide(z,
+			GAME_VOXEL_CHUNK_DEPTH);
+		const WorldChunk *first_chunk = world.find_chunk(first_chunk_x, chunk_z);
+		if (first_chunk == nullptr)
+			return (FT_ERR_NOT_FOUND);
+		const uint64_t first_voxel_revision = first_chunk->voxel_revision;
+		result = WorldFarmlandTransaction::execute("test-session", character, world,
+			journal, 100U, hoe->slot, inventory.revision, soil_x, soil_y, z,
+			first_voxel_revision, &snapshot_writer);
+		if (result == FT_ERR_SUCCESS)
+			result = WorldFarmlandTransaction::execute("test-session", character, world,
+				journal, 100U, hoe->slot, inventory.revision, soil_x, soil_y, z,
+				first_voxel_revision, &snapshot_writer);
+		if (result != FT_ERR_SUCCESS)
+	{
+		std::fprintf(stderr, "farmland transaction first/retry failed=%d\n",
+			result);
+			return (result);
+	}
+		uint32_t current_block_id = GAME_VOXEL_AIR_BLOCK;
+		if (!world.block_id_at(soil_x, soil_y, z, &current_block_id)
+			|| current_block_id != VOXEL_GENERATOR_FARMLAND_BLOCK_ID)
+			return (FT_ERR_INVALID_STATE);
+	const int32_t mismatch_result = WorldFarmlandTransaction::execute("test-session",
+		character, world, journal, 100U, hoe->slot, inventory.revision,
+		soil_x + 1, soil_y, z, first_voxel_revision, &snapshot_writer);
+	if (mismatch_result != FT_ERR_INVALID_ARGUMENT)
+	{
+		std::fprintf(stderr, "farmland transaction mismatched retry=%d\n",
+			mismatch_result);
+			return (FT_ERR_INVALID_STATE);
+	}
+		game_inventory_snapshot inventory_after = {};
+		result = character.get_inventory().get_snapshot(inventory_after);
+		if (result != FT_ERR_SUCCESS || inventory_after.revision != inventory.revision
+			|| inventory_after.items.size() != inventory.items.size())
+			return (FT_ERR_INVALID_STATE);
+		int32_t second_x;
+		int32_t second_y;
+		if (!find_farmland_test_soil(world, soil_x + 1, z, &second_x, &second_y))
+			return (FT_ERR_NOT_FOUND);
+		uint32_t original_soil = GAME_VOXEL_AIR_BLOCK;
+		GameTransactionJournal::Record failed_record = {};
+		if (!world.block_id_at(second_x, second_y, z, &original_soil))
+			return (FT_ERR_NOT_FOUND);
+		const int32_t second_chunk_x = WorldCoordinates::floor_divide(second_x,
+			GAME_VOXEL_CHUNK_WIDTH);
+		const WorldChunk *second_chunk = world.find_chunk(second_chunk_x,
+			chunk_z);
+		if (second_chunk == nullptr)
+			return (FT_ERR_NOT_FOUND);
+		snapshot_state.fail_on_call = snapshot_state.calls + 2U;
+	result = WorldFarmlandTransaction::execute("test-session", character, world,
+			journal, 101U, hoe->slot, inventory.revision, second_x, second_y, z,
+			second_chunk->voxel_revision, &snapshot_writer);
+		if (result != FT_ERR_IO
+			|| !world.block_id_at(second_x, second_y, z, &current_block_id)
+			|| current_block_id != original_soil
+			|| journal.find(WorldFarmlandTransaction::journal_scope(), 101U,
+				&failed_record) != FT_ERR_NOT_FOUND)
+	{
+		std::fprintf(stderr,
+			"farmland transaction rollback result=%d block=%u expected=%u\n",
+			result, current_block_id, original_soil);
+			return (FT_ERR_INVALID_STATE);
+	}
+		snapshot_state.fail_on_call = 0U;
+		int32_t recovery_x;
+		int32_t recovery_y;
+		if (!find_farmland_test_soil(world, second_x + 1, z, &recovery_x,
+				&recovery_y))
+			return (FT_ERR_NOT_FOUND);
+		const int32_t recovery_chunk_x = WorldCoordinates::floor_divide(
+			recovery_x, GAME_VOXEL_CHUNK_WIDTH);
+		const WorldChunk *recovery_chunk = world.find_chunk(recovery_chunk_x,
+			chunk_z);
+		if (recovery_chunk == nullptr)
+			return (FT_ERR_NOT_FOUND);
+		std::vector<uint8_t> payload;
+		try
+		{
+			payload.insert(payload.end(), {'G', 'T', 'I', 'L'});
+			farmland_test_append_u32(payload, 1U);
+			farmland_test_append_u64(payload, 102U);
+			farmland_test_append_u32(payload, static_cast<uint32_t>(hoe->slot));
+			farmland_test_append_u32(payload, static_cast<uint32_t>(
+				MinecraftItemCatalog::WOOD_HOE_ITEM_ID));
+			farmland_test_append_u32(payload, 0U);
+			farmland_test_append_u64(payload, inventory.revision);
+			farmland_test_append_u32(payload, static_cast<uint32_t>(recovery_x));
+			farmland_test_append_u32(payload, static_cast<uint32_t>(recovery_y));
+			farmland_test_append_u32(payload, static_cast<uint32_t>(z));
+			farmland_test_append_u64(payload, recovery_chunk->voxel_revision);
+		}
+		catch (...)
+		{
+			return (FT_ERR_NO_MEMORY);
+		}
+		result = journal.prepare(WorldFarmlandTransaction::journal_scope(),
+			102U, WorldFarmlandTransaction::transaction_type(), payload.data(),
+			static_cast<uint32_t>(payload.size()), &request_id, &replayed);
+		if (result == FT_ERR_SUCCESS)
+			result = world.set_block_state_override(recovery_x, recovery_y, z,
+				VOXEL_GENERATOR_FARMLAND_BLOCK_ID);
+		if (result == FT_ERR_SUCCESS)
+			result = WorldFarmlandTransaction::recover_pending("test-session", world,
+				journal, &snapshot_writer);
+		GameTransactionJournal::Record recovered = {};
+		if (result == FT_ERR_SUCCESS)
+			result = journal.find(WorldFarmlandTransaction::journal_scope(),
+				102U, &recovered);
+		if (result != FT_ERR_SUCCESS
+			|| recovered.state != GameTransactionJournal::COMMITTED
+			|| !world.block_id_at(recovery_x, recovery_y, z, &current_block_id)
+			|| current_block_id != VOXEL_GENERATOR_FARMLAND_BLOCK_ID)
+	{
+		std::fprintf(stderr,
+			"farmland transaction recovery result=%d state=%u block=%u\n",
+			result, static_cast<unsigned int>(recovered.state), current_block_id);
+			return (FT_ERR_INVALID_STATE);
+	}
+		std::printf("block-edit: farmland transaction retry,rollback,recovery=ok\n");
+		return (FT_ERR_SUCCESS);
 	}
 }
 
@@ -1772,6 +2200,19 @@ int BlockEditValidator::validate_authoritative_edit(World &world) noexcept
 	if (world.apply_authoritative_block_change(request, &delta)
 		!= FT_ERR_INVALID_STATE)
 		return (ApplicationError::fail("block-edit authoritative stale request", 1));
+	request.request_id = 4U;
+	request.expected_revision = chunk->chunk.get_revision();
+	request.expected_block_id = air_block;
+	request.requested_block_id = VOXEL_GENERATOR_WATER_BLOCK_ID;
+	previous_revision = request.expected_revision;
+	if (world.apply_authoritative_block_change(request, &delta)
+		!= FT_ERR_PERMISSION_DENIED
+		|| chunk->chunk.get_revision() != previous_revision
+		|| chunk->chunk.read_block(local_x, local_y, local_z,
+			&current_block_id) != FT_ERR_SUCCESS
+		|| current_block_id != air_block)
+		return (ApplicationError::fail(
+			"block-edit authoritative fluid bypass", 1));
 	return (FT_ERR_SUCCESS);
 }
 
@@ -1904,6 +2345,471 @@ int BlockEditValidator::validate() const
 		world.destroy();
 		return (1);
 	}
+
 	world.destroy();
 	return (0);
+}
+
+int BlockEditValidator::validate_mining_drop() noexcept
+{
+	std::unique_ptr<World> world_storage(new (std::nothrow) World());
+	int32_t x = 2;
+	int32_t z = -6;
+	int32_t y = 0;
+	size_t mesh_before = 0U;
+	int32_t result;
+
+	if (!world_storage)
+		return (ApplicationError::fail("mining-drop world allocation",
+			FT_ERR_NO_MEMORY));
+	World &world = *world_storage;
+	result = world.initialize("mining-drop-integration-seed");
+	if (result == FT_ERR_SUCCESS)
+		result = wait_for_edit_baseline(world, x, z);
+	if (result == FT_ERR_SUCCESS
+		&& BlockEditValidator::prepare_edit_target(world, x, z, y,
+			mesh_before) != 0)
+		result = FT_ERR_INVALID_STATE;
+	if (result == FT_ERR_SUCCESS)
+		result = validate_mining_drop_merge(world, x, y, z,
+			VOXEL_GENERATOR_DIRT_BLOCK);
+	if (result == FT_ERR_SUCCESS
+		&& BlockEditValidator::prepare_edit_target(world, x + 1, z, y,
+			mesh_before) != 0)
+		result = FT_ERR_INVALID_STATE;
+	if (result == FT_ERR_SUCCESS)
+		result = validate_mining_drop_merge(world, x + 1, y, z,
+			VOXEL_GENERATOR_COAL_ORE_BLOCK);
+	if (result == FT_ERR_SUCCESS
+		&& BlockEditValidator::prepare_edit_target(world, x + 2, z, y,
+			mesh_before) != 0)
+		result = FT_ERR_INVALID_STATE;
+	if (result == FT_ERR_SUCCESS)
+		result = validate_mining_drop_merge(world, x + 2, y, z,
+			VOXEL_GENERATOR_SEAGRASS_BLOCK);
+	if (result == FT_ERR_SUCCESS
+		&& BlockEditValidator::prepare_edit_target(world, x + 3, z, y,
+			mesh_before) != 0)
+		result = FT_ERR_INVALID_STATE;
+	if (result == FT_ERR_SUCCESS)
+		result = validate_mining_drop_merge(world, x + 3, y, z,
+			VOXEL_GENERATOR_TALL_GRASS_BLOCK);
+	if (result == FT_ERR_SUCCESS
+		&& BlockEditValidator::prepare_edit_target(world, x + 4, z, y,
+			mesh_before) != 0)
+		result = FT_ERR_INVALID_STATE;
+	if (result == FT_ERR_SUCCESS)
+		result = validate_mining_drop_merge(world, x + 4, y, z,
+			VOXEL_GENERATOR_RED_FLOWER_BLOCK);
+	if (result == FT_ERR_SUCCESS
+		&& BlockEditValidator::prepare_edit_target(world, x + 5, z, y,
+			mesh_before) != 0)
+		result = FT_ERR_INVALID_STATE;
+	if (result == FT_ERR_SUCCESS)
+		result = validate_mining_drop_merge(world, x + 5, y, z,
+			VOXEL_GENERATOR_YELLOW_FLOWER_BLOCK);
+	if (result == FT_ERR_SUCCESS
+		&& BlockEditValidator::prepare_edit_target(world, x + 6, z, y,
+			mesh_before) != 0)
+		result = FT_ERR_INVALID_STATE;
+	if (result == FT_ERR_SUCCESS)
+		result = validate_mature_wheat_harvest(world, x + 6, y, z);
+	world.destroy();
+	if (result != FT_ERR_SUCCESS)
+		return (ApplicationError::fail("mining-drop integration", result));
+	return (0);
+}
+
+int BlockEditValidator::validate_wheat_crop() noexcept
+{
+	std::unique_ptr<World> world_storage(new (std::nothrow) World());
+	const int32_t x = 2;
+	const int32_t z = -6;
+	int32_t y = 0;
+	size_t mesh_before = 0U;
+	int32_t result;
+
+	if (!world_storage)
+		return (ApplicationError::fail("wheat-crop world allocation",
+			FT_ERR_NO_MEMORY));
+	World &world = *world_storage;
+	result = world.initialize("wheat-crop-harvest-validator");
+	if (result == FT_ERR_SUCCESS)
+		result = wait_for_edit_baseline(world, x, z);
+	if (result == FT_ERR_SUCCESS
+		&& BlockEditValidator::prepare_edit_target(world, x, z, y,
+			mesh_before) != 0)
+		result = FT_ERR_INVALID_STATE;
+	if (result == FT_ERR_SUCCESS)
+	{
+		uint32_t soil_block_id = GAME_VOXEL_AIR_BLOCK;
+		int32_t soil_y = y - 1;
+		const int32_t chunk_x = WorldCoordinates::floor_divide(x,
+			GAME_VOXEL_CHUNK_WIDTH);
+		const int32_t chunk_z = WorldCoordinates::floor_divide(z,
+			GAME_VOXEL_CHUNK_DEPTH);
+		const WorldChunk *chunk = world.find_chunk(chunk_x, chunk_z);
+		while (soil_y >= 0 && chunk != nullptr
+			&& world.block_id_at(x, soil_y, z, &soil_block_id)
+			&& soil_block_id != VOXEL_GENERATOR_DIRT_BLOCK_ID
+			&& soil_block_id != VOXEL_GENERATOR_GRASS_BLOCK_ID)
+			--soil_y;
+		if (soil_y < 0 || chunk == nullptr
+			|| !world.block_id_at(x, soil_y, z, &soil_block_id))
+		{
+			result = FT_ERR_INVALID_STATE;
+		}
+		else
+		{
+			const uint64_t soil_revision = chunk->voxel_revision;
+			result = world.till_farmland_at(x, soil_y, z, soil_revision);
+			if (result == FT_ERR_SUCCESS
+				&& world.till_farmland_at(x, soil_y, z, soil_revision)
+				!= FT_ERR_INVALID_STATE)
+				result = FT_ERR_INVALID_STATE;
+			if (result == FT_ERR_SUCCESS
+				&& (!world.block_id_at(x, soil_y, z, &soil_block_id)
+					|| soil_block_id != VOXEL_GENERATOR_FARMLAND_BLOCK_ID))
+				result = FT_ERR_INVALID_STATE;
+			if (result == FT_ERR_SUCCESS
+				&& world.farmland_is_hydrated(x, soil_y, z))
+				result = FT_ERR_INVALID_STATE;
+			const WorldChunk *water_chunk = world.find_chunk(chunk_x, chunk_z);
+			if (result == FT_ERR_SUCCESS && water_chunk == nullptr)
+				result = FT_ERR_NOT_FOUND;
+			if (result == FT_ERR_SUCCESS)
+				result = world.replace_fluid_source_at(x + 1, soil_y + 1, z,
+					GAME_VOXEL_AIR_BLOCK, VOXEL_GENERATOR_WATER_BLOCK_ID,
+					water_chunk->voxel_revision);
+			if (result == FT_ERR_SUCCESS
+				&& !world.farmland_is_hydrated(x, soil_y, z))
+				result = FT_ERR_INVALID_STATE;
+			water_chunk = world.find_chunk(chunk_x, chunk_z);
+			if (result == FT_ERR_SUCCESS && water_chunk == nullptr)
+				result = FT_ERR_NOT_FOUND;
+			if (result == FT_ERR_SUCCESS)
+				result = world.replace_fluid_source_at(x + 1, soil_y + 1, z,
+					VOXEL_GENERATOR_WATER_BLOCK_ID, GAME_VOXEL_AIR_BLOCK,
+					water_chunk->voxel_revision);
+			if (result == FT_ERR_SUCCESS
+				&& world.farmland_is_hydrated(x, soil_y, z))
+				result = FT_ERR_INVALID_STATE;
+			y = soil_y + 1;
+		}
+	}
+	if (result == FT_ERR_SUCCESS)
+		result = validate_mature_wheat_harvest(world, x, y, z);
+	if (result != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "crop-validation-stage=wheat-harvest error=%d\n", result);
+	if (result == FT_ERR_SUCCESS)
+		result = validate_tree_fruit_harvest(world, x + 1, y, z,
+			VOXEL_GENERATOR_OAK_LEAVES_BLOCK_ID,
+			MinecraftItemCatalog::APPLE_ITEM_ID);
+	if (result != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "crop-validation-stage=apple-harvest error=%d\n", result);
+	if (result == FT_ERR_SUCCESS)
+		result = validate_tree_fruit_harvest(world, x + 2, y, z,
+			VOXEL_GENERATOR_BIRCH_LEAVES_BLOCK_ID,
+			MinecraftItemCatalog::PEAR_ITEM_ID);
+	if (result != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "crop-validation-stage=pear-harvest error=%d\n", result);
+	if (result == FT_ERR_SUCCESS
+		&& BlockEditValidator::prepare_edit_target(world, x + 3, z, y,
+			mesh_before) != 0)
+		result = FT_ERR_INVALID_STATE;
+	if (result == FT_ERR_SUCCESS)
+		result = validate_mining_drop_merge(world, x + 3, y, z,
+			VOXEL_GENERATOR_PAPER_REED_BLOCK_ID,
+			VOXEL_GENERATOR_PAPER_REED_IMMATURE_BLOCK_ID);
+	if (result != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "crop-validation-stage=reed-harvest error=%d\n", result);
+	if (result == FT_ERR_SUCCESS)
+	{
+		const int32_t reed_x = x + 3;
+		const int32_t water_x = x + 1;
+		const int32_t chunk_x = WorldCoordinates::floor_divide(reed_x,
+			GAME_VOXEL_CHUNK_WIDTH);
+		const int32_t chunk_z = WorldCoordinates::floor_divide(z,
+			GAME_VOXEL_CHUNK_DEPTH);
+		const WorldChunk *chunk = world.find_chunk(chunk_x, chunk_z);
+		uint32_t reed_id = GAME_VOXEL_AIR_BLOCK;
+		if (chunk == nullptr
+			|| !world.block_id_at(reed_x, y, z, &reed_id)
+			|| reed_id != VOXEL_GENERATOR_PAPER_REED_IMMATURE_BLOCK_ID
+			|| world.has_water_source_near(reed_x, y - 1, z))
+			result = FT_ERR_INVALID_STATE;
+		else
+			result = world.replace_fluid_source_at(water_x, y, z,
+				GAME_VOXEL_AIR_BLOCK, VOXEL_GENERATOR_WATER_BLOCK_ID,
+				chunk->voxel_revision);
+		if (result == FT_ERR_SUCCESS
+			&& !world.has_water_source_near(reed_x, y - 1, z))
+			result = FT_ERR_INVALID_STATE;
+		chunk = world.find_chunk(chunk_x, chunk_z);
+		if (result == FT_ERR_SUCCESS && chunk == nullptr)
+			result = FT_ERR_NOT_FOUND;
+		if (result == FT_ERR_SUCCESS)
+			result = world.replace_fluid_source_at(water_x, y, z,
+				VOXEL_GENERATOR_WATER_BLOCK_ID, GAME_VOXEL_AIR_BLOCK,
+				chunk->voxel_revision);
+		if (result == FT_ERR_SUCCESS
+			&& world.has_water_source_near(reed_x, y - 1, z))
+			result = FT_ERR_INVALID_STATE;
+	}
+	if (result == FT_ERR_SUCCESS)
+		result = validate_farmland_transaction(world, x + 4, z);
+	if (result != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "crop-validation-stage=tilling error=%d\n", result);
+	if (result == FT_ERR_SUCCESS)
+		result = validate_paper_reed_regrowth_tick();
+	world.destroy();
+	if (result != FT_ERR_SUCCESS)
+		return (ApplicationError::fail("wheat-crop harvest", result));
+	std::printf("block-edit: crop sources=tilling,wheat,seeds,apple,pear\n");
+	return (0);
+}
+
+int BlockEditValidator::validate_paper_reed_regrowth_tick() noexcept
+{
+	GameSession session;
+	World &world = session.world_;
+	int32_t plant_x = 0;
+	int32_t plant_y = 0;
+	int32_t plant_z = 0;
+	bool found = false;
+	int32_t result = world.initialize("wheat-crop-harvest-validator");
+	if (result == FT_ERR_SUCCESS)
+		result = wait_for_edit_baseline(world, 2, -6);
+	if (result != FT_ERR_SUCCESS)
+	{
+		std::fprintf(stderr, "paper-reed growth setup failed=%d\n", result);
+		world.destroy();
+		return (result);
+	}
+	session.camera_.initialize();
+	CropGrowthPolicy invalid_growth_policy = {0U, 3U, 9U, 12U, 4U};
+	if (session.configure_crop_growth_policy(invalid_growth_policy)
+		!= FT_ERR_INVALID_ARGUMENT)
+		result = FT_ERR_INVALID_STATE;
+	CropGrowthPolicy invalid_radius_policy = {200U, 3U, 9U, 12U, 9U};
+	if (result == FT_ERR_SUCCESS
+		&& session.configure_crop_growth_policy(invalid_radius_policy)
+			!= FT_ERR_INVALID_ARGUMENT)
+		result = FT_ERR_INVALID_STATE;
+	CropGrowthPolicy growth_policy = {200U, 3U, 9U, 12U, 0U};
+	if (result == FT_ERR_SUCCESS)
+		result = session.configure_crop_growth_policy(growth_policy);
+	for (int32_t z = -10; z < -2 && !found; ++z)
+	{
+		for (int32_t x = -2; x < 6 && !found; ++x)
+		{
+			for (int32_t y = 2; y < GAME_VOXEL_CHUNK_HEIGHT - 1; ++y)
+			{
+				uint32_t soil_id = GAME_VOXEL_AIR_BLOCK;
+				uint32_t plant_id = GAME_VOXEL_AIR_BLOCK;
+				uint32_t water_cell_id = GAME_VOXEL_AIR_BLOCK;
+				const uint32_t growth_hash = static_cast<uint32_t>(x)
+					* 73856093U ^ static_cast<uint32_t>(y) * 19349663U
+					^ static_cast<uint32_t>(z) * 83492791U ^ 2U;
+				if (growth_hash % 3U != 0U
+					|| !world.block_id_at(x, y - 1, z, &soil_id)
+					|| (soil_id != VOXEL_GENERATOR_GRASS_BLOCK_ID
+						&& soil_id != VOXEL_GENERATOR_DIRT_BLOCK_ID
+						&& soil_id != VOXEL_GENERATOR_MUD_BLOCK_ID
+						&& soil_id != VOXEL_GENERATOR_SAND_BLOCK_ID)
+					|| !world.block_id_at(x, y, z, &plant_id)
+					|| plant_id != GAME_VOXEL_AIR_BLOCK
+					|| !world.block_id_at(x + 1, y, z, &water_cell_id)
+					|| water_cell_id != GAME_VOXEL_AIR_BLOCK)
+					continue;
+				plant_x = x;
+				plant_y = y;
+				plant_z = z;
+				found = true;
+				break;
+			}
+		}
+	}
+	if (!found)
+	{
+		std::fprintf(stderr, "paper-reed growth fixture found no soil cell\n");
+		result = FT_ERR_NOT_FOUND;
+	}
+	for (int32_t water_y = std::max(0, plant_y - 2);
+		water_y <= std::min(GAME_VOXEL_CHUNK_HEIGHT - 1, plant_y);
+		++water_y)
+	{
+		for (int32_t water_z = plant_z - 4; water_z <= plant_z + 4;
+			++water_z)
+		{
+			for (int32_t water_x = plant_x - 4; water_x <= plant_x + 4;
+				++water_x)
+			{
+				uint32_t water_id = GAME_VOXEL_AIR_BLOCK;
+				if (result != FT_ERR_SUCCESS
+					|| !world.block_id_at(water_x, water_y, water_z, &water_id)
+					|| water_id != VOXEL_GENERATOR_WATER_BLOCK_ID)
+					continue;
+				WorldChunk *water_chunk = world.find_chunk_mutable(
+					WorldCoordinates::floor_divide(water_x,
+						GAME_VOXEL_CHUNK_WIDTH),
+					WorldCoordinates::floor_divide(water_z,
+						GAME_VOXEL_CHUNK_DEPTH));
+				if (water_chunk == nullptr)
+					result = FT_ERR_NOT_FOUND;
+				else
+					result = world.replace_fluid_source_at(water_x, water_y,
+						water_z, VOXEL_GENERATOR_WATER_BLOCK_ID,
+						GAME_VOXEL_AIR_BLOCK, water_chunk->voxel_revision);
+			}
+		}
+	}
+	if (result == FT_ERR_SUCCESS && world.has_water_source_near(plant_x,
+		plant_y - 1, plant_z))
+		result = FT_ERR_INVALID_STATE;
+	if (result == FT_ERR_SUCCESS)
+		result = world.place_block_at(plant_x, plant_y, plant_z,
+			VOXEL_GENERATOR_PAPER_REED_IMMATURE_BLOCK_ID);
+	WorldChunk *chunk = world.find_chunk_mutable(
+		WorldCoordinates::floor_divide(plant_x, GAME_VOXEL_CHUNK_WIDTH),
+		WorldCoordinates::floor_divide(plant_z, GAME_VOXEL_CHUNK_DEPTH));
+	if (result == FT_ERR_SUCCESS && chunk == nullptr)
+		result = FT_ERR_NOT_FOUND;
+	uint8_t observed_crop_light = UINT8_MAX;
+	if (result == FT_ERR_SUCCESS
+		&& world.light_level_at(plant_x, plant_y, plant_z,
+			&observed_crop_light))
+		result = FT_ERR_INVALID_STATE;
+	auto set_crop_light = [&](uint8_t value) -> int32_t
+	{
+		int32_t light_result;
+		light_result = chunk->light.set(
+			WorldCoordinates::positive_modulo(plant_x,
+				GAME_VOXEL_CHUNK_WIDTH), plant_y,
+			WorldCoordinates::positive_modulo(plant_z,
+				GAME_VOXEL_CHUNK_DEPTH), value);
+		if (light_result == FT_ERR_SUCCESS)
+		{
+			chunk->light_version = chunk->content_version;
+			chunk->computed_light_input_version = chunk->light_input_version;
+		}
+		return (light_result);
+	};
+	if (result == FT_ERR_SUCCESS)
+		result = set_crop_light(voxel_light_pack(0U, 0U));
+	if (result == FT_ERR_SUCCESS)
+	{
+		const bool light_read = world.light_level_at(plant_x, plant_y, plant_z,
+			&observed_crop_light);
+		if (!light_read || observed_crop_light != 0U)
+		{
+			std::fprintf(stderr, "crop-light low read=%d value=%u content=%u "
+				"light=%u input=%u computed=%u valid=%d current=%d\n",
+				light_read ? 1 : 0, static_cast<unsigned int>(observed_crop_light),
+				static_cast<unsigned int>(chunk->content_version),
+				static_cast<unsigned int>(chunk->light_version),
+				static_cast<unsigned int>(chunk->light_input_version),
+				static_cast<unsigned int>(chunk->computed_light_input_version),
+				chunk->light_buffer_is_valid() ? 1 : 0,
+				chunk->light_is_current() ? 1 : 0);
+			result = FT_ERR_INVALID_STATE;
+		}
+	}
+	if (result == FT_ERR_SUCCESS)
+	{
+		session.camera_.x = static_cast<double>(plant_x) + 0.5;
+		session.camera_.y = static_cast<double>(plant_y) + 2.0;
+		session.camera_.z = static_cast<double>(plant_z) + 0.5;
+		world.current_tick = 200U;
+		result = session.advance_nearby_crop_growth();
+	}
+	uint32_t plant_block_after = GAME_VOXEL_AIR_BLOCK;
+	if (result == FT_ERR_SUCCESS
+		&& (!world.block_id_at(plant_x, plant_y, plant_z,
+			&plant_block_after)
+			|| plant_block_after
+				!= VOXEL_GENERATOR_PAPER_REED_IMMATURE_BLOCK_ID))
+		result = FT_ERR_INVALID_STATE;
+	if (result == FT_ERR_SUCCESS)
+		result = world.replace_fluid_source_at(plant_x + 1, plant_y, plant_z,
+			GAME_VOXEL_AIR_BLOCK, VOXEL_GENERATOR_WATER_BLOCK_ID,
+			chunk->voxel_revision);
+	if (result == FT_ERR_SUCCESS && !world.has_water_source_near(plant_x,
+		plant_y - 1, plant_z))
+		result = FT_ERR_INVALID_STATE;
+	if (result == FT_ERR_SUCCESS)
+		result = set_crop_light(voxel_light_pack(15U, 0U));
+	if (result == FT_ERR_SUCCESS)
+	{
+		world.current_tick = 400U;
+		result = session.advance_nearby_crop_growth();
+	}
+	if (result == FT_ERR_SUCCESS
+		&& (!world.block_id_at(plant_x, plant_y, plant_z,
+			&plant_block_after)
+			|| plant_block_after
+				!= VOXEL_GENERATOR_PAPER_REED_IMMATURE_BLOCK_ID))
+		result = FT_ERR_INVALID_STATE;
+	if (result == FT_ERR_SUCCESS
+		&& (world.has_water_source_near(plant_x, plant_y - 1, plant_z, 0U)
+			|| !world.has_water_source_near(plant_x, plant_y - 1, plant_z, 1U)))
+		result = FT_ERR_INVALID_STATE;
+	growth_policy.hydration_radius = 1U;
+	if (result == FT_ERR_SUCCESS)
+		result = session.configure_crop_growth_policy(growth_policy);
+	if (result == FT_ERR_SUCCESS)
+		result = set_crop_light(voxel_light_pack(11U, 0U));
+	if (result == FT_ERR_SUCCESS)
+	{
+		world.current_tick = 600U;
+		result = session.advance_nearby_crop_growth();
+	}
+	if (result == FT_ERR_SUCCESS
+		&& (!world.block_id_at(plant_x, plant_y, plant_z,
+			&plant_block_after)
+			|| plant_block_after
+				!= VOXEL_GENERATOR_PAPER_REED_IMMATURE_BLOCK_ID))
+		result = FT_ERR_INVALID_STATE;
+	if (result == FT_ERR_SUCCESS)
+		result = set_crop_light(voxel_light_pack(15U, 0U));
+	if (result == FT_ERR_SUCCESS)
+	{
+		const bool light_read = world.light_level_at(plant_x, plant_y, plant_z,
+			&observed_crop_light);
+		if (!light_read || observed_crop_light != 15U)
+		{
+			std::fprintf(stderr, "crop-light bright read=%d value=%u content=%u "
+				"light=%u input=%u computed=%u valid=%d current=%d\n",
+				light_read ? 1 : 0, static_cast<unsigned int>(observed_crop_light),
+				static_cast<unsigned int>(chunk->content_version),
+				static_cast<unsigned int>(chunk->light_version),
+				static_cast<unsigned int>(chunk->light_input_version),
+				static_cast<unsigned int>(chunk->computed_light_input_version),
+				chunk->light_buffer_is_valid() ? 1 : 0,
+				chunk->light_is_current() ? 1 : 0);
+			result = FT_ERR_INVALID_STATE;
+		}
+	}
+	if (result == FT_ERR_SUCCESS)
+	{
+		uint32_t growth_epoch = 4U;
+		const uint32_t base_hash = static_cast<uint32_t>(plant_x) * 73856093U
+			^ static_cast<uint32_t>(plant_y) * 19349663U
+			^ static_cast<uint32_t>(plant_z) * 83492791U;
+		while (((base_hash ^ growth_epoch) % 3U) != 0U)
+			++growth_epoch;
+		world.current_tick = static_cast<uint64_t>(growth_epoch) * 200U;
+		result = session.advance_nearby_crop_growth();
+	}
+	if (result == FT_ERR_SUCCESS
+		&& (!world.block_id_at(plant_x, plant_y, plant_z,
+			&plant_block_after)
+			|| plant_block_after != VOXEL_GENERATOR_PAPER_REED_BLOCK_ID))
+		result = FT_ERR_INVALID_STATE;
+	if (result == FT_ERR_SUCCESS)
+		std::printf("block-edit: paper-reed dry-stays-immature, wet-matures=ok\n");
+	else
+		std::fprintf(stderr, "paper-reed growth validation code=%d\n", result);
+	world.destroy();
+	return (result);
 }

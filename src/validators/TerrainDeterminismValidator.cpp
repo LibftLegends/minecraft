@@ -1,5 +1,34 @@
 #include "../../src/validators/TerrainDeterminismValidator.hpp"
 
+static int chunk_contains_paper_reed(const game_voxel_chunk &chunk,
+	bool *found_out)
+{
+	uint32_t block_id = GAME_VOXEL_AIR_BLOCK;
+	if (found_out == nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
+	*found_out = false;
+	for (int32_t z = 0; z < GAME_VOXEL_CHUNK_DEPTH; ++z)
+	{
+		for (int32_t y = 0; y < GAME_VOXEL_CHUNK_HEIGHT; ++y)
+		{
+			for (int32_t x = 0; x < GAME_VOXEL_CHUNK_WIDTH; ++x)
+			{
+				const int32_t result = chunk.read_block(x, y, z, &block_id);
+				if (result != FT_ERR_SUCCESS)
+					return (result);
+				if (block_id == VOXEL_GENERATOR_PAPER_REED_BLOCK_ID
+					|| block_id
+						== VOXEL_GENERATOR_PAPER_REED_IMMATURE_BLOCK_ID)
+				{
+					*found_out = true;
+					return (FT_ERR_SUCCESS);
+				}
+			}
+		}
+	}
+	return (FT_ERR_SUCCESS);
+}
+
 TerrainDeterminismValidator::TerrainDeterminismValidator()
 {
 }
@@ -100,6 +129,37 @@ int TerrainDeterminismValidator::validate() const
 		}
 		index = index + 2;
 	}
-	std::printf("terrain-determinism: ok sampled_chunks=3\n");
+	bool paper_reed_found = false;
+	voxel_generation_config wet_generation_config;
+	if (voxel_default_generation_config(wet_generation_config)
+		!= FT_ERR_SUCCESS
+		|| wet_generation_config.set_water_chance_percent(100U)
+			!= FT_ERR_SUCCESS)
+		return (1);
+	for (uint32_t seed_index = 0U; seed_index < 16U && !paper_reed_found;
+		++seed_index)
+	{
+		game_voxel_chunk chunk;
+		char seed[48];
+		if (chunk.initialize() != FT_ERR_SUCCESS)
+			return (1);
+		std::snprintf(seed, sizeof(seed), "paper-reed-seed-%u", seed_index);
+		const int32_t sample_x = static_cast<int32_t>(seed_index % 4U) * 4096;
+		const int32_t sample_z = static_cast<int32_t>(seed_index / 4U) * 4096;
+		error_code = voxel_generate_chunk(chunk, sample_x, sample_z, seed,
+			wet_generation_config);
+		if (error_code == FT_ERR_SUCCESS)
+			error_code = chunk_contains_paper_reed(chunk, &paper_reed_found);
+		(void)chunk.destroy();
+		if (error_code != FT_ERR_SUCCESS)
+			return (1);
+	}
+	if (!paper_reed_found)
+	{
+		std::fprintf(stderr,
+			"terrain-determinism: paper reed did not spawn in 16 seeded samples\n");
+		return (1);
+	}
+	std::printf("terrain-determinism: ok sampled_chunks=3 paper_reed=natural\n");
 	return (0);
 }

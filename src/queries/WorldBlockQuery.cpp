@@ -97,3 +97,23 @@ bool WorldBlockQuery::block_id_at(const World &world, int32_t world_x,
 	return (world_chunk->chunk.read_block(local_x, world_y, local_z,
 			block_id) == FT_ERR_SUCCESS);
 }
+
+bool WorldBlockQuery::light_level_at(const World &world, int32_t world_x,
+	int32_t world_y, int32_t world_z, uint8_t *light_level)
+{
+	const WorldChunk *world_chunk;
+	int32_t local_x;
+	int32_t local_z;
+	uint8_t packed_light;
+
+	if (light_level == nullptr || world_y < 0
+		|| world_y >= GAME_VOXEL_CHUNK_HEIGHT
+		|| !find_chunk_local(world, world_x, world_z, &world_chunk, local_x,
+			local_z)
+		|| !world_chunk->light_buffer_is_valid()
+		|| !world_chunk->light_is_current())
+		return (false);
+	packed_light = world_chunk->light.get(local_x, world_y, local_z);
+	*light_level = voxel_light_combined(packed_light, 0U);
+	return (true);
+}

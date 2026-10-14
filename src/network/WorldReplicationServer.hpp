@@ -23,6 +23,8 @@ class WorldReplicationServer
 	int32_t remove_peer(uint64_t connection_id);
 	int32_t set_repair_request_callback(
 		world_replication_repair_request_callback callback, void *user_data);
+	int32_t set_boat_move_callback(
+		world_replication_boat_move_callback callback, void *user_data);
 	int32_t process_message(const networking_received_message &message);
 	int32_t synchronize_peer(uint64_t connection_id, int32_t chunk_x,
 		int32_t chunk_z, uint64_t base_revision);
@@ -30,6 +32,8 @@ class WorldReplicationServer
 		const ProtocolChunkLightDeltaMessage &delta) noexcept;
 	int32_t broadcast_hash_manifest(
 		const ProtocolChunkHashManifestMessage &manifest) noexcept;
+	int32_t refresh_world_item_snapshots(uint32_t maximum_snapshots,
+		uint32_t &processed_snapshots) noexcept;
 	int32_t synchronize_light_peer(uint64_t connection_id, int32_t chunk_x,
 		int32_t chunk_z, uint64_t base_revision);
 	int32_t replay_next_block_delta(int32_t chunk_x, int32_t chunk_z,
@@ -42,17 +46,24 @@ class WorldReplicationServer
 	WorldReplicationService *service_;
 	WorldReplicationServerSession peers_[WORLD_REPLICATION_MAX_PEERS];
 	uint8_t peer_active_[WORLD_REPLICATION_MAX_PEERS];
+	uint32_t next_item_peer_cursor_;
 	WorldReplicationDeltaJournal delta_journal_;
 	WorldReplicationLightJournal light_journal_;
 	bool initialized_;
 	world_replication_repair_request_callback repair_request_callback_;
 	void *repair_request_user_data_;
+	world_replication_boat_move_callback boat_move_callback_;
+	void *boat_move_user_data_;
 
 	static int32_t broadcast_block_delta(const game_block_delta &delta,
 		uint64_t source_connection_id, void *user_data) noexcept;
 	static int32_t synchronize_request(
 		const ProtocolChunkSyncRequestMessage &request,
 		uint64_t connection_id, void *user_data) noexcept;
+	static int32_t broadcast_entity_update(const EntityState &entity,
+		uint64_t source_connection_id, void *user_data) noexcept;
+	int32_t fanout_entity_update(const EntityState &entity,
+		uint64_t source_connection_id) noexcept;
 	int32_t fanout_block_delta(const game_block_delta &delta,
 		uint64_t source_connection_id) noexcept;
 	int32_t fanout_light_delta(

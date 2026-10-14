@@ -4,11 +4,17 @@
 WorldReplicationClient::WorldReplicationClient()
 	: replication_(), snapshot_callback_(nullptr), block_delta_callback_(nullptr),
 	light_delta_callback_(nullptr), edit_result_callback_(nullptr),
+	boat_move_result_callback_(nullptr),
+	entity_update_callback_(nullptr),
+	world_item_snapshot_callback_(nullptr),
 	repair_callback_(nullptr),
 	hash_manifest_callback_(nullptr),
-	callback_user_data_(nullptr), repair_callback_user_data_(nullptr),
+	callback_user_data_(nullptr), boat_move_result_callback_user_data_(nullptr),
+	entity_update_callback_user_data_(nullptr),
+	world_item_snapshot_callback_user_data_(nullptr),
+	repair_callback_user_data_(nullptr),
 	hash_manifest_callback_user_data_(nullptr),
-	replica_store_(nullptr),
+	replica_store_(nullptr), world_item_replica_store_(nullptr),
 	server_instance_id_(0U), session_id_(0U),
 	world_id_(0U), received_messages_(), maximum_queued_messages_(0U),
 	maximum_queued_bytes_(0U), queued_bytes_(0U), queue_initialized_(false),
@@ -20,11 +26,17 @@ WorldReplicationClient::WorldReplicationClient(
 	const WorldReplicationClient &other) : replication_(),
 	snapshot_callback_(nullptr), block_delta_callback_(nullptr),
 	light_delta_callback_(nullptr), edit_result_callback_(nullptr),
+	boat_move_result_callback_(nullptr),
+	entity_update_callback_(nullptr),
+	world_item_snapshot_callback_(nullptr),
 	repair_callback_(nullptr),
 	hash_manifest_callback_(nullptr),
-	callback_user_data_(nullptr), repair_callback_user_data_(nullptr),
+	callback_user_data_(nullptr), boat_move_result_callback_user_data_(nullptr),
+	entity_update_callback_user_data_(nullptr),
+	world_item_snapshot_callback_user_data_(nullptr),
+	repair_callback_user_data_(nullptr),
 	hash_manifest_callback_user_data_(nullptr),
-	replica_store_(nullptr),
+	replica_store_(nullptr), world_item_replica_store_(nullptr),
 	server_instance_id_(0U), session_id_(0U),
 	world_id_(0U), received_messages_(), maximum_queued_messages_(0U),
 	maximum_queued_bytes_(0U), queued_bytes_(0U), queue_initialized_(false),
@@ -144,6 +156,56 @@ int32_t WorldReplicationClient::set_hash_manifest_callback(
 	return (FT_ERR_SUCCESS);
 }
 
+int32_t WorldReplicationClient::set_boat_move_result_callback(
+	world_replication_boat_move_result_callback callback,
+	void *user_data) noexcept
+{
+	if (!this->initialized_)
+		return (FT_ERR_NOT_INITIALISED);
+	if (callback == nullptr)
+		return (FT_ERR_INVALID_POINTER);
+	this->boat_move_result_callback_ = callback;
+	this->boat_move_result_callback_user_data_ = user_data;
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t WorldReplicationClient::set_entity_update_callback(
+	world_replication_entity_update_callback callback,
+	void *user_data) noexcept
+{
+	if (!this->initialized_)
+		return (FT_ERR_NOT_INITIALISED);
+	if (callback == nullptr)
+		return (FT_ERR_INVALID_POINTER);
+	this->entity_update_callback_ = callback;
+	this->entity_update_callback_user_data_ = user_data;
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t WorldReplicationClient::set_world_item_snapshot_callback(
+	world_replication_world_item_snapshot_callback callback,
+	void *user_data) noexcept
+{
+	if (!this->initialized_)
+		return (FT_ERR_NOT_INITIALISED);
+	if (callback == nullptr)
+		return (FT_ERR_INVALID_POINTER);
+	this->world_item_snapshot_callback_ = callback;
+	this->world_item_snapshot_callback_user_data_ = user_data;
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t WorldReplicationClient::set_world_item_replica_store(
+	WorldItemReplicaStore *store) noexcept
+{
+	if (!this->initialized_)
+		return (FT_ERR_NOT_INITIALISED);
+	if (store == nullptr)
+		return (FT_ERR_INVALID_POINTER);
+	this->world_item_replica_store_ = store;
+	return (FT_ERR_SUCCESS);
+}
+
 int32_t WorldReplicationClient::send_edit_intent(
 	networking_message_connection &connection,
 	const ProtocolEditIntentMessage &intent, uint64_t message_sequence) const
@@ -164,6 +226,33 @@ int32_t WorldReplicationClient::send_edit_intent(
 	if (error_code == FT_ERR_SUCCESS)
 		error_code = sender.send_reliable_control(connection,
 		static_cast<uint16_t>(ProtocolMessageHeader::Type::EDIT_INTENT),
+		payload, this->server_instance_id_, this->session_id_, message_sequence);
+	destroy_error = payload.destroy();
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = destroy_error;
+	return (error_code);
+}
+
+int32_t WorldReplicationClient::send_boat_move_intent(
+	networking_message_connection &connection,
+	const ProtocolBoatMoveIntentMessage &intent,
+	uint64_t message_sequence) const
+{
+	ft_byte_buffer payload;
+	networking_replication_sender sender;
+	int32_t error_code;
+	int32_t destroy_error;
+
+	if (!this->initialized_)
+		return (FT_ERR_NOT_INITIALISED);
+	if (message_sequence == 0U || intent.session_id != this->session_id_)
+		return (FT_ERR_INVALID_ARGUMENT);
+	error_code = payload.initialize();
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = intent.serialize(payload);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = sender.send_reliable_control(connection,
+		static_cast<uint16_t>(ProtocolMessageHeader::Type::BOAT_MOVE_INTENT),
 		payload, this->server_instance_id_, this->session_id_, message_sequence);
 	destroy_error = payload.destroy();
 	if (error_code == FT_ERR_SUCCESS)
@@ -546,6 +635,86 @@ int32_t WorldReplicationClient::apply_edit_result_payload(
 	return (error_code);
 }
 
+int32_t WorldReplicationClient::apply_boat_move_result_payload(
+	const ft_byte_buffer &payload)
+{
+	ProtocolBoatMoveResultMessage result;
+	ft_byte_buffer decoded_payload;
+	int32_t error_code;
+	int32_t destroy_error;
+
+	if (this->boat_move_result_callback_ == nullptr)
+		return (FT_ERR_INVALID_POINTER);
+	error_code = decoded_payload.initialize(payload);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = result.deserialize(decoded_payload);
+	if (error_code == FT_ERR_SUCCESS && result.session_id != this->session_id_)
+		error_code = FT_ERR_PERMISSION_DENIED;
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = this->boat_move_result_callback_(result,
+			this->boat_move_result_callback_user_data_);
+	destroy_error = decoded_payload.destroy();
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = destroy_error;
+	return (error_code);
+}
+
+int32_t WorldReplicationClient::apply_entity_update_payload(
+	const ft_byte_buffer &payload)
+{
+	ProtocolEntityUpdateMessage update;
+	ft_byte_buffer decoded_payload;
+	int32_t error_code;
+	int32_t destroy_error;
+
+	if (this->entity_update_callback_ == nullptr)
+		return (FT_ERR_INVALID_POINTER);
+	error_code = decoded_payload.initialize(payload);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = update.deserialize(decoded_payload);
+	if (error_code == FT_ERR_SUCCESS && decoded_payload.remaining() != 0U)
+		error_code = FT_ERR_INVALID_ARGUMENT;
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = this->entity_update_callback_(update.entity,
+			this->entity_update_callback_user_data_);
+	destroy_error = decoded_payload.destroy();
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = destroy_error;
+	return (error_code);
+}
+
+int32_t WorldReplicationClient::apply_world_item_snapshot_payload(
+	const ft_byte_buffer &payload)
+{
+	ProtocolWorldItemSnapshotMessage snapshot;
+	ft_byte_buffer decoded;
+	int32_t error;
+	int32_t destroy_error;
+
+	if (this->world_item_snapshot_callback_ == nullptr
+		&& this->world_item_replica_store_ == nullptr)
+		return (FT_ERR_INVALID_POINTER);
+	error = decoded.initialize(payload);
+	if (error == FT_ERR_SUCCESS) error = snapshot.deserialize(decoded);
+	if (error == FT_ERR_SUCCESS && decoded.remaining() != 0U)
+		error = FT_ERR_INVALID_ARGUMENT;
+	if (error == FT_ERR_SUCCESS && snapshot.session_id != this->session_id_)
+		error = FT_ERR_PERMISSION_DENIED;
+	if (error == FT_ERR_SUCCESS && snapshot.world_id != this->world_id_)
+		error = FT_ERR_PERMISSION_DENIED;
+	if (error == FT_ERR_SUCCESS && this->world_item_replica_store_ != nullptr)
+		error = this->world_item_replica_store_->replace_chunk(snapshot);
+	if (error == FT_ERR_SUCCESS)
+	{
+		if (this->world_item_snapshot_callback_ != nullptr)
+			error = this->world_item_snapshot_callback_(snapshot,
+				this->world_item_snapshot_callback_user_data_);
+	}
+	destroy_error = decoded.destroy();
+	if (error == FT_ERR_SUCCESS) error = destroy_error;
+	return (error);
+}
+
 int32_t WorldReplicationClient::apply_repair_response_payload(
 	const ft_byte_buffer &payload)
 {
@@ -683,6 +852,18 @@ int32_t WorldReplicationClient::apply_received_message(
 		error_code = this->apply_edit_result_payload(payload);
 	else if (error_code == FT_ERR_SUCCESS
 		&& envelope.message_type == static_cast<uint16_t>(
+			ProtocolMessageHeader::Type::BOAT_MOVE_RESULT))
+		error_code = this->apply_boat_move_result_payload(payload);
+	else if (error_code == FT_ERR_SUCCESS
+		&& envelope.message_type == static_cast<uint16_t>(
+			ProtocolMessageHeader::Type::ENTITY_UPDATE))
+		error_code = this->apply_entity_update_payload(payload);
+	else if (error_code == FT_ERR_SUCCESS
+		&& envelope.message_type == static_cast<uint16_t>(
+			ProtocolMessageHeader::Type::WORLD_ITEM_SNAPSHOT))
+		error_code = this->apply_world_item_snapshot_payload(payload);
+	else if (error_code == FT_ERR_SUCCESS
+		&& envelope.message_type == static_cast<uint16_t>(
 			ProtocolMessageHeader::Type::CHUNK_REPAIR_RESPONSE))
 		error_code = this->apply_repair_response_payload(payload);
 	else if (error_code == FT_ERR_SUCCESS
@@ -716,12 +897,19 @@ int32_t WorldReplicationClient::destroy()
 	this->block_delta_callback_ = nullptr;
 	this->light_delta_callback_ = nullptr;
 	this->edit_result_callback_ = nullptr;
+	this->boat_move_result_callback_ = nullptr;
+	this->entity_update_callback_ = nullptr;
+	this->world_item_snapshot_callback_ = nullptr;
 	this->repair_callback_ = nullptr;
 	this->hash_manifest_callback_ = nullptr;
 	this->callback_user_data_ = nullptr;
+	this->boat_move_result_callback_user_data_ = nullptr;
+	this->entity_update_callback_user_data_ = nullptr;
+	this->world_item_snapshot_callback_user_data_ = nullptr;
 	this->repair_callback_user_data_ = nullptr;
 	this->hash_manifest_callback_user_data_ = nullptr;
 	this->replica_store_ = nullptr;
+	this->world_item_replica_store_ = nullptr;
 	this->server_instance_id_ = 0U;
 	this->session_id_ = 0U;
 	this->world_id_ = 0U;

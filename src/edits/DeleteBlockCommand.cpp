@@ -50,6 +50,8 @@ int32_t DeleteBlockCommand::execute(World &world) const
 			&existing_block_id);
 	if (read_err != FT_ERR_SUCCESS)
 		return (read_err);
+	if (voxel_block_is_liquid(existing_block_id) == FT_TRUE)
+		return (FT_ERR_PERMISSION_DENIED);
 	if (voxel_block_is_breakable(existing_block_id) == FT_FALSE)
 		return (FT_ERR_INVALID_OPERATION);
 	int32_t err = wc->chunk.write_block(lx, world_y, lz, GAME_VOXEL_AIR_BLOCK);
@@ -72,6 +74,8 @@ int32_t DeleteBlockCommand::execute(World &world) const
 	record.previous_block_id = existing_block_id;
 	(void)wc->chunk.record_dirty_edit(record.edit);
 	world.edit_history.record(record);
+	(void)world.invalidate_loom_station_if_block_changed(world_x, world_y,
+		world_z, GAME_VOXEL_AIR_BLOCK);
 	world.chunk_streamer.mark_edit_remeshes(cx, cz, lx, world_y, lz);
 	incremental_additive_light = FT_FALSE;
 	incremental_removal_light = FT_FALSE;

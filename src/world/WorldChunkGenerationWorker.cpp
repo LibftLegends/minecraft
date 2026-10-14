@@ -2,6 +2,1111 @@
 #include <chrono>
 #include <cstdio>
 #include <utility>
+#include <vector>
+
+namespace
+{
+	struct VillageFootprint
+	{
+		int32_t center_x;
+		int32_t center_z;
+	};
+
+	int32_t place_village(WorldChunk &chunk,
+		const WorldGenerationPipeline::GenerationFeaturePlan &plan,
+		std::vector<VillageFootprint> &placed_villages) noexcept
+	{
+		const uint64_t hash = plan.host_intent_sequence
+			^ (static_cast<uint64_t>(plan.ordinal) * 0x9e3779b97f4a7c15ULL);
+		for (int32_t attempt = 0; attempt <= 144; ++attempt)
+		{
+			const bool fallback = attempt == 144;
+			const int32_t center_x = fallback ? 8 : 5 + static_cast<int32_t>(
+				(hash + static_cast<uint64_t>(attempt) * 11U) % 6U);
+			const int32_t center_z = fallback ? 8 : 5 + static_cast<int32_t>(
+				((hash >> 16U) + static_cast<uint64_t>(attempt) * 7U) % 6U);
+			bool overlaps = false;
+			for (const VillageFootprint &placed : placed_villages)
+			{
+				if (center_x - 4 <= placed.center_x + 4
+					&& center_x + 4 >= placed.center_x - 4
+					&& center_z - 4 <= placed.center_z + 4
+					&& center_z + 4 >= placed.center_z - 4)
+				{
+					overlaps = true;
+					break ;
+				}
+			}
+			if (overlaps)
+				continue ;
+			int32_t ground_y = -1;
+			for (int32_t y = GAME_VOXEL_CHUNK_HEIGHT - 7; y >= 3; --y)
+			{
+				uint32_t block_id;
+				if (chunk.chunk.read_block(center_x, y, center_z, &block_id)
+					!= FT_ERR_SUCCESS)
+					return (FT_ERR_INVALID_STATE);
+				if (voxel_block_is_solid(block_id) != FT_FALSE)
+				{
+					ground_y = y;
+					break ;
+				}
+			}
+			if (ground_y < 3)
+			{
+				if (!fallback)
+					continue ;
+				/* The chunk bottom remains intact; make a supported pad one
+				 * block above it when this generated chunk has no natural floor. */
+				ground_y = 1;
+			}
+			bool valid_site = true;
+			int32_t surface_heights[9][9] = {};
+			for (int32_t dz = -4; dz <= 4 && valid_site; ++dz)
+			{
+				for (int32_t dx = -4; dx <= 4; ++dx)
+				{
+					int32_t surface_y = fallback ? ground_y : -1;
+					for (int32_t y = ground_y + 2;
+						!fallback && y >= ground_y - 2; --y)
+					{
+						uint32_t block_id;
+						if (chunk.chunk.read_block(center_x + dx, y,
+							center_z + dz, &block_id) != FT_ERR_SUCCESS)
+							return (FT_ERR_INVALID_STATE);
+						if (voxel_block_is_solid(block_id) != FT_FALSE)
+						{
+							surface_y = y;
+							break ;
+						}
+					}
+					if (!fallback && (surface_y < ground_y - 2
+						|| surface_y > ground_y + 2))
+					{
+						valid_site = false;
+						break ;
+					}
+					surface_heights[dx + 4][dz + 4] = surface_y;
+				}
+			}
+			if (!valid_site)
+				continue ;
+			try
+			{
+				placed_villages.push_back({center_x, center_z});
+			}
+			catch (...)
+			{
+				return (FT_ERR_NO_MEMORY);
+			}
+			for (int32_t dz = -4; dz <= 4; ++dz)
+			{
+				for (int32_t dx = -4; dx <= 4; ++dx)
+				{
+					const int32_t surface_y = surface_heights[dx + 4][dz + 4];
+					for (int32_t y = surface_y + 1; y <= ground_y + 4; ++y)
+					{
+						const int32_t error_code = chunk.chunk.write_generated_block(
+							center_x + dx, y, center_z + dz,
+							GAME_VOXEL_AIR_BLOCK);
+						if (error_code != FT_ERR_SUCCESS)
+							return (error_code);
+					}
+					if (fallback)
+					{
+						const int32_t error_code = chunk.chunk.write_generated_block(
+							center_x + dx, ground_y, center_z + dz,
+							VOXEL_GENERATOR_DIRT_BLOCK);
+						if (error_code != FT_ERR_SUCCESS)
+							return (error_code);
+					}
+					if (surface_y < ground_y)
+					{
+						for (int32_t y = surface_y + 1; y <= ground_y; ++y)
+						{
+							const int32_t error_code = chunk.chunk.write_generated_block(
+								center_x + dx, y, center_z + dz,
+								VOXEL_GENERATOR_DIRT_BLOCK);
+							if (error_code != FT_ERR_SUCCESS)
+								return (error_code);
+						}
+					}
+					else if (surface_y > ground_y)
+					{
+						for (int32_t y = ground_y + 1; y <= surface_y; ++y)
+						{
+							const int32_t error_code = chunk.chunk.write_generated_block(
+								center_x + dx, y, center_z + dz,
+								GAME_VOXEL_AIR_BLOCK);
+							if (error_code != FT_ERR_SUCCESS)
+								return (error_code);
+						}
+					}
+					if ((dx == 0 || dz == 0)
+						&& !(dx == 0 && dz == 0))
+					{
+						const int32_t error_code = chunk.chunk.write_generated_block(
+							center_x + dx, ground_y + 1, center_z + dz,
+							VOXEL_GENERATOR_COARSE_DIRT_BLOCK);
+						if (error_code != FT_ERR_SUCCESS)
+							return (error_code);
+					}
+				}
+			}
+			for (int32_t house = 0; house < 2; ++house)
+			{
+				const int32_t house_x = center_x + (house == 0 ? -2 : 2);
+				for (int32_t dz = -1; dz <= 1; ++dz)
+				{
+					for (int32_t dx = -1; dx <= 1; ++dx)
+					{
+						int32_t error_code = chunk.chunk.write_generated_block(
+							house_x + dx, ground_y + 1, center_z + dz,
+							VOXEL_GENERATOR_STONE_BLOCK);
+						if (error_code != FT_ERR_SUCCESS)
+							return (error_code);
+						if (dx == -1 || dx == 1 || dz == -1 || dz == 1)
+						{
+							for (int32_t wall_y = ground_y + 2;
+								wall_y <= ground_y + 3; ++wall_y)
+							{
+								const bool doorway = dz == 0
+									&& dx == (house == 0 ? 1 : -1);
+								if (doorway)
+									continue ;
+								error_code = chunk.chunk.write_generated_block(
+									house_x + dx, wall_y, center_z + dz,
+									VOXEL_GENERATOR_OAK_LOG_BLOCK);
+								if (error_code != FT_ERR_SUCCESS)
+									return (error_code);
+							}
+						}
+					}
+				}
+				for (int32_t dz = -1; dz <= 1; ++dz)
+				{
+					for (int32_t dx = -1; dx <= 1; ++dx)
+					{
+						const int32_t error_code = chunk.chunk.write_generated_block(
+							house_x + dx, ground_y + 4, center_z + dz,
+							VOXEL_GENERATOR_OAK_LEAVES_BLOCK);
+						if (error_code != FT_ERR_SUCCESS)
+							return (error_code);
+					}
+				}
+			}
+			return (FT_ERR_SUCCESS);
+		}
+		return (FT_ERR_NOT_FOUND);
+	}
+
+	int32_t place_ruined_village(WorldChunk &chunk) noexcept
+	{
+		/* A compact, deterministic ruin centered in the reserved chunk. The
+		 * support pad makes the hostile spawner positions stable across terrain
+		 * profiles and keeps every block edit inside this chunk. */
+		for (int32_t z = 3; z <= 12; ++z)
+		{
+			for (int32_t x = 3; x <= 12; ++x)
+			{
+				const int32_t error_code = chunk.chunk.write_generated_block(
+					x, 3, z, VOXEL_GENERATOR_COARSE_DIRT_BLOCK);
+				if (error_code != FT_ERR_SUCCESS)
+					return (error_code);
+			}
+		}
+		for (int32_t house = 0; house < 2; ++house)
+		{
+			const int32_t center_x = house == 0 ? 6 : 10;
+			for (int32_t z = 6; z <= 10; ++z)
+			{
+				for (int32_t x = center_x - 1; x <= center_x + 1; ++x)
+				{
+					int32_t error_code = chunk.chunk.write_generated_block(x, 4,
+						z, VOXEL_GENERATOR_STONE_BLOCK);
+					if (error_code != FT_ERR_SUCCESS)
+						return (error_code);
+					if ((x == center_x - 1 || x == center_x + 1
+							|| z == 6 || z == 10)
+						&& ((x + z + house) % 3 != 0))
+					{
+						error_code = chunk.chunk.write_generated_block(x, 5, z,
+							VOXEL_GENERATOR_OAK_LOG_BLOCK);
+						if (error_code != FT_ERR_SUCCESS)
+							return (error_code);
+					}
+				}
+			}
+			for (int32_t x = center_x - 1; x <= center_x + 1; ++x)
+			{
+				const int32_t error_code = chunk.chunk.write_generated_block(
+					x, 7, 8, VOXEL_GENERATOR_OAK_LEAVES_BLOCK);
+				if (error_code != FT_ERR_SUCCESS)
+					return (error_code);
+			}
+		}
+		for (int32_t x = 8; x <= 9; ++x)
+		{
+			const int32_t error_code = chunk.chunk.write_generated_block(x, 4,
+				8, VOXEL_GENERATOR_GOLD_ORE_BLOCK);
+			if (error_code != FT_ERR_SUCCESS)
+				return (error_code);
+		}
+		return (FT_ERR_SUCCESS);
+	}
+
+	int32_t place_shipwreck(WorldChunk &chunk) noexcept
+	{
+		int32_t waterline = -1;
+		for (int32_t y = GAME_VOXEL_CHUNK_HEIGHT - 1; y >= 1; --y)
+		{
+			uint32_t block_id = GAME_VOXEL_AIR_BLOCK;
+			if (chunk.chunk.read_block(8, y, 8, &block_id) != FT_ERR_SUCCESS)
+				return (FT_ERR_INVALID_STATE);
+			if (block_id == VOXEL_GENERATOR_WATER_BLOCK)
+			{
+				waterline = y;
+				break ;
+			}
+		}
+		if (waterline < 16)
+			return (FT_ERR_NOT_FOUND);
+		const int32_t keel_y = waterline - 9;
+		for (int32_t z = 3; z <= 13; ++z)
+		{
+			const int32_t keel_error = chunk.chunk.write_generated_block(8,
+				keel_y, z, VOXEL_GENERATOR_OAK_LOG_BLOCK);
+			if (keel_error != FT_ERR_SUCCESS)
+				return (keel_error);
+			for (int32_t side_x : {4, 5, 11, 12})
+			{
+				for (int32_t y = keel_y + 1; y <= keel_y + 3; ++y)
+				{
+					const int32_t error_code = chunk.chunk.write_generated_block(
+						side_x, y, z, VOXEL_GENERATOR_OAK_LOG_BLOCK);
+					if (error_code != FT_ERR_SUCCESS)
+						return (error_code);
+				}
+			}
+		}
+		for (int32_t x = 5; x <= 11; ++x)
+		{
+			for (int32_t z : {3, 13})
+			{
+				if (x == 8 && z == 3)
+					continue ;
+				const int32_t error_code = chunk.chunk.write_generated_block(x,
+					keel_y + 2, z, VOXEL_GENERATOR_OAK_LOG_BLOCK);
+				if (error_code != FT_ERR_SUCCESS)
+					return (error_code);
+			}
+		}
+		for (int32_t z = 4; z <= 12; ++z)
+		{
+			for (int32_t x = 5; x <= 11; ++x)
+			{
+				const bool deck_edge = x == 5 || x == 11 || z == 4 || z == 12;
+				if (deck_edge)
+				{
+					const int32_t error_code = chunk.chunk.write_generated_block(
+						x, keel_y + 4, z, VOXEL_GENERATOR_OAK_LOG_BLOCK);
+					if (error_code != FT_ERR_SUCCESS)
+						return (error_code);
+				}
+				for (int32_t y = keel_y + 1; y <= keel_y + 4; ++y)
+				{
+					const int32_t error_code = chunk.chunk.write_generated_block(
+						x, y, z, GAME_VOXEL_AIR_BLOCK);
+					if (error_code != FT_ERR_SUCCESS)
+						return (error_code);
+				}
+			}
+		}
+		/* An open forward hatch connects the surrounding water to a clear,
+		 * seven-by-nine lower hull so a player can swim into and through it. */
+		for (int32_t y = keel_y + 1; y <= keel_y + 3; ++y)
+		{
+			const int32_t error_code = chunk.chunk.write_generated_block(8, y, 3,
+				GAME_VOXEL_AIR_BLOCK);
+			if (error_code != FT_ERR_SUCCESS)
+				return (error_code);
+		}
+		for (int32_t z = 9; z <= 12; ++z)
+		{
+			for (int32_t x = 6; x <= 10; ++x)
+			{
+				for (int32_t y = keel_y + 5; y <= keel_y + 6; ++y)
+				{
+					const bool wall = x == 6 || x == 10 || z == 9 || z == 12;
+					const bool doorway = x == 8 && z == 9;
+					if (!wall || doorway)
+						continue ;
+					const int32_t error_code = chunk.chunk.write_generated_block(
+						x, y, z, VOXEL_GENERATOR_OAK_LOG_BLOCK);
+					if (error_code != FT_ERR_SUCCESS)
+						return (error_code);
+				}
+			}
+		}
+		for (int32_t x = 6; x <= 10; ++x)
+		{
+			const int32_t error_code = chunk.chunk.write_generated_block(x,
+				keel_y + 7, 10, VOXEL_GENERATOR_OAK_LEAVES_BLOCK);
+			if (error_code != FT_ERR_SUCCESS)
+				return (error_code);
+		}
+		for (int32_t y = keel_y + 4; y <= keel_y + 8; ++y)
+		{
+			if ((y - keel_y) % 2 == 0)
+			{
+				const int32_t error_code = chunk.chunk.write_generated_block(8, y,
+					7, VOXEL_GENERATOR_OAK_LOG_BLOCK);
+				if (error_code != FT_ERR_SUCCESS)
+					return (error_code);
+			}
+		}
+		return (FT_ERR_SUCCESS);
+	}
+
+	int32_t place_desert_pyramid(WorldChunk &chunk) noexcept
+	{
+		int32_t ground_y = -1;
+		for (int32_t y = GAME_VOXEL_CHUNK_HEIGHT - 1; y >= 1; --y)
+		{
+			uint32_t block = GAME_VOXEL_AIR_BLOCK;
+			if (chunk.chunk.read_block(8, y, 8, &block) != FT_ERR_SUCCESS)
+				return (FT_ERR_INVALID_STATE);
+			if (voxel_block_is_solid(block) != FT_FALSE)
+			{
+				ground_y = y;
+				break ;
+			}
+		}
+		if (ground_y < 1 || ground_y + 7 >= GAME_VOXEL_CHUNK_HEIGHT)
+			return (FT_ERR_NOT_FOUND);
+		/* A hollow stepped pyramid with a serviceable central chamber. */
+		for (int32_t layer = 0; layer < 5; ++layer)
+		{
+			const int32_t radius = 6 - layer;
+			const int32_t y = ground_y + 1 + layer;
+			for (int32_t z = 8 - radius; z <= 8 + radius; ++z)
+				for (int32_t x = 8 - radius; x <= 8 + radius; ++x)
+				{
+					if (layer > 0 && x > 8 - radius + 1
+						&& x < 8 + radius - 1 && z > 8 - radius + 1
+						&& z < 8 + radius - 1)
+						continue ;
+					const int32_t error = chunk.chunk.write_generated_block(x, y,
+						z, VOXEL_GENERATOR_SANDSTONE_BLOCK);
+					if (error != FT_ERR_SUCCESS)
+						return (error);
+				}
+		}
+		for (int32_t y = ground_y + 1; y <= ground_y + 3; ++y)
+			for (int32_t z = 6; z <= 10; ++z)
+				for (int32_t x = 6; x <= 10; ++x)
+				{
+					const int32_t error = chunk.chunk.write_generated_block(x, y,
+						z, GAME_VOXEL_AIR_BLOCK);
+					if (error != FT_ERR_SUCCESS)
+						return (error);
+				}
+		for (int32_t y = ground_y + 2; y <= ground_y + 3; ++y)
+		{
+			const int32_t error = chunk.chunk.write_generated_block(8, y, 2,
+				GAME_VOXEL_AIR_BLOCK);
+			if (error != FT_ERR_SUCCESS)
+				return (error);
+		}
+		return (chunk.chunk.write_generated_block(8, ground_y + 1, 8,
+			VOXEL_GENERATOR_GOLD_ORE_BLOCK));
+	}
+
+	int32_t place_ancient_canopy(WorldChunk &chunk) noexcept
+	{
+		int32_t ground_y = -1;
+		for (int32_t y = GAME_VOXEL_CHUNK_HEIGHT - 1; y >= 1; --y)
+		{
+			uint32_t block = GAME_VOXEL_AIR_BLOCK;
+			if (chunk.chunk.read_block(8, y, 8, &block) != FT_ERR_SUCCESS)
+				return (FT_ERR_INVALID_STATE);
+			if (voxel_block_is_solid(block) != FT_FALSE)
+			{
+				ground_y = y;
+				break ;
+			}
+		}
+		if (ground_y < 1 || ground_y + 16 >= GAME_VOXEL_CHUNK_HEIGHT)
+			return (FT_ERR_NOT_FOUND);
+		for (int32_t y = ground_y + 1; y <= ground_y + 13; ++y)
+		{
+			const int32_t error = chunk.chunk.write_generated_block(8, y, 8,
+				VOXEL_GENERATOR_OAK_LOG_BLOCK);
+			if (error != FT_ERR_SUCCESS)
+				return (error);
+		}
+		for (int32_t y = ground_y + 8; y <= ground_y + 11; ++y)
+			for (int32_t z = 5; z <= 11; ++z)
+				for (int32_t x = 5; x <= 11; ++x)
+				{
+					const bool edge = x == 5 || x == 11 || z == 5 || z == 11;
+					if (!edge && !(x == 8 && z == 8))
+						continue ;
+					const int32_t error = chunk.chunk.write_generated_block(x, y,
+						z, edge ? VOXEL_GENERATOR_OAK_LOG_BLOCK
+							: VOXEL_GENERATOR_OAK_LEAVES_BLOCK);
+					if (error != FT_ERR_SUCCESS)
+						return (error);
+				}
+		for (int32_t z = 3; z <= 13; ++z)
+			for (int32_t x = 3; x <= 13; ++x)
+			{
+				const int32_t dx = x - 8;
+				const int32_t dz = z - 8;
+				if (dx * dx + dz * dz > 25)
+					continue ;
+				const int32_t error = chunk.chunk.write_generated_block(x,
+					ground_y + 12, z,
+					VOXEL_GENERATOR_OAK_LEAVES_BLOCK);
+				if (error != FT_ERR_SUCCESS)
+					return (error);
+			}
+		for (int32_t y = ground_y + 8; y <= ground_y + 11; ++y)
+			for (int32_t z = 7; z <= 9; ++z)
+				for (int32_t x = 7; x <= 9; ++x)
+				{
+					const int32_t error = chunk.chunk.write_generated_block(x, y,
+						z, GAME_VOXEL_AIR_BLOCK);
+					if (error != FT_ERR_SUCCESS)
+						return (error);
+				}
+		/* A solid canopy roof closes the hostile room to skylight. The leaf
+		 * crown sits above it, while this opaque layer keeps its chamber dark. */
+		for (int32_t z = 5; z <= 11; ++z)
+			for (int32_t x = 5; x <= 11; ++x)
+			{
+				const uint32_t roof_block = x == 8 && z == 7
+					? VOXEL_GENERATOR_TRAPDOOR_CLOSED_BLOCK
+					: VOXEL_GENERATOR_OAK_LOG_BLOCK;
+				const int32_t error = chunk.chunk.write_generated_block(x,
+					ground_y + 12, z, roof_block);
+				if (error != FT_ERR_SUCCESS)
+					return (error);
+			}
+		/* A continuous ladder gives the hollow trunk a real climb route. */
+		for (int32_t y = ground_y + 8; y <= ground_y + 11; ++y)
+		{
+			const int32_t error = chunk.chunk.write_generated_block(8, y,
+				7, VOXEL_GENERATOR_LADDER_BLOCK);
+			if (error != FT_ERR_SUCCESS)
+				return (error);
+		}
+		return (FT_ERR_SUCCESS);
+	}
+
+	int32_t place_spider_nest(WorldChunk &chunk) noexcept
+	{
+		/* Require an actual below-surface air cavity before adding the stone
+		 * chamber; a dry surface chunk is not silently turned into a cave. */
+		int32_t cave_y = -1;
+		for (int32_t y = 48; y >= 8 && cave_y < 0; --y)
+		{
+			uint32_t block = GAME_VOXEL_AIR_BLOCK;
+			if (chunk.chunk.read_block(8, y, 8, &block) != FT_ERR_SUCCESS)
+				return (FT_ERR_INVALID_STATE);
+			if (block == GAME_VOXEL_AIR_BLOCK)
+			{
+				uint32_t floor = GAME_VOXEL_AIR_BLOCK;
+				uint32_t side = GAME_VOXEL_AIR_BLOCK;
+				if (chunk.chunk.read_block(8, y - 1, 8, &floor)
+					!= FT_ERR_SUCCESS
+					|| chunk.chunk.read_block(9, y, 8, &side)
+					!= FT_ERR_SUCCESS)
+					return (FT_ERR_INVALID_STATE);
+				if (side == GAME_VOXEL_AIR_BLOCK
+					&& floor != GAME_VOXEL_AIR_BLOCK
+					&& floor != VOXEL_GENERATOR_WATER_BLOCK)
+					cave_y = y;
+			}
+		}
+		if (cave_y < 0)
+			return (FT_ERR_NOT_FOUND);
+		for (int32_t z = 5; z <= 11; ++z)
+			for (int32_t x = 5; x <= 11; ++x)
+			{
+				const bool wall = x == 5 || x == 11 || z == 5 || z == 11;
+				if (!wall)
+					continue ;
+				const int32_t error = chunk.chunk.write_generated_block(x,
+					cave_y, z, VOXEL_GENERATOR_MOSSY_STONE_BLOCK);
+				if (error != FT_ERR_SUCCESS)
+					return (error);
+			}
+		return (chunk.chunk.write_generated_block(8, cave_y, 8,
+			VOXEL_GENERATOR_SPIDER_CORPSE_BLOCK));
+	}
+
+	int32_t place_instability_overlay(WorldChunk &chunk,
+		uint32_t variant, int32_t center_x = 8,
+		int32_t center_z = 8) noexcept
+	{
+		if (variant == 0U || variant > 8U)
+			return (FT_ERR_INVALID_ARGUMENT);
+		if (variant == 6U)
+			return (place_shipwreck(chunk));
+		if (variant == 8U)
+			return (place_ruined_village(chunk));
+		for (int32_t z = center_z - 3; z <= center_z + 3; ++z)
+			for (int32_t x = center_x - 3; x <= center_x + 3; ++x)
+			{
+				const int32_t error = chunk.chunk.write_generated_block(x, 2, z,
+					variant == 1U ? VOXEL_GENERATOR_COARSE_DIRT_BLOCK
+						: VOXEL_GENERATOR_CRACKED_STONE_BLOCK);
+				if (error != FT_ERR_SUCCESS)
+					return (error);
+			}
+		if (variant == 1U)
+		{
+			for (int32_t x = center_x - 3; x <= center_x + 3; x += 2)
+				for (int32_t z : {center_z - 3, center_z + 3})
+				{
+					const int32_t error = chunk.chunk.write_generated_block(x, 3,
+						z, VOXEL_GENERATOR_OAK_LOG_BLOCK);
+					if (error != FT_ERR_SUCCESS)
+						return (error);
+				}
+			return (FT_ERR_SUCCESS);
+		}
+		if (variant == 2U)
+		{
+			for (int32_t x : {center_x - 2, center_x + 2})
+				for (int32_t y = 3; y <= 7; ++y)
+				{
+					const int32_t error = chunk.chunk.write_generated_block(x, y,
+						center_z, VOXEL_GENERATOR_CRACKED_STONE_BLOCK);
+					if (error != FT_ERR_SUCCESS)
+						return (error);
+				}
+			return (chunk.chunk.write_generated_block(center_x, 3, center_z,
+				VOXEL_GENERATOR_GOLD_ORE_BLOCK));
+		}
+		if (variant == 3U)
+		{
+			for (int32_t y = 3; y <= 13; ++y)
+				for (int32_t x : {center_x - 3, center_x + 3})
+					for (int32_t z : {center_z - 3, center_z + 3})
+					{
+						const int32_t error = chunk.chunk.write_generated_block(x, y,
+							z, VOXEL_GENERATOR_MOSSY_STONE_BLOCK);
+						if (error != FT_ERR_SUCCESS)
+							return (error);
+					}
+			for (int32_t z = center_z - 2; z <= center_z + 2; ++z)
+				for (int32_t x = center_x - 2; x <= center_x + 2; ++x)
+				{
+					const int32_t error = chunk.chunk.write_generated_block(x,
+						8, z, (x == center_x - 2 || x == center_x + 2
+							|| z == center_z - 2 || z == center_z + 2)
+							? VOXEL_GENERATOR_OAK_LOG_BLOCK : GAME_VOXEL_AIR_BLOCK);
+					if (error != FT_ERR_SUCCESS)
+						return (error);
+				}
+			return (FT_ERR_SUCCESS);
+		}
+		for (int32_t y = 3; y <= 6; ++y)
+		for (int32_t z = center_z - 2; z <= center_z + 2; ++z)
+			for (int32_t x = center_x - 2; x <= center_x + 2; ++x)
+			{
+				const bool wall = x == center_x - 2 || x == center_x + 2
+					|| z == center_z - 2 || z == center_z + 2;
+				if (!wall)
+					continue ;
+				const int32_t error = chunk.chunk.write_generated_block(x, y, z,
+					VOXEL_GENERATOR_MOSSY_STONE_BLOCK);
+				if (error != FT_ERR_SUCCESS)
+					return (error);
+			}
+		if (variant == 5U)
+		{
+			for (int32_t y = 3; y <= 8; ++y)
+				for (int32_t x : {center_x - 3, center_x + 3})
+					for (int32_t z : {center_z - 3, center_z + 3})
+					{
+						const int32_t error = chunk.chunk.write_generated_block(
+							x, y, z, VOXEL_GENERATOR_OBSIDIAN_BLOCK);
+						if (error != FT_ERR_SUCCESS)
+							return (error);
+					}
+			return (chunk.chunk.write_generated_block(center_x, 3, center_z,
+				VOXEL_GENERATOR_DIAMOND_ORE_BLOCK));
+		}
+		if (variant == 7U)
+		{
+			int32_t ground_y = -1;
+			for (int32_t y = GAME_VOXEL_CHUNK_HEIGHT - 1; y >= 1; --y)
+			{
+				uint32_t block = GAME_VOXEL_AIR_BLOCK;
+				if (chunk.chunk.read_block(8, y, 8, &block) != FT_ERR_SUCCESS)
+					return (FT_ERR_INVALID_STATE);
+				if (voxel_block_is_solid(block) != FT_FALSE)
+				{
+					ground_y = y;
+					break ;
+				}
+			}
+			if (ground_y < 1 || ground_y + 5 >= GAME_VOXEL_CHUNK_HEIGHT)
+				return (FT_ERR_NOT_FOUND);
+			for (int32_t z = 6; z <= 10; ++z)
+				for (int32_t x = 6; x <= 10; ++x)
+				{
+					const bool rim = x == 6 || x == 10 || z == 6 || z == 10;
+					const int32_t error = chunk.chunk.write_generated_block(x,
+						ground_y + 1, z, rim ? VOXEL_GENERATOR_BASALT_BLOCK
+							: GAME_VOXEL_AIR_BLOCK);
+					if (error != FT_ERR_SUCCESS)
+						return (error);
+				}
+			for (int32_t y = ground_y + 2; y <= ground_y + 4; ++y)
+				for (int32_t x : {6, 10})
+					for (int32_t z : {6, 10})
+					{
+						const int32_t error = chunk.chunk.write_generated_block(
+							x, y, z, VOXEL_GENERATOR_BASALT_BLOCK);
+						if (error != FT_ERR_SUCCESS)
+							return (error);
+					}
+			return (chunk.chunk.write_generated_block(8, ground_y + 2, 8,
+				VOXEL_GENERATOR_OBSIDIAN_BLOCK));
+		}
+		return (FT_ERR_SUCCESS);
+	}
+
+	int32_t place_instability_opportunity(WorldChunk &chunk,
+		uint32_t variant, int32_t center_x, int32_t center_z) noexcept
+	{
+		int32_t ground_y = -1;
+		for (int32_t y = GAME_VOXEL_CHUNK_HEIGHT - 8; y >= 2; --y)
+		{
+			uint32_t block = GAME_VOXEL_AIR_BLOCK;
+			if (chunk.chunk.read_block(center_x, y, center_z, &block)
+				!= FT_ERR_SUCCESS)
+				return (FT_ERR_INVALID_STATE);
+			if (voxel_block_is_solid(block) != FT_FALSE)
+			{
+				ground_y = y;
+				break ;
+			}
+			if (block != GAME_VOXEL_AIR_BLOCK)
+				return (FT_ERR_NOT_FOUND);
+		}
+	if (ground_y < 2 || ground_y + 7 >= GAME_VOXEL_CHUNK_HEIGHT
+		|| variant == 0U || variant > 5U)
+		return (FT_ERR_NOT_FOUND);
+	for (int32_t z = center_z - 2; z <= center_z + 2; ++z)
+		for (int32_t x = center_x - 2; x <= center_x + 2; ++x)
+		{
+			const uint32_t floor_block = variant == 1U
+				? VOXEL_GENERATOR_COARSE_DIRT_BLOCK
+				: VOXEL_GENERATOR_CRACKED_STONE_BLOCK;
+			const int32_t error = chunk.chunk.write_generated_block(x,
+				ground_y + 1, z, floor_block);
+			if (error != FT_ERR_SUCCESS)
+				return (error);
+		}
+	if (variant == 1U)
+	{
+		for (int32_t x : {center_x - 2, center_x + 2})
+			for (int32_t z : {center_z - 2, center_z + 2})
+				for (int32_t y = ground_y + 2; y <= ground_y + 3; ++y)
+				{
+					const int32_t error = chunk.chunk.write_generated_block(x, y,
+						z, VOXEL_GENERATOR_OAK_LOG_BLOCK);
+					if (error != FT_ERR_SUCCESS)
+						return (error);
+				}
+		return (FT_ERR_SUCCESS);
+	}
+	if (variant == 2U)
+	{
+		for (int32_t x : {center_x - 2, center_x + 2})
+			for (int32_t y = ground_y + 2; y <= ground_y + 5; ++y)
+			{
+				const int32_t error = chunk.chunk.write_generated_block(x, y,
+					center_z, VOXEL_GENERATOR_CRACKED_STONE_BLOCK);
+				if (error != FT_ERR_SUCCESS)
+					return (error);
+			}
+		return (chunk.chunk.write_generated_block(center_x, ground_y + 2,
+			center_z, VOXEL_GENERATOR_GOLD_ORE_BLOCK));
+	}
+	if (variant == 3U)
+	{
+		for (int32_t y = ground_y + 2; y <= ground_y + 6; ++y)
+			for (int32_t x : {center_x - 2, center_x + 2})
+				for (int32_t z : {center_z - 2, center_z + 2})
+				{
+					const int32_t error = chunk.chunk.write_generated_block(x, y,
+						z, VOXEL_GENERATOR_MOSSY_STONE_BLOCK);
+					if (error != FT_ERR_SUCCESS)
+						return (error);
+				}
+		for (int32_t x = center_x - 1; x <= center_x + 1; ++x)
+			for (int32_t z = center_z - 1; z <= center_z + 1; ++z)
+			{
+				const int32_t error = chunk.chunk.write_generated_block(x,
+					ground_y + 4, z,
+					(x == center_x - 1 || x == center_x + 1
+						|| z == center_z - 1 || z == center_z + 1)
+						? VOXEL_GENERATOR_OAK_LOG_BLOCK : GAME_VOXEL_AIR_BLOCK);
+				if (error != FT_ERR_SUCCESS)
+					return (error);
+			}
+		return (FT_ERR_SUCCESS);
+	}
+	const uint32_t wall_block = variant == 5U
+		? VOXEL_GENERATOR_OBSIDIAN_BLOCK
+		: VOXEL_GENERATOR_MOSSY_STONE_BLOCK;
+	for (int32_t y = ground_y + 2; y <= ground_y + 3; ++y)
+		for (int32_t offset = -2; offset <= 2; ++offset)
+		{
+			if (!(variant >= 4U && offset == 0))
+			{
+				int32_t error = chunk.chunk.write_generated_block(
+					center_x + offset, y, center_z - 2, wall_block);
+				if (error != FT_ERR_SUCCESS)
+					return (error);
+				error = chunk.chunk.write_generated_block(center_x + offset, y,
+					center_z + 2, wall_block);
+				if (error != FT_ERR_SUCCESS)
+					return (error);
+			}
+			const int32_t left_error = chunk.chunk.write_generated_block(
+				center_x - 2, y, center_z + offset, wall_block);
+			const int32_t right_error = chunk.chunk.write_generated_block(
+				center_x + 2, y, center_z + offset, wall_block);
+			if (left_error != FT_ERR_SUCCESS || right_error != FT_ERR_SUCCESS)
+				return (left_error != FT_ERR_SUCCESS ? left_error : right_error);
+		}
+	return (FT_ERR_SUCCESS);
+	}
+
+	int32_t place_volcano(WorldChunk &chunk,
+		const WorldGenerationPipeline::GenerationFeaturePlan &plan) noexcept
+	{
+		static const int32_t BASE_Y = 4;
+		static const int32_t CRATER_FLOOR_Y = 18;
+		static const int32_t ARENA_FLOOR_Y = 20;
+		static const int32_t PROFILE_CENTER_BLOCK = 72;
+		if (plan.volcano_footprint_chunks < 9U
+			|| plan.volcano_footprint_chunks > 16U)
+			return (FT_ERR_INVALID_ARGUMENT);
+		const int64_t relative_chunk_x = static_cast<int64_t>(chunk.chunk_x)
+			- plan.volcano_anchor_chunk_x;
+		const int64_t relative_chunk_z = static_cast<int64_t>(chunk.chunk_z)
+			- plan.volcano_anchor_chunk_z;
+		if (relative_chunk_x < 0
+			|| relative_chunk_x >= plan.volcano_footprint_chunks
+			|| relative_chunk_z < 0
+			|| relative_chunk_z >= plan.volcano_footprint_chunks)
+			return (FT_ERR_OUT_OF_RANGE);
+		for (int32_t local_z = 0; local_z < GAME_VOXEL_CHUNK_DEPTH; ++local_z)
+		{
+			for (int32_t local_x = 0; local_x < GAME_VOXEL_CHUNK_WIDTH; ++local_x)
+			{
+				const int64_t raw_x = relative_chunk_x
+					* GAME_VOXEL_CHUNK_WIDTH + local_x;
+				const int64_t raw_z = relative_chunk_z
+					* GAME_VOXEL_CHUNK_DEPTH + local_z;
+				const int32_t global_x = static_cast<int32_t>(
+					raw_x * 9 / plan.volcano_footprint_chunks);
+				const int32_t global_z = static_cast<int32_t>(
+					raw_z * 9 / plan.volcano_footprint_chunks);
+				const int32_t dx = global_x - PROFILE_CENTER_BLOCK;
+				const int32_t dz = global_z - PROFILE_CENTER_BLOCK;
+				const int32_t distance_squared = dx * dx + dz * dz;
+				int32_t radius = 0;
+				while ((radius + 1) * (radius + 1) <= distance_squared)
+					++radius;
+				int32_t surface_y = BASE_Y;
+				if (radius <= 10)
+				surface_y = CRATER_FLOOR_Y;
+				else if (radius <= 16)
+					surface_y = CRATER_FLOOR_Y + (radius - 10) * 2;
+				else if (radius <= 60)
+					surface_y = 30 - ((radius - 16) * 25) / 44;
+				for (int32_t y = 0; y < GAME_VOXEL_CHUNK_HEIGHT; ++y)
+				{
+					/* Preserve the world's bottom support/bedrock layer. */
+					if (y == 0)
+						continue ;
+					uint32_t block_id = GAME_VOXEL_AIR_BLOCK;
+					if (y <= BASE_Y || (y > BASE_Y && y <= surface_y))
+						block_id = VOXEL_GENERATOR_VOLCANIC_ROCK_BLOCK;
+					if (radius <= 7 && y == CRATER_FLOOR_Y)
+						block_id = VOXEL_GENERATOR_LAVA_BLOCK;
+					const int32_t error_code = chunk.chunk.write_generated_block(
+						local_x, y, local_z, block_id);
+					if (error_code != FT_ERR_SUCCESS)
+						return (error_code);
+				}
+				/* A supported arena shelf and a two-block-wide passage connect it
+				 * to the inner crater. These global-coordinate tests match on both
+				 * sides of every chunk seam. */
+				const bool arena = global_x >= PROFILE_CENTER_BLOCK + 20
+					&& global_x <= PROFILE_CENTER_BLOCK + 34
+					&& global_z >= PROFILE_CENTER_BLOCK - 8
+					&& global_z <= PROFILE_CENTER_BLOCK + 8;
+				const bool passage = global_x >= PROFILE_CENTER_BLOCK + 8
+					&& global_x <= PROFILE_CENTER_BLOCK + 20
+					&& global_z >= PROFILE_CENTER_BLOCK - 2
+					&& global_z <= PROFILE_CENTER_BLOCK + 2;
+				if (arena)
+				{
+					for (int32_t y = BASE_Y + 1; y <= ARENA_FLOOR_Y; ++y)
+					{
+						const int32_t error_code = chunk.chunk.write_generated_block(
+							local_x, y, local_z,
+							VOXEL_GENERATOR_VOLCANIC_ROCK_BLOCK);
+						if (error_code != FT_ERR_SUCCESS)
+							return (error_code);
+					}
+					for (int32_t y = ARENA_FLOOR_Y + 1; y <= 26; ++y)
+					{
+						const int32_t error_code = chunk.chunk.write_generated_block(
+							local_x, y, local_z, GAME_VOXEL_AIR_BLOCK);
+						if (error_code != FT_ERR_SUCCESS)
+							return (error_code);
+					}
+				}
+				if (passage)
+				{
+					for (int32_t y = CRATER_FLOOR_Y + 1; y <= 22; ++y)
+					{
+						const int32_t error_code = chunk.chunk.write_generated_block(
+							local_x, y, local_z, GAME_VOXEL_AIR_BLOCK);
+						if (error_code != FT_ERR_SUCCESS)
+							return (error_code);
+					}
+				}
+			}
+		}
+		return (FT_ERR_SUCCESS);
+	}
+}
+
+int32_t WorldChunkGenerationWorker::apply_feature_plans(WorldChunk &chunk,
+	const std::vector<WorldGenerationPipeline::GenerationFeaturePlan>
+		&feature_plans) noexcept
+{
+	std::vector<VillageFootprint> placed_villages;
+	try
+	{
+		placed_villages.reserve(feature_plans.size());
+	}
+	catch (...)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	for (const auto &plan : feature_plans)
+	{
+		if (plan.kind
+			== WorldGenerationPipeline::GenerationFeaturePlan::VOLCANO)
+		{
+			const int32_t volcano_error = place_volcano(chunk, plan);
+			if (volcano_error != FT_ERR_SUCCESS)
+				return (volcano_error);
+			continue ;
+		}
+		if (plan.kind == WorldGenerationPipeline::GenerationFeaturePlan::VILLAGE)
+		{
+			const int32_t village_error = place_village(chunk, plan,
+				placed_villages);
+			if (village_error != FT_ERR_SUCCESS)
+				return (village_error);
+			continue ;
+		}
+		if (plan.kind
+			== WorldGenerationPipeline::GenerationFeaturePlan::RUINED_VILLAGE)
+		{
+			const int32_t ruined_error = place_ruined_village(chunk);
+			if (ruined_error != FT_ERR_SUCCESS)
+				return (ruined_error);
+			continue ;
+		}
+		if (plan.kind
+			== WorldGenerationPipeline::GenerationFeaturePlan::SHIPWRECK)
+		{
+			const int32_t shipwreck_error = place_shipwreck(chunk);
+			if (shipwreck_error != FT_ERR_SUCCESS)
+				return (shipwreck_error);
+			continue ;
+		}
+		if (plan.kind
+			== WorldGenerationPipeline::GenerationFeaturePlan::DESERT_PYRAMID)
+		{
+			const int32_t error = place_desert_pyramid(chunk);
+			if (error != FT_ERR_SUCCESS)
+				return (error);
+			continue ;
+		}
+		if (plan.kind
+			== WorldGenerationPipeline::GenerationFeaturePlan::ANCIENT_CANOPY)
+		{
+			const int32_t error = place_ancient_canopy(chunk);
+			if (error != FT_ERR_SUCCESS)
+				return (error);
+			continue ;
+		}
+		if (plan.kind
+			== WorldGenerationPipeline::GenerationFeaturePlan::SPIDER_NEST)
+		{
+			const int32_t error = place_spider_nest(chunk);
+			if (error != FT_ERR_SUCCESS)
+				return (error);
+			continue ;
+		}
+		if (plan.kind
+			== WorldGenerationPipeline::GenerationFeaturePlan::INSTABILITY_OVERLAY)
+		{
+			int32_t center_x = 8;
+			int32_t center_z = 8;
+			uint32_t variant = plan.ordinal;
+			bool opportunity = false;
+			if (plan.ordinal >= 111U && plan.ordinal <= 135U)
+			{
+				static const int32_t OPPORTUNITY_CENTERS[3][2] = {
+					{4, 4}, {12, 4}, {8, 12}};
+				const uint32_t tier = plan.ordinal / 10U - 10U;
+				variant = plan.ordinal % 10U;
+				if (tier == 0U || tier > 3U || variant == 0U || variant > 5U)
+					return (FT_ERR_INVALID_ARGUMENT);
+				center_x = OPPORTUNITY_CENTERS[tier - 1U][0];
+				center_z = OPPORTUNITY_CENTERS[tier - 1U][1];
+				opportunity = true;
+			}
+			const int32_t error = opportunity
+				? place_instability_opportunity(chunk, variant, center_x, center_z)
+				: place_instability_overlay(chunk, variant, center_x, center_z);
+			if (error != FT_ERR_SUCCESS)
+				return (error);
+			continue ;
+		}
+		if (plan.kind
+			!= WorldGenerationPipeline::GenerationFeaturePlan::SURFACE_MAGMA_POOL)
+			return (FT_ERR_INVALID_OPERATION);
+		uint64_t hash = plan.host_intent_sequence
+			^ (static_cast<uint64_t>(plan.ordinal) * 0x9e3779b97f4a7c15ULL);
+		bool placed = false;
+		for (int32_t attempt = 0; attempt <= 144 && !placed; ++attempt)
+		{
+			const bool fallback = attempt == 144;
+			const int32_t center_x = fallback ? 8 : 2
+				+ static_cast<int32_t>((hash + attempt) % 12U);
+			const int32_t center_z = fallback ? 8 : 2 + static_cast<int32_t>(
+				((hash >> 16U) + static_cast<uint64_t>(attempt) * 7U) % 12U);
+			int32_t ground_y = -1;
+			for (int32_t y = GAME_VOXEL_CHUNK_HEIGHT - 2; y >= 1; --y)
+			{
+				uint32_t block_id;
+				if (chunk.chunk.read_block(center_x, y, center_z, &block_id)
+					!= FT_ERR_SUCCESS)
+					return (FT_ERR_INVALID_STATE);
+				if (voxel_block_is_solid(block_id) != FT_FALSE)
+				{
+					ground_y = y;
+					break ;
+				}
+			}
+			if (fallback)
+			{
+				if (ground_y < 1)
+					ground_y = 1;
+				if (ground_y + 2 >= GAME_VOXEL_CHUNK_HEIGHT)
+					ground_y = GAME_VOXEL_CHUNK_HEIGHT - 3;
+			}
+			else if (ground_y < 1
+				|| ground_y + 2 >= GAME_VOXEL_CHUNK_HEIGHT)
+				continue ;
+			bool valid_site = true;
+			int32_t surface_heights[5][5] = {};
+			for (int32_t dz = -2; !fallback && dz <= 2 && valid_site; ++dz)
+			{
+				for (int32_t dx = -2; !fallback && dx <= 2; ++dx)
+				{
+					int32_t surface_y = fallback ? ground_y - 1 : -1;
+					for (int32_t y = ground_y + 1; y >= ground_y - 1; --y)
+					{
+						uint32_t floor_id;
+						if (chunk.chunk.read_block(center_x + dx, y,
+							center_z + dz, &floor_id) != FT_ERR_SUCCESS)
+							return (FT_ERR_INVALID_STATE);
+						if (voxel_block_is_solid(floor_id) != FT_FALSE)
+						{
+							surface_y = y;
+							break ;
+						}
+					}
+					if (surface_y < ground_y - 1 || surface_y > ground_y)
+					{
+						valid_site = false;
+						break ;
+					}
+					surface_heights[dx + 2][dz + 2] = surface_y;
+					for (int32_t y = surface_y + 1; y <= ground_y + 1; ++y)
+					{
+						uint32_t above_id;
+						if (chunk.chunk.read_block(center_x + dx, y,
+							center_z + dz, &above_id) != FT_ERR_SUCCESS
+							|| above_id != GAME_VOXEL_AIR_BLOCK)
+						{
+							valid_site = false;
+							break ;
+						}
+					}
+					if (!valid_site)
+						break ;
+				}
+			}
+			if (!valid_site)
+				continue ;
+			if (fallback)
+			{
+				for (int32_t dz = -2; dz <= 2; ++dz)
+				{
+					for (int32_t dx = -2; dx <= 2; ++dx)
+						surface_heights[dx + 2][dz + 2] = ground_y - 1;
+				}
+			}
+			for (int32_t dz = -2; dz <= 2; ++dz)
+			{
+				for (int32_t dx = -2; dx <= 2; ++dx)
+				{
+					for (int32_t y = surface_heights[dx + 2][dz + 2] + 1;
+						y <= ground_y; ++y)
+					{
+						const int32_t fill_error = chunk.chunk.write_generated_block(
+							center_x + dx, y, center_z + dz,
+							VOXEL_GENERATOR_VOLCANIC_ROCK_BLOCK);
+						if (fill_error != FT_ERR_SUCCESS)
+							return (fill_error);
+					}
+					const bool rim = dx == -2 || dx == 2 || dz == -2 || dz == 2;
+					const uint32_t block_id = rim
+						? VOXEL_GENERATOR_VOLCANIC_ROCK_BLOCK
+						: VOXEL_GENERATOR_LAVA_BLOCK;
+					const int32_t error_code = chunk.chunk.write_generated_block(
+						center_x + dx, ground_y + 1, center_z + dz, block_id);
+					if (error_code != FT_ERR_SUCCESS)
+						return (error_code);
+				}
+			}
+		placed = true;
+		}
+		if (!placed)
+			return (FT_ERR_NOT_FOUND);
+	}
+	return (FT_ERR_SUCCESS);
+}
 
 namespace
 {
@@ -1098,6 +2203,8 @@ int32_t WorldChunkGenerationWorker::initialize_chunk_for_generation(WorldChunk &
 	int32_t chunk_x, int32_t chunk_z, const char *seed,
 	voxel_generation_config &config, uint32_t stage_mask,
 	std::vector<WorldGenerationPipeline::WorldDeferredBlockEdit> &deferred_edits,
+	const std::vector<WorldGenerationPipeline::GenerationFeaturePlan>
+		&feature_plans,
 	const WorldGenerationPipeline::WorldChunkSnapshot *source_snapshot,
 	uint64_t *generation_duration_nanoseconds,
 	uint64_t *mesh_duration_nanoseconds) noexcept
@@ -1140,6 +2247,9 @@ int32_t WorldChunkGenerationWorker::initialize_chunk_for_generation(WorldChunk &
 	#endif
 	error_code = voxel_generate_chunk_with_stage_mask(chunk.chunk,
 			chunk.world_x, chunk.world_z, seed, config, stage_mask);
+	if (error_code == FT_ERR_SUCCESS && !feature_plans.empty())
+		error_code = WorldChunkGenerationWorker::apply_feature_plans(chunk,
+			feature_plans);
 	if (generation_duration_nanoseconds != nullptr)
 		*generation_duration_nanoseconds = static_cast<uint64_t>(
 			std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -1163,6 +2273,8 @@ int32_t WorldChunkGenerationWorker::initialize_chunk_for_generation(WorldChunk &
 		(void)chunk.chunk.destroy();
 		return (error_code);
 	}
+	chunk.light_version = chunk.content_version;
+	chunk.computed_light_input_version = chunk.light_input_version;
 	/* The worker has already built both the chunk-local light field and the
 	 * mesh from that field.  This is a valid baseline for rendering.  A later
 	 * neighbour-aware remesh may refine border values, but it must not make the
@@ -1214,11 +2326,22 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 	result->error_code = WorldChunkGenerationWorker::initialize_chunk_for_generation(*result->chunk,
 			request.chunk_x, request.chunk_z, request.seed.c_str(),
 			request.config, request.stage_mask, request.deferred_edits,
+			request.feature_plans,
 			request.snapshot.get(), &result->generation_duration_nanoseconds,
 			&result->mesh_duration_nanoseconds);
 	if (result->error_code != FT_ERR_SUCCESS)
 	{
 		result->chunk.reset();
+		return (result);
+	}
+	try
+	{
+		result->applied_feature_plans = request.feature_plans;
+	}
+	catch (...)
+	{
+		result->chunk.reset();
+		result->error_code = FT_ERR_NO_MEMORY;
 		return (result);
 	}
 	return (WorldChunkGenerationWorker::finish_generation_result(std::move(result),
@@ -1229,6 +2352,7 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::fin
 	WorldGenerationPipeline::Request &request) noexcept
 {
 	game_voxel_generation_metadata metadata;
+	int32_t error_code;
 
 	metadata = result->chunk->chunk.get_generation_metadata();
 	#if defined(DEBUG)
@@ -1238,9 +2362,10 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::fin
 		request.chunk_z);
 	#endif
 	metadata.configuration_signature = request.configuration_signature;
-	if (result->chunk->chunk.set_generation_metadata(metadata) != FT_ERR_SUCCESS)
+	error_code = result->chunk->chunk.set_generation_metadata(metadata);
+	if (error_code != FT_ERR_SUCCESS)
 	{
-		result->error_code = FT_ERR_INVALID_OPERATION;
+		result->error_code = error_code;
 		result->chunk.reset();
 		return (result);
 	}

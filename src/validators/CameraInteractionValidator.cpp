@@ -1,9 +1,11 @@
 #include "../../src/validators/CameraInteractionValidator.hpp"
 #include "../../src/interaction/BlockInteractor.hpp"
+#include "../../src/app/GameSession.hpp"
 #include <cmath>
 #include <cstdio>
 #include <memory>
 #include <new>
+#include <vector>
 
 namespace
 {
@@ -103,6 +105,11 @@ int CameraInteractionValidator::validate() const
 	uint32_t selected_id;
 	uint32_t block_id;
 	uint32_t support_id;
+	uint64_t fluid_revision;
+	std::vector<uint8_t> fluid_state;
+	std::vector<uint8_t> corrupted_fluid_state;
+	std::vector<uint8_t> restored_fluid_state;
+	std::vector<uint8_t> furnace_block_state;
 	double direction_x;
 	double direction_y;
 	double direction_z;
@@ -197,6 +204,214 @@ int CameraInteractionValidator::validate() const
 	}
 
 	/* Restore the test platform through the ordinary placement interaction. */
+	if (BlockInteractor::try_place_selected_block(&world, camera,
+			VOXEL_GENERATOR_WATER_BLOCK) != FT_ERR_PERMISSION_DENIED
+		|| BlockInteractor::try_place_selected_block(&world, camera,
+			VOXEL_GENERATOR_LAVA_BLOCK) != FT_ERR_PERMISSION_DENIED
+		|| BlockInteractor::try_place_selected_block(&world, camera,
+			VOXEL_GENERATOR_FLOWING_WATER_BLOCK) != FT_ERR_PERMISSION_DENIED
+		|| BlockInteractor::try_place_selected_block(&world, camera,
+			VOXEL_GENERATOR_FLOWING_LAVA_BLOCK) != FT_ERR_PERMISSION_DENIED
+		|| world.block_id_at(world_x, world_y, world_z, &block_id) == false
+		|| block_id != GAME_VOXEL_AIR_BLOCK)
+		return (fail_validation("fluid requires bucket transaction",
+			FT_ERR_INVALID_STATE));
+	{
+		const int32_t fluid_chunk_x = WorldCoordinates::floor_divide(world_x,
+			GAME_VOXEL_CHUNK_WIDTH);
+		const int32_t fluid_chunk_z = WorldCoordinates::floor_divide(world_z,
+			GAME_VOXEL_CHUNK_DEPTH);
+		WorldChunk *fluid_chunk = world.find_chunk_mutable(fluid_chunk_x,
+			fluid_chunk_z);
+
+		if (fluid_chunk == nullptr)
+			return (fail_validation("fluid transaction chunk",
+				FT_ERR_NOT_FOUND));
+		fluid_revision = fluid_chunk->voxel_revision;
+		if (world.replace_fluid_source_at(world_x, world_y, world_z,
+				GAME_VOXEL_AIR_BLOCK,
+				VOXEL_GENERATOR_FLOWING_WATER_BLOCK_ID,
+				fluid_revision) != FT_ERR_INVALID_ARGUMENT)
+			return (fail_validation("flowing fluid source guard",
+				FT_ERR_INVALID_STATE));
+		error_code = world.replace_fluid_source_at(world_x, world_y, world_z,
+			GAME_VOXEL_AIR_BLOCK, VOXEL_GENERATOR_WATER_BLOCK_ID,
+			fluid_revision);
+		if (error_code != FT_ERR_SUCCESS
+			|| world.block_id_at(world_x, world_y, world_z, &block_id) == false
+			|| block_id != VOXEL_GENERATOR_WATER_BLOCK_ID)
+			return (fail_validation("fluid source placement",
+				error_code == FT_ERR_SUCCESS ? FT_ERR_INVALID_STATE : error_code));
+		if (world.replace_fluid_source_at(world_x, world_y, world_z,
+				VOXEL_GENERATOR_WATER_BLOCK_ID, GAME_VOXEL_AIR_BLOCK,
+				fluid_revision) != FT_ERR_INVALID_STATE
+			|| world.block_id_at(world_x, world_y, world_z, &block_id) == false
+			|| block_id != VOXEL_GENERATOR_WATER_BLOCK_ID)
+			return (fail_validation("stale fluid transaction",
+				FT_ERR_INVALID_STATE));
+		error_code = world.replace_fluid_source_at(world_x, world_y, world_z,
+			VOXEL_GENERATOR_WATER_BLOCK_ID, GAME_VOXEL_AIR_BLOCK,
+			fluid_chunk->voxel_revision);
+		if (error_code != FT_ERR_SUCCESS
+			|| world.block_id_at(world_x, world_y, world_z, &block_id) == false
+			|| block_id != GAME_VOXEL_AIR_BLOCK)
+			return (fail_validation("fluid source removal",
+				error_code == FT_ERR_SUCCESS ? FT_ERR_INVALID_STATE : error_code));
+		error_code = world.serialize_fluid_state(fluid_state);
+		if (error_code != FT_ERR_SUCCESS || fluid_state.size() < 20U)
+			return (fail_validation("fluid state serialize", error_code));
+		corrupted_fluid_state = fluid_state;
+		corrupted_fluid_state[12U] ^= 0x01U;
+		if (world.deserialize_fluid_state(corrupted_fluid_state.data(),
+				corrupted_fluid_state.size()) != FT_ERR_INVALID_ARGUMENT)
+			return (fail_validation("fluid state checksum", FT_ERR_INVALID_STATE));
+		error_code = world.serialize_fluid_state(restored_fluid_state);
+		if (error_code != FT_ERR_SUCCESS || restored_fluid_state != fluid_state)
+			return (fail_validation("fluid state rollback", error_code));
+		error_code = world.replace_fluid_source_at(world_x, world_y, world_z,
+			GAME_VOXEL_AIR_BLOCK, VOXEL_GENERATOR_WATER_BLOCK_ID,
+			fluid_chunk->voxel_revision);
+		if (error_code != FT_ERR_SUCCESS)
+			return (fail_validation("fluid state reapply setup", error_code));
+		error_code = world.deserialize_fluid_state(fluid_state.data(),
+			fluid_state.size());
+		if (error_code != FT_ERR_SUCCESS
+			|| world.block_id_at(world_x, world_y, world_z, &block_id) == false
+			|| block_id != GAME_VOXEL_AIR_BLOCK)
+			return (fail_validation("fluid state restore",
+				error_code == FT_ERR_SUCCESS ? FT_ERR_INVALID_STATE : error_code));
+		fluid_chunk = world.find_chunk_mutable(fluid_chunk_x, fluid_chunk_z);
+		if (fluid_chunk == nullptr)
+			return (fail_validation("block state chunk", FT_ERR_NOT_FOUND));
+		error_code = world.replace_block_state_at(world_x, world_y, world_z,
+			GAME_VOXEL_AIR_BLOCK, VOXEL_GENERATOR_FURNACE_BLOCK_ID,
+			fluid_chunk->voxel_revision);
+		if (error_code == FT_ERR_SUCCESS)
+			error_code = world.serialize_fluid_state(furnace_block_state);
+		if (error_code != FT_ERR_SUCCESS || furnace_block_state.size() < 20U
+			|| furnace_block_state[4U] != 2U
+			|| furnace_block_state[5U] != 0U
+			|| furnace_block_state[6U] != 0U
+			|| furnace_block_state[7U] != 0U)
+			return (fail_validation("generic block state serialize",
+				error_code == FT_ERR_SUCCESS ? FT_ERR_INVALID_STATE : error_code));
+		error_code = world.deserialize_fluid_state(furnace_block_state.data(),
+			furnace_block_state.size());
+		if (error_code != FT_ERR_SUCCESS
+			|| world.block_id_at(world_x, world_y, world_z, &block_id) == false
+			|| block_id != VOXEL_GENERATOR_FURNACE_BLOCK_ID)
+			return (fail_validation("generic block state restore",
+				error_code == FT_ERR_SUCCESS ? FT_ERR_INVALID_STATE : error_code));
+		const WorldChunk *station_chunk = world.find_chunk(fluid_chunk_x,
+			fluid_chunk_z);
+		if (station_chunk == nullptr
+			|| !GameSession::authorize_local_processing_station(
+				static_cast<uint32_t>(MinecraftRecipeCatalog::FURNACE_STATION_ID),
+				world_x, world_y, world_z, station_chunk->voxel_revision,
+				camera.x, camera.y, camera.z, &world)
+			|| GameSession::authorize_local_processing_station(0U, world_x,
+				world_y, world_z, station_chunk->voxel_revision, camera.x,
+				camera.y, camera.z, &world)
+			|| GameSession::authorize_local_processing_station(
+				static_cast<uint32_t>(MinecraftRecipeCatalog::FURNACE_STATION_ID),
+				world_x, world_y, world_z, station_chunk->voxel_revision - 1U,
+				camera.x, camera.y, camera.z, &world)
+			|| GameSession::authorize_local_processing_station(
+				static_cast<uint32_t>(MinecraftRecipeCatalog::FURNACE_STATION_ID),
+				world_x, world_y, world_z, 0U, camera.x, camera.y, camera.z,
+				&world)
+			|| GameSession::authorize_local_processing_station(
+				static_cast<uint32_t>(MinecraftRecipeCatalog::FURNACE_STATION_ID),
+				world_x, world_y, world_z, station_chunk->voxel_revision,
+				camera.x + 7.0, camera.y, camera.z, &world))
+			return (fail_validation("local furnace station authorization",
+				FT_ERR_PERMISSION_DENIED));
+		{
+			const uint32_t station_ids[] = {
+				static_cast<uint32_t>(
+					MinecraftRecipeCatalog::WORKBENCH_STATION_ID),
+				static_cast<uint32_t>(
+					MinecraftRecipeCatalog::PAPER_MILL_STATION_ID),
+				static_cast<uint32_t>(
+					MinecraftRecipeCatalog::CARD_PRESS_STATION_ID)};
+			const uint32_t station_blocks[] = {
+				VOXEL_GENERATOR_WORKBENCH_BLOCK_ID,
+				VOXEL_GENERATOR_PAPER_MILL_BLOCK_ID,
+				VOXEL_GENERATOR_CARD_PRESS_BLOCK_ID};
+			for (std::size_t index = 0U;
+				index < sizeof(station_ids) / sizeof(station_ids[0]); ++index)
+			{
+				station_chunk = world.find_chunk(fluid_chunk_x, fluid_chunk_z);
+				if (station_chunk == nullptr)
+					return (fail_validation("station fixture chunk",
+						FT_ERR_NOT_FOUND));
+				error_code = world.replace_block_state_at(world_x, world_y,
+					world_z, VOXEL_GENERATOR_FURNACE_BLOCK_ID,
+					station_blocks[index], station_chunk->voxel_revision);
+				if (error_code != FT_ERR_SUCCESS)
+					return (fail_validation("replace workstation fixture",
+						error_code));
+				station_chunk = world.find_chunk(fluid_chunk_x, fluid_chunk_z);
+				if (station_chunk == nullptr
+					|| !GameSession::authorize_local_processing_station(
+						station_ids[index], world_x, world_y, world_z,
+						station_chunk == nullptr ? 0U
+							: station_chunk->voxel_revision,
+						camera.x, camera.y, camera.z, &world))
+					return (fail_validation("workstation station authorization",
+						FT_ERR_PERMISSION_DENIED));
+				error_code = world.replace_block_state_at(world_x, world_y,
+					world_z, station_blocks[index],
+					VOXEL_GENERATOR_FURNACE_BLOCK_ID,
+					station_chunk->voxel_revision);
+				if (error_code != FT_ERR_SUCCESS)
+					return (fail_validation("restore furnace fixture",
+						error_code));
+			}
+		}
+		error_code = world.set_chunk_protected(fluid_chunk_x,
+			fluid_chunk_z, true);
+		if (error_code != FT_ERR_SUCCESS)
+			return (fail_validation("protect furnace station chunk",
+				error_code));
+		const bool protected_station_allowed =
+			GameSession::authorize_local_processing_station(
+				static_cast<uint32_t>(MinecraftRecipeCatalog::FURNACE_STATION_ID),
+				world_x, world_y, world_z, station_chunk->voxel_revision,
+				camera.x, camera.y, camera.z, &world);
+		const int32_t unprotect_error = world.set_chunk_protected(
+			fluid_chunk_x, fluid_chunk_z, false);
+		if (!protected_station_allowed || unprotect_error != FT_ERR_SUCCESS)
+			return (fail_validation("protected furnace station access",
+				unprotect_error == FT_ERR_SUCCESS
+					? FT_ERR_PERMISSION_DENIED : unprotect_error));
+		WorldChunk *mutable_station_chunk = world.find_chunk_mutable(
+			fluid_chunk_x, fluid_chunk_z);
+		if (mutable_station_chunk == nullptr)
+			return (fail_validation("mutable furnace station chunk",
+				FT_ERR_NOT_FOUND));
+		error_code = world.replace_block_state_at(world_x, world_y, world_z,
+			VOXEL_GENERATOR_FURNACE_BLOCK_ID, GAME_VOXEL_AIR_BLOCK,
+			mutable_station_chunk->voxel_revision);
+		if (error_code != FT_ERR_SUCCESS)
+			return (fail_validation("remove furnace authorization fixture",
+				error_code));
+		station_chunk = world.find_chunk(fluid_chunk_x, fluid_chunk_z);
+		if (station_chunk == nullptr
+			|| GameSession::authorize_local_processing_station(
+				static_cast<uint32_t>(MinecraftRecipeCatalog::FURNACE_STATION_ID),
+				world_x, world_y, world_z, station_chunk->voxel_revision,
+				camera.x, camera.y, camera.z, &world))
+			return (fail_validation("removed furnace station denial",
+				FT_ERR_PERMISSION_DENIED));
+		error_code = world.deserialize_fluid_state(fluid_state.data(),
+			fluid_state.size());
+		if (error_code != FT_ERR_SUCCESS
+			|| world.block_id_at(world_x, world_y, world_z, &block_id) == false
+			|| block_id != GAME_VOXEL_AIR_BLOCK)
+			return (fail_validation("generic block state rollback",
+				error_code == FT_ERR_SUCCESS ? FT_ERR_INVALID_STATE : error_code));
+	}
 	error_code = BlockInteractor::try_place_selected_block(&world, camera,
 		test_block_id);
 	if (error_code != FT_ERR_SUCCESS)

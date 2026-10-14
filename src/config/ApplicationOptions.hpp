@@ -26,6 +26,11 @@ class ApplicationOptions
 	bool validate_caves_mode;
 	bool validate_voxel_configuration_mode;
 	bool validate_world_revision_mode;
+	bool validate_item_catalog_mode;
+	bool validate_world_items_mode;
+	bool validate_wheat_crop_mode;
+	bool validate_transaction_journal_mode;
+	bool validate_regeneration_cards_mode;
 	bool validate_async_generation_mode;
 	bool validate_network_repair_mode;
 	bool validate_renderer_publication_mode;

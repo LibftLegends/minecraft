@@ -46,7 +46,9 @@ int32_t WorldGenerationRequestBuilder::build(std::unique_ptr<WorldGenerationPipe
 	int32_t chunk_z, const char *seed, const voxel_generation_config &config,
 	uint32_t stage_mask,
 	WorldGenerationPipeline::WorldGenerationOperation operation,
-	const WorldGenerationPipeline::WorldChunkSnapshot *source_snapshot) noexcept
+	const WorldGenerationPipeline::WorldChunkSnapshot *source_snapshot,
+	const std::vector<WorldGenerationPipeline::GenerationFeaturePlan>
+		*feature_plans) noexcept
 {
 	request.reset(new (std::nothrow) WorldGenerationPipeline::Request());
 	if (request == nullptr)
@@ -92,6 +94,30 @@ int32_t WorldGenerationRequestBuilder::build(std::unique_ptr<WorldGenerationPipe
 		request->snapshot.reset(new (std::nothrow) WorldGenerationPipeline::WorldChunkSnapshot(*source_snapshot));
 		if (request->snapshot == nullptr)
 			return (FT_ERR_NO_MEMORY);
+	}
+	if (feature_plans != nullptr)
+	{
+		if (feature_plans->size()
+			> WorldGenerationPipeline::GenerationFeaturePlan::
+				MAXIMUM_FEATURE_PLANS_PER_REQUEST)
+			return (FT_ERR_FULL);
+		for (const auto &plan : *feature_plans)
+			if (plan.spawner_definitions.size()
+				> WorldGenerationPipeline::GenerationFeaturePlan::
+					MAXIMUM_SPAWNER_DEFINITIONS
+				|| plan.loot_drops.size()
+				> WorldGenerationPipeline::GenerationFeaturePlan::
+					MAXIMUM_LOOT_DROPS)
+				return (FT_ERR_FULL);
+	}
+	try
+	{
+		if (feature_plans != nullptr)
+			request->feature_plans = *feature_plans;
+	}
+	catch (...)
+	{
+		return (FT_ERR_NO_MEMORY);
 	}
 	request->deferred_edits.reserve(256U);
 	return (FT_ERR_SUCCESS);

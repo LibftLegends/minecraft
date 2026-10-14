@@ -16,7 +16,9 @@ struct WorldRevisionCostQuote
 {
 	uint32_t revision_identifier;
 	uint64_t selection_revision;
+	uint64_t cost_policy_revision;
 	uint32_t selected_paid_chunks;
+	uint32_t selected_bonus_chunks;
 	uint32_t opening_card_count;
 	uint32_t currency_item_id;
 	uint64_t chunk_currency_cost;

@@ -106,7 +106,8 @@ int32_t WorldGenerationPipeline::initialize(std::size_t worker_count,
 	this->generation_worker_limit_ = worker_count > 2U
 		? worker_count - 2U : 1U;
 	if (maximum_queued == 0U)
-		maximum_queued = worker_count * 4U;
+		maximum_queued = std::max<std::size_t>(worker_count * 4U,
+			WorldGenerationPipeline::DEFAULT_MAXIMUM_QUEUED_REQUESTS);
 	this->maximum_queued_ = maximum_queued;
 	this->stopping_ = false;
 	this->pipeline_epoch_.fetch_add(1U);
@@ -223,6 +224,86 @@ int32_t WorldGenerationPipeline::submit_generation(uint64_t request_id,
 		this->requests_.push_back(std::move(request));
 	}
 	this->condition_.notify_one();
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t WorldGenerationPipeline::submit_generation_batch(
+	const std::vector<GenerationSubmission> &submissions) noexcept
+{
+	std::vector<std::unique_ptr<Request> > staged;
+	std::size_t index;
+	std::size_t published;
+	uint64_t cancellation_epoch;
+	int32_t error_code;
+
+	if (submissions.empty())
+		return (FT_ERR_SUCCESS);
+	cancellation_epoch = this->pipeline_epoch_.load();
+	try
+	{
+		staged.reserve(submissions.size());
+	}
+	catch (...)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	index = 0U;
+	while (index < submissions.size())
+	{
+		const GenerationSubmission &submission = submissions[index];
+		std::unique_ptr<Request> request;
+
+		if (submission.config == nullptr)
+			return (FT_ERR_INVALID_ARGUMENT);
+		error_code = WorldGenerationRequestBuilder::build(request,
+			submission.request_id, cancellation_epoch,
+			submission.world_epoch, submission.relevance_epoch,
+			submission.generation_revision, submission.chunk_x,
+			submission.chunk_z, submission.seed, *submission.config,
+			submission.stage_mask, submission.operation,
+			submission.source_snapshot, submission.feature_plans);
+		if (error_code != FT_ERR_SUCCESS)
+			return (error_code);
+		try
+		{
+			staged.push_back(std::move(request));
+		}
+		catch (...)
+		{
+			return (FT_ERR_NO_MEMORY);
+		}
+		++index;
+	}
+	{
+		std::lock_guard<std::mutex> lock(this->mutex_);
+
+		if (!this->initialized_ || this->stopping_
+			|| this->pipeline_epoch_.load() != cancellation_epoch)
+			return (FT_ERR_INVALID_STATE);
+		if (submissions.size() > this->maximum_queued_
+			|| this->requests_.size() > this->maximum_queued_
+				- submissions.size())
+			return (FT_ERR_FULL);
+		published = 0U;
+		try
+		{
+			while (published < staged.size())
+			{
+				this->requests_.push_back(std::move(staged[published]));
+				++published;
+			}
+		}
+		catch (...)
+		{
+			while (published > 0U)
+			{
+				this->requests_.pop_back();
+				--published;
+			}
+			return (FT_ERR_NO_MEMORY);
+		}
+	}
+	this->condition_.notify_all();
 	return (FT_ERR_SUCCESS);
 }
 

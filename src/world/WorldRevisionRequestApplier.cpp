@@ -36,8 +36,9 @@ int32_t WorldRevisionRequestApplier::validate_request_chunks(WorldRevisionManage
 			return (FT_ERR_INVALID_OPERATION);
 		for (const WorldRevisionManager::RevisionChunk &protected_entry : protected_chunks)
 		{
-			if (std::abs(selected.chunk_x - protected_entry.chunk_x) <= 1
-				&& std::abs(selected.chunk_z - protected_entry.chunk_z) <= 1)
+			if (WorldRevisionChunkSet::within_protection_ring(
+					selected.chunk_x, selected.chunk_z,
+					protected_entry.chunk_x, protected_entry.chunk_z))
 				return (FT_ERR_INVALID_OPERATION);
 		}
 	}

@@ -90,6 +90,14 @@ int32_t WorldReplicationServerRuntime::set_repair_request_callback(
 	return (this->server_.set_repair_request_callback(callback, user_data));
 }
 
+int32_t WorldReplicationServerRuntime::set_boat_move_callback(
+	world_replication_boat_move_callback callback, void *user_data)
+{
+	if (!this->initialized_)
+		return (FT_ERR_NOT_INITIALISED);
+	return (this->server_.set_boat_move_callback(callback, user_data));
+}
+
 int32_t WorldReplicationServerRuntime::create_chunk_hash_manifest(
 	int32_t chunk_x, int32_t chunk_z, uint64_t session_id,
 	ProtocolChunkHashManifestMessage &manifest) const
@@ -125,10 +133,18 @@ int32_t WorldReplicationServerRuntime::start_worker()
 int32_t WorldReplicationServerRuntime::pump(int32_t timeout_milliseconds,
 	uint32_t maximum_messages, uint32_t &processed_messages)
 {
+	uint32_t refreshed_item_snapshots;
+	int32_t error;
 	if (!this->initialized_)
 		return (FT_ERR_NOT_INITIALISED);
-	return (this->pump_.pump(timeout_milliseconds, maximum_messages,
-		processed_messages));
+	error = this->pump_.pump(timeout_milliseconds, maximum_messages,
+		processed_messages);
+	if (error != FT_ERR_SUCCESS)
+		return (error);
+	error = this->server_.refresh_world_item_snapshots(64U,
+		refreshed_item_snapshots);
+	(void)refreshed_item_snapshots;
+	return (error);
 }
 
 int32_t WorldReplicationServerRuntime::tick(int32_t timeout_milliseconds,

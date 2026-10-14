@@ -5,12 +5,15 @@ WorldReplicationServerSession::WorldReplicationServerSession()
 	session_id_(0U), next_message_sequence_(1U), subscribed_chunk_x_(),
 	subscribed_chunk_z_(), acknowledged_block_revision_(),
 	acknowledged_light_revision_(), acknowledged_generation_epoch_(),
-	snapshot_acknowledged_(), subscription_count_(0U),
+	snapshot_acknowledged_(), item_snapshot_revision_(), subscription_count_(0U),
+	next_item_snapshot_cursor_(0U),
 	recent_edit_requests_(), recent_edit_results_(),
 	recent_edit_result_used_(), recent_edit_result_cursor_(0U),
 	delta_broadcast_callback_(nullptr), delta_broadcast_user_data_(nullptr),
 	repair_request_callback_(nullptr), repair_request_user_data_(nullptr),
 	sync_request_callback_(nullptr), sync_request_user_data_(nullptr),
+	boat_move_callback_(nullptr), boat_move_user_data_(nullptr),
+	entity_broadcast_callback_(nullptr), entity_broadcast_user_data_(nullptr),
 	initialized_(false)
 {
 }
@@ -21,12 +24,15 @@ WorldReplicationServerSession::WorldReplicationServerSession(
 	session_id_(0U), next_message_sequence_(1U), subscribed_chunk_x_(),
 	subscribed_chunk_z_(), acknowledged_block_revision_(),
 	acknowledged_light_revision_(), acknowledged_generation_epoch_(),
-	snapshot_acknowledged_(), subscription_count_(0U),
+	snapshot_acknowledged_(), item_snapshot_revision_(), subscription_count_(0U),
+	next_item_snapshot_cursor_(0U),
 	recent_edit_requests_(), recent_edit_results_(),
 	recent_edit_result_used_(), recent_edit_result_cursor_(0U),
 	delta_broadcast_callback_(nullptr), delta_broadcast_user_data_(nullptr),
 	repair_request_callback_(nullptr), repair_request_user_data_(nullptr),
 	sync_request_callback_(nullptr), sync_request_user_data_(nullptr),
+	boat_move_callback_(nullptr), boat_move_user_data_(nullptr),
+	entity_broadcast_callback_(nullptr), entity_broadcast_user_data_(nullptr),
 	initialized_(false)
 {
 	(void)other;
@@ -60,6 +66,7 @@ int32_t WorldReplicationServerSession::initialize(
 	this->session_id_ = session_id;
 	this->next_message_sequence_ = 1U;
 	this->subscription_count_ = 0U;
+	this->next_item_snapshot_cursor_ = 0U;
 	this->recent_edit_result_cursor_ = 0U;
 	ft_memset(this->recent_edit_result_used_, 0,
 		sizeof(this->recent_edit_result_used_));
@@ -88,6 +95,7 @@ int32_t WorldReplicationServerSession::subscribe_chunk(int32_t chunk_x,
 	this->acknowledged_light_revision_[this->subscription_count_] = 0U;
 	this->acknowledged_generation_epoch_[this->subscription_count_] = 0U;
 	this->snapshot_acknowledged_[this->subscription_count_] = 0U;
+	this->item_snapshot_revision_[this->subscription_count_] = 0U;
 	this->subscription_count_ += 1U;
 	return (FT_ERR_SUCCESS);
 }
@@ -192,6 +200,58 @@ int32_t WorldReplicationServerSession::set_sync_request_callback(
 	return (FT_ERR_SUCCESS);
 }
 
+int32_t WorldReplicationServerSession::set_boat_move_callback(
+	world_replication_boat_move_callback callback, void *user_data)
+{
+	if (!this->initialized_)
+		return (FT_ERR_NOT_INITIALISED);
+	if (callback == nullptr)
+		return (FT_ERR_INVALID_POINTER);
+	this->boat_move_callback_ = callback;
+	this->boat_move_user_data_ = user_data;
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t WorldReplicationServerSession::set_entity_broadcast_callback(
+	world_replication_entity_broadcast_callback callback, void *user_data)
+{
+	if (!this->initialized_)
+		return (FT_ERR_NOT_INITIALISED);
+	if (callback == nullptr)
+		return (FT_ERR_INVALID_POINTER);
+	this->entity_broadcast_callback_ = callback;
+	this->entity_broadcast_user_data_ = user_data;
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t WorldReplicationServerSession::publish_entity_update(
+	const EntityState &entity)
+{
+	ProtocolEntityUpdateMessage message;
+	ft_byte_buffer payload;
+	networking_replication_sender sender;
+	uint64_t sequence;
+	int32_t error_code;
+	int32_t destroy_error;
+
+	if (!this->initialized_ || this->connection_ == nullptr)
+		return (FT_ERR_NOT_INITIALISED);
+	message.entity = entity;
+	error_code = payload.initialize();
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = message.serialize(payload);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = this->next_sequence(sequence);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = sender.send_reliable_control(*this->connection_,
+			static_cast<uint16_t>(ProtocolMessageHeader::Type::ENTITY_UPDATE),
+			payload, this->server_instance_id_, this->session_id_, sequence);
+	destroy_error = payload.destroy();
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = destroy_error;
+	return (error_code);
+}
+
 int32_t WorldReplicationServerSession::publish_block_delta(
 	const game_block_delta &delta)
 {
@@ -277,7 +337,84 @@ int32_t WorldReplicationServerSession::send_snapshot(int32_t chunk_x,
 	if (error_code == FT_ERR_SUCCESS)
 		error_code = this->service_->send_chunk_snapshot(*this->connection_,
 		snapshot, this->session_id_, sequence);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = this->send_item_snapshot(chunk_x, chunk_z);
 	return (error_code);
+}
+
+int32_t WorldReplicationServerSession::send_item_snapshot(
+	int32_t chunk_x, int32_t chunk_z)
+{
+	ProtocolWorldItemSnapshotMessage snapshot;
+	uint64_t sequence;
+	uint64_t revision;
+	uint32_t index;
+	int32_t error;
+	if (!this->initialized_ || this->service_ == nullptr
+		|| this->connection_ == nullptr)
+		return (FT_ERR_NOT_INITIALISED);
+	revision = this->service_->world_item_change_revision();
+	error = this->service_->create_world_item_snapshot(chunk_x, chunk_z,
+		this->session_id_, snapshot);
+	if (error == FT_ERR_SUCCESS)
+		error = this->next_sequence(sequence);
+	if (error == FT_ERR_SUCCESS)
+		error = this->service_->send_world_item_snapshot(*this->connection_,
+			snapshot, this->session_id_, sequence);
+	if (error != FT_ERR_SUCCESS)
+		return (error);
+	index = 0U;
+	while (index < this->subscription_count_)
+	{
+		if (this->subscribed_chunk_x_[index] == chunk_x
+			&& this->subscribed_chunk_z_[index] == chunk_z)
+		{
+			this->item_snapshot_revision_[index] = revision;
+			break ;
+		}
+		index += 1U;
+	}
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t WorldReplicationServerSession::refresh_item_snapshots(
+	uint32_t maximum_snapshots, uint32_t &processed_snapshots)
+{
+	uint64_t revision;
+	uint32_t index;
+	uint32_t scanned;
+	uint32_t start_index;
+	int32_t error;
+	processed_snapshots = 0U;
+	if (!this->initialized_ || maximum_snapshots == 0U)
+		return (!this->initialized_ ? FT_ERR_NOT_INITIALISED
+			: FT_ERR_INVALID_ARGUMENT);
+	revision = this->service_->world_item_change_revision();
+	if (revision == 0U)
+		return (FT_ERR_SUCCESS);
+	if (this->subscription_count_ == 0U)
+		return (FT_ERR_SUCCESS);
+	this->next_item_snapshot_cursor_ %= this->subscription_count_;
+	start_index = this->next_item_snapshot_cursor_;
+	scanned = 0U;
+	while (scanned < this->subscription_count_
+		&& processed_snapshots < maximum_snapshots)
+	{
+		index = (start_index + scanned)
+			% this->subscription_count_;
+		if (this->item_snapshot_revision_[index] != revision)
+		{
+			error = this->send_item_snapshot(this->subscribed_chunk_x_[index],
+				this->subscribed_chunk_z_[index]);
+			if (error != FT_ERR_SUCCESS)
+				return (error);
+			processed_snapshots += 1U;
+			this->next_item_snapshot_cursor_ = (index + 1U)
+				% this->subscription_count_;
+		}
+		scanned += 1U;
+	}
+	return (FT_ERR_SUCCESS);
 }
 
 int32_t WorldReplicationServerSession::unsubscribe_chunk(int32_t chunk_x,
@@ -303,6 +440,8 @@ int32_t WorldReplicationServerSession::unsubscribe_chunk(int32_t chunk_x,
 					= this->acknowledged_light_revision_[index + 1U];
 				this->acknowledged_generation_epoch_[index]
 					= this->acknowledged_generation_epoch_[index + 1U];
+				this->item_snapshot_revision_[index]
+					= this->item_snapshot_revision_[index + 1U];
 				this->snapshot_acknowledged_[index]
 					= this->snapshot_acknowledged_[index + 1U];
 				index += 1U;
@@ -452,6 +591,66 @@ int32_t WorldReplicationServerSession::process_edit_intent(
 	return (error_code);
 }
 
+int32_t WorldReplicationServerSession::process_boat_move_intent(
+	ft_byte_buffer &payload)
+{
+	ProtocolBoatMoveIntentMessage intent;
+	ProtocolBoatMoveResultMessage result;
+	networking_message_peer_identity identity;
+	ft_byte_buffer response_payload;
+	networking_replication_sender sender;
+	uint64_t response_sequence = 0U;
+	int32_t error_code;
+	int32_t broadcast_error;
+	int32_t destroy_error;
+
+	if (this->boat_move_callback_ == nullptr)
+		return (FT_ERR_PERMISSION_DENIED);
+	error_code = intent.deserialize(payload);
+	if (error_code != FT_ERR_SUCCESS)
+		return (error_code);
+	if (intent.session_id != this->session_id_)
+		return (FT_ERR_PERMISSION_DENIED);
+	error_code = this->connection_->get_remote_identity(identity);
+	if (error_code != FT_ERR_SUCCESS || identity.authenticated == FT_FALSE)
+		return (error_code == FT_ERR_SUCCESS
+			? FT_ERR_PERMISSION_DENIED : error_code);
+	result.session_id = intent.session_id;
+	result.request_id = intent.request_id;
+	result.entity_id = intent.entity_id;
+	result.result_code = FT_ERR_INVALID_STATE;
+	result.entity_revision = 0U;
+	error_code = this->boat_move_callback_(identity.public_key, intent, result,
+		this->boat_move_user_data_);
+	if (error_code != FT_ERR_SUCCESS)
+		return (error_code);
+	if (result.session_id != intent.session_id
+		|| result.request_id != intent.request_id
+		|| result.entity_id != intent.entity_id)
+		return (FT_ERR_INVALID_STATE);
+	broadcast_error = FT_ERR_SUCCESS;
+	if (result.result_code == FT_ERR_SUCCESS
+		&& this->entity_broadcast_callback_ != nullptr)
+		broadcast_error = this->entity_broadcast_callback_(result.entity_state,
+			this->connection_->get_id(), this->entity_broadcast_user_data_);
+	error_code = response_payload.initialize();
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = result.serialize(response_payload);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = this->next_sequence(response_sequence);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = sender.send_reliable_control(*this->connection_,
+			static_cast<uint16_t>(ProtocolMessageHeader::Type::BOAT_MOVE_RESULT),
+			response_payload, this->server_instance_id_, this->session_id_,
+			response_sequence);
+	destroy_error = response_payload.destroy();
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = destroy_error;
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = broadcast_error;
+	return (error_code);
+}
+
 int32_t WorldReplicationServerSession::process_chunk_request(
 	ft_byte_buffer &payload)
 {
@@ -496,7 +695,12 @@ int32_t WorldReplicationServerSession::process_chunk_interest(
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
 	if (interest.subscribed != 0U)
-		return (this->subscribe_chunk(interest.chunk_x, interest.chunk_z));
+	{
+		error_code = this->subscribe_chunk(interest.chunk_x, interest.chunk_z);
+		if (error_code == FT_ERR_SUCCESS)
+			error_code = this->send_snapshot(interest.chunk_x, interest.chunk_z);
+		return (error_code);
+	}
 	error_code = this->unsubscribe_chunk(interest.chunk_x, interest.chunk_z);
 	if (error_code == FT_ERR_NOT_FOUND)
 		return (FT_ERR_SUCCESS);
@@ -647,6 +851,10 @@ int32_t WorldReplicationServerSession::process_message(
 		&& envelope.message_type == static_cast<uint16_t>(
 			ProtocolMessageHeader::Type::CHUNK_REPAIR_REQUEST))
 		error_code = this->process_repair_request(payload);
+	else if (error_code == FT_ERR_SUCCESS
+		&& envelope.message_type == static_cast<uint16_t>(
+			ProtocolMessageHeader::Type::BOAT_MOVE_INTENT))
+		error_code = this->process_boat_move_intent(payload);
 	else if (error_code == FT_ERR_SUCCESS)
 		error_code = FT_ERR_UNSUPPORTED_TYPE;
 	destroy_error = payload.destroy();
@@ -669,6 +877,10 @@ int32_t WorldReplicationServerSession::destroy()
 	this->repair_request_user_data_ = nullptr;
 	this->sync_request_callback_ = nullptr;
 	this->sync_request_user_data_ = nullptr;
+	this->boat_move_callback_ = nullptr;
+	this->boat_move_user_data_ = nullptr;
+	this->entity_broadcast_callback_ = nullptr;
+	this->entity_broadcast_user_data_ = nullptr;
 	this->initialized_ = false;
 	return (FT_ERR_SUCCESS);
 }
