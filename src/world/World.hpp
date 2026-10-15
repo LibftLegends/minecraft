@@ -278,6 +278,9 @@ class World
 	int32_t update_revision_chunk_selection(uint64_t expected_selection_revision,
 		uint32_t maximum_selected_chunks, int32_t chunk_x, int32_t chunk_z,
 		bool selected, uint64_t *current_selection_revision);
+	int32_t update_revision_chunk_selection(
+		uint64_t expected_selection_revision, int32_t chunk_x, int32_t chunk_z,
+		bool selected, uint64_t *current_selection_revision);
 	/* Trusted host effect path; client selection messages cannot mark bonuses. */
 	int32_t select_revision_bonus_chunk(uint64_t expected_selection_revision,
 		uint32_t maximum_selected_chunks, int32_t chunk_x, int32_t chunk_z,
@@ -292,6 +295,12 @@ class World
 		uint64_t *current_policy_revision);
 	int32_t query_revision_start_cost(uint64_t expected_selection_revision,
 		uint64_t expected_policy_revision, uint32_t opening_card_count,
+		WorldRevisionCostQuote *quote) const;
+	int32_t query_revision_start_cost(uint32_t opening_card_count,
+		const WorldRevisionCostPolicy &policy,
+		WorldRevisionCostQuote *quote) const;
+	int32_t query_revision_start_cost(uint64_t expected_selection_revision,
+		uint32_t opening_card_count, const WorldRevisionCostPolicy &policy,
 		WorldRevisionCostQuote *quote) const;
 	int32_t update_revision_chunk_protection(
 		uint64_t expected_selection_revision, int32_t chunk_x, int32_t chunk_z,

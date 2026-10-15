@@ -77,6 +77,14 @@ int32_t World::update_revision_chunk_selection(
 			current_selection_revision));
 }
 
+int32_t World::update_revision_chunk_selection(
+	uint64_t expected_selection_revision, int32_t chunk_x, int32_t chunk_z,
+	bool selected, uint64_t *current_selection_revision)
+{
+	return (this->revision_manager.select_chunk(expected_selection_revision,
+			chunk_x, chunk_z, selected, current_selection_revision));
+}
+
 int32_t World::select_revision_bonus_chunk(
 	uint64_t expected_selection_revision, uint32_t maximum_selected_chunks,
 	int32_t chunk_x, int32_t chunk_z,
@@ -114,6 +122,21 @@ int32_t World::query_revision_start_cost(uint64_t expected_selection_revision,
 {
 	return (this->revision_manager.query_start_cost(expected_selection_revision,
 			expected_policy_revision, opening_card_count, quote));
+}
+
+int32_t World::query_revision_start_cost(uint32_t opening_card_count,
+	const WorldRevisionCostPolicy &policy, WorldRevisionCostQuote *quote) const
+{
+	return (this->revision_manager.query_start_cost(opening_card_count, policy,
+			quote));
+}
+
+int32_t World::query_revision_start_cost(uint64_t expected_selection_revision,
+	uint32_t opening_card_count, const WorldRevisionCostPolicy &policy,
+	WorldRevisionCostQuote *quote) const
+{
+	return (this->revision_manager.query_start_cost(expected_selection_revision,
+			opening_card_count, policy, quote));
 }
 
 int32_t World::update_revision_chunk_protection(

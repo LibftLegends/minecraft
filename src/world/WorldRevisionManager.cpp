@@ -867,6 +867,15 @@ int32_t WorldRevisionManager::select_chunk(
 	return (FT_ERR_SUCCESS);
 }
 
+int32_t WorldRevisionManager::select_chunk(
+	uint64_t expected_selection_revision, int32_t chunk_x, int32_t chunk_z,
+	bool selected, uint64_t *current_selection_revision) noexcept
+{
+	return (this->select_chunk(expected_selection_revision,
+		WorldRevisionManager::HARD_MAX_SELECTED_CHUNKS, chunk_x, chunk_z,
+		selected, current_selection_revision));
+}
+
 int32_t WorldRevisionManager::select_bonus_chunk(
 	uint64_t expected_selection_revision, uint32_t maximum_selected_chunks,
 	int32_t chunk_x, int32_t chunk_z,
@@ -1047,6 +1056,82 @@ int32_t WorldRevisionManager::query_start_cost(
 	result.opening_card_currency_cost = opening_card_cost;
 	*quote = result;
 	return (FT_ERR_SUCCESS);
+}
+
+int32_t WorldRevisionManager::query_start_cost(uint32_t opening_card_count,
+	const WorldRevisionCostPolicy &policy,
+	WorldRevisionCostQuote *quote) const noexcept
+{
+	WorldRevisionCostQuote result = {};
+	uint64_t paid_count = 0U;
+	uint64_t bonus_count = 0U;
+	uint64_t opening_card_cost;
+	uint32_t card_index;
+
+	if (quote == nullptr || policy.maximum_selected_chunks == 0U
+		|| policy.currency_item_id == 0U || opening_card_count < 4U
+		|| opening_card_count > 7U)
+		return (FT_ERR_INVALID_ARGUMENT);
+	if (!this->pending_ || this->progress_.active())
+		return (FT_ERR_INVALID_OPERATION);
+	if (this->selected_.empty())
+		return (FT_ERR_INVALID_OPERATION);
+	if (this->selected_.size() > policy.maximum_selected_chunks
+		|| this->selected_.size() > WorldRevisionManager::HARD_MAX_SELECTED_CHUNKS)
+		return (FT_ERR_OUT_OF_RANGE);
+	for (const RevisionChunk &entry : this->selected_)
+	{
+		const WorldChunk *chunk = this->world_.find_chunk(entry.chunk_x,
+			entry.chunk_z);
+
+		if (chunk == nullptr || !chunk->initialized
+			|| this->is_chunk_protected(entry.chunk_x, entry.chunk_z))
+			return (FT_ERR_INVALID_STATE);
+		if (entry.bonus)
+			++bonus_count;
+		else
+			++paid_count;
+	}
+	if (policy.currency_units_per_chunk != 0U
+		&& paid_count > std::numeric_limits<uint64_t>::max()
+			/ policy.currency_units_per_chunk)
+		return (FT_ERR_OUT_OF_RANGE);
+	result.chunk_currency_cost = paid_count * policy.currency_units_per_chunk;
+	opening_card_cost = policy.four_card_opening_cost;
+	card_index = 4U;
+	while (card_index < opening_card_count)
+	{
+		if (opening_card_cost > std::numeric_limits<uint64_t>::max() / 2U)
+			return (FT_ERR_OUT_OF_RANGE);
+		opening_card_cost *= 2U;
+		++card_index;
+	}
+	if (result.chunk_currency_cost > std::numeric_limits<uint64_t>::max()
+		- opening_card_cost)
+		return (FT_ERR_OUT_OF_RANGE);
+	result.total_currency_cost = result.chunk_currency_cost + opening_card_cost;
+	if (result.total_currency_cost > policy.maximum_total_currency_cost)
+		return (FT_ERR_OUT_OF_RANGE);
+	result.revision_identifier = this->revision_id_;
+	result.selection_revision = this->selection_revision_;
+	result.cost_policy_revision = this->cost_policy_revision_;
+	result.selected_paid_chunks = static_cast<uint32_t>(paid_count);
+	result.selected_bonus_chunks = static_cast<uint32_t>(bonus_count);
+	result.opening_card_count = opening_card_count;
+	result.currency_item_id = policy.currency_item_id;
+	result.opening_card_currency_cost = opening_card_cost;
+	*quote = result;
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t WorldRevisionManager::query_start_cost(
+	uint64_t expected_selection_revision, uint32_t opening_card_count,
+	const WorldRevisionCostPolicy &policy,
+	WorldRevisionCostQuote *quote) const noexcept
+{
+	if (expected_selection_revision != this->selection_revision_)
+		return (FT_ERR_INVALID_STATE);
+	return (this->query_start_cost(opening_card_count, policy, quote));
 }
 
 int32_t WorldRevisionManager::set_chunk_protected(int32_t chunk_x,

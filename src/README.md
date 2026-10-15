@@ -91,6 +91,25 @@ the legacy seed-specific `.wrv` sidecar. New saves no longer update that
 sidecar. This preserves metadata across ordinary session saves; it does not
 persist an active selection draft or make chunk publication crash-recoverable.
 
+`unselect_revision_chunk` explicitly removes one selected coordinate, and
+`update_revision_chunk_selection` is the compare-and-set API: it requires the
+64-bit expected selection revision and returns the current revision, rejecting
+stale selection updates without applying them. The revision is visible through
+`World::world_revision()`.
+`query_revision_start_cost` returns a read-only quote from the authoritative
+selected set and a caller-supplied `WorldRevisionCostPolicy`. The quote keeps
+paid chunk count, currency item ID, chunk cost, opening-card count/cost, total
+currency cost, regeneration ID and selection revision in separate fields. The
+policy supplies a nonzero currency item ID, per-chunk units, opening-deal base
+price and total cap. Any actual selection
+change advances the selection revision; callers can pass that revision to the
+query overload to reject a stale quote request. Opening deals accept 4â€“7 cards;
+if `B4` is the
+configured four-card price, their total prices are `B4`, `2*B4`, `4*B4`, and
+`8*B4`. Arithmetic and total-cost caps are checked. These APIs do not debit a
+player balance, start a CardGame session, reserve chunks, or specify a client
+UI; those belong to the future authoritative regeneration-session adapter.
+
 Network or multiplayer adapters should submit a `World::RevisionRequest` to
 `World::apply_revision_request`; it performs the server-side validation and
 returns a `RevisionRequestResult` rather than requiring clients to mutate the
@@ -418,7 +437,7 @@ Validator sweep and stale expectations (2026-10-13): A direct MinGW link assembl
 
 RegenerationCard validator stack and snapshot verification (2026-10-13): `RegenerationCardSession` is 502,176 bytes on this build; the physical-import validator held five sessions locally, exceeding the Windows default thread stack. It now allocates those fixtures on the heap with explicit allocation-failure handling. Strict MinGW warning-as-error syntax compilation passes. A focused executable built from current session, CardGame, inventory and validator sources ran the exact physical-import validator successfully, including three physical-card imports, script context, restored mapping, exact retry, and byte-identical RCS snapshot replay. This resolves the reported RCS byte mismatch for that path. The full Libft suite, other application validators and `--validate-all` remain unverified.
 
-Regeneration Card validator recovery and Volcano Mark preflight (2026-10-13): The physical-import validator now heap-allocates its five 502 KB session fixtures, preventing Windows stack overflow; its RCS serialize/restore/retry byte comparison passes. The World Rules validator’s second Surveyor’s Reach fixture now uses a distinct chunk coordinate so it exercises the configured cap, and `RegenerationWorldRules::preflight_card_effect` admits the special Volcano Mark definition (15) through its ID guard. The current RegenerationCardValidator executable passes end to end (`regeneration-cards: ok`, result 0); both changed sources pass strict MinGW warning-as-error compilation. Full Libft tests and application-wide validators remain unverified.
+Regeneration Card validator recovery and Volcano Mark preflight (2026-10-13): The physical-import validator now heap-allocates its five 502 KB session fixtures, preventing Windows stack overflow; its RCS serialize/restore/retry byte comparison passes. The World Rules validator?s second Surveyor?s Reach fixture now uses a distinct chunk coordinate so it exercises the configured cap, and `RegenerationWorldRules::preflight_card_effect` admits the special Volcano Mark definition (15) through its ID guard. The current RegenerationCardValidator executable passes end to end (`regeneration-cards: ok`, result 0); both changed sources pass strict MinGW warning-as-error compilation. Full Libft tests and application-wide validators remain unverified.
 
 CardGame host-intent snapshot and replay coverage (2026-10-13): The byte snapshot test now restores into an engine with the same registered callback/rules manifest as the source; the previous fixture omitted a callback whose presence is intentionally included in the rules hash. Its direct MinGW runtime harness passes checksum rejection, snapshot restore, pending records, hash equality and no-mutation-on-invalid-snapshot checks. The multi-draw serialized replay test now compares each pending host-intent sequence, schema ID/version, field type and field value after replay deserialization; its direct MinGW runtime harness passes. Both test files pass strict warning-as-error syntax compilation. The full Libft suite remains unverified; direct linking its existing response file fails because its object/archive set has mismatched sections and missing renderer symbols.
 
@@ -473,7 +492,8 @@ this API does not itself provide atomic durable storage.
 
 Minecraft item identity policy (2026-10-14): the catalog now requires a physical ID and unit stack for boats, tools/armor, physical CardGame items and filled water/lava buckets. Session integrity checks apply the rule to player inventory and dropped-item entities. ItemCatalogValidator source covers example identities and rejects missing IDs or stacked unique items. Builds and validator runs are intentionally deferred until implementation gaps are closed. Other/future item stores and multiplayer-wide uniqueness still need a common owner registry.
 
-World Loom combined host checkpoint (2026-10-14): WorldRevisionServer::serialize_checkpoint and estore_checkpoint wrap WRS1 draft ownership and WRC1 replay caches in WRP1, validating the complete bundle before restoring any of it. The matching World state must already be restored, and host initialization must follow checkpoint restore. The host still owns durable storage and cross-file/cross-system atomicity. Validator source checks combined restore and corruption rollback; no build/run has been performed in this implementation pass.
+World Loom combined host checkpoint (2026-10-14): WorldRevisionServer::serialize_checkpoint and
+estore_checkpoint wrap WRS1 draft ownership and WRC1 replay caches in WRP1, validating the complete bundle before restoring any of it. The matching World state must already be restored, and host initialization must follow checkpoint restore. The host still owns durable storage and cross-file/cross-system atomicity. Validator source checks combined restore and corruption rollback; no build/run has been performed in this implementation pass.
 
 World Loom checkpoint files (2026-10-14): save_checkpoint_file uses Libft atomic replacement and load_checkpoint_file bounds input before transactional restore. This helps host persistence but does not provide crash durability or atomic coordination with the world/session save. The validator source now covers file roundtrip; implementation builds and runtime verification remain deferred.
 

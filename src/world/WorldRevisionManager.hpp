@@ -104,6 +104,9 @@ class WorldRevisionManager
 	int32_t select_chunk(int32_t chunk_x, int32_t chunk_z,
 		bool selected) noexcept;
 	int32_t select_chunk(uint64_t expected_selection_revision,
+		int32_t chunk_x, int32_t chunk_z, bool selected,
+		uint64_t *current_selection_revision) noexcept;
+	int32_t select_chunk(uint64_t expected_selection_revision,
 		uint32_t maximum_selected_chunks, int32_t chunk_x, int32_t chunk_z,
 		bool selected, uint64_t *current_selection_revision) noexcept;
 	int32_t select_bonus_chunk(uint64_t expected_selection_revision,
@@ -116,6 +119,12 @@ class WorldRevisionManager
 	int32_t configure_cost_policy(uint64_t expected_policy_revision,
 		const WorldRevisionCostPolicy &policy,
 		uint64_t *current_policy_revision) noexcept;
+	int32_t query_start_cost(uint32_t opening_card_count,
+		const WorldRevisionCostPolicy &policy,
+		WorldRevisionCostQuote *quote) const noexcept;
+	int32_t query_start_cost(uint64_t expected_selection_revision,
+		uint32_t opening_card_count, const WorldRevisionCostPolicy &policy,
+		WorldRevisionCostQuote *quote) const noexcept;
 	int32_t query_start_cost(uint64_t expected_selection_revision,
 		uint64_t expected_policy_revision, uint32_t opening_card_count,
 		WorldRevisionCostQuote *quote) const noexcept;

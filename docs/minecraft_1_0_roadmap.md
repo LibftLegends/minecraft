@@ -9,6 +9,15 @@ defines the engine, inventory, crafting, and World Loom adapter boundaries.
 Update its implementation ledger alongside this roadmap as integration work
 lands; a design or API foundation does not complete the gameplay loop.
 
+**Libft implementation contract (2026-10-02):**
+[CardGame, Scripting, Inventory and Recipe-Book Integration](../Libft/Docs/card_game_scripting_inventory_crafting_integration_design.md)
+specifies existing versus proposed APIs, player actions and mandatory decisions,
+all current card effects, scripting bindings, transactional inventory/crafting,
+placeholder recipes, ownership boundaries, and repository-specific tests.
+As those tasks are delivered, update this roadmap and that document together,
+recording implementation, integration, and validation separately. The design
+document itself does not complete any roadmap feature.
+
 ## 1. Goal
 
 Turn world regeneration into an intentional, understandable game system rather
@@ -16,10 +25,15 @@ than an administrative revision tool. A player should be able to use a
 dedicated in-world block to inspect a map, choose chunks, pay a configurable
 world resource such as magical dust, draw and play cards from a regeneration-
 only deck, preview the result, and ask the authoritative world service to
-regenerate those chunks safely. Keep the broader survival foundationsâ€“world
-items, inventory, crafting, smelting, gear, food, health, hunger, and faunaâ€“in
+regenerate those chunks safely. Keep the broader survival foundations–world
+items, inventory, crafting, smelting, gear, food, health, hunger, and fauna–in
 the same roadmap, but give them a separate release gate so they do not delay
 validation or delivery of the central regeneration loop.
+
+Game 1.0 must also make worlds durable, portable, and configurable. Players
+must be able to save and resume multiple worlds, choose whether a character is
+owned by one world or can travel between worlds, and configure exactly which
+character ownership modes a world accepts.
 
 This roadmap distinguishes two milestones. **Regeneration 1.0** is the first
 complete, playable World Loom/card-driven regeneration release. **Game 1.0**
@@ -31,8 +45,8 @@ volcano/boss feature. Before either release, build a deliberately tiny
 end-to-end playable vertical slice to validate the core interaction and atomic
 world update.
 
-The same design must leave room for basic non-hostile animalsâ€“sheep, cows,
-pigs, and chickensâ€“without allowing regeneration to duplicate, erase, or
+The same design must leave room for basic non-hostile animals–sheep, cows,
+pigs, and chickens–without allowing regeneration to duplicate, erase, or
 teleport existing creatures unexpectedly.
 
 This proposal builds on the existing Minecraft world-revision pipeline and the
@@ -89,6 +103,22 @@ legality and exceptions, deck codes/hashes, snapshots/deltas, state/rules
 hashes, command records, replay/result storage, and player-view replay
 redaction. Minecraft should integrate this engine through a small adapter;
 do not build a second card-game runtime in Minecraft.
+
+The current Libft worktree also adds sequenced/replayable
+`CARD_GAME_INTENT_DRAW_CARD` commands (command-log format v5, with v1–v4 read
+compatibility and bounded multi-draw count), plus a first `submit_action`
+request-ID idempotency layer. It supports a configured discard/burn policy
+with deterministic discard reshuffle and typed empty/overflow host intents.
+Libft Scripting and its CardGame bridge now expose deterministic FNV-1a
+fingerprints for the ordered native binding ABI and registered serialized
+script-effect content. Equivalent content fingerprints match and content
+changes alter the result; session import enforcement and Minecraft host-schema
+and policy inclusion remain open. Minecraft-owned revisioned chunk
+selection, start-cost quoting, and 4–7-card opening-deal pricing are specified
+in the linked Libft integration design; none of those World Loom APIs or UI are
+implemented by this Libft work. Minecraft instability amounts,
+mandatory-discard obligations, the 20-card deck/content adapter, and the World
+Loom multiplayer card session remain unimplemented.
 
 Respect these current API boundaries when planning integration:
 
@@ -156,20 +186,33 @@ asset can change; its stable gameplay role is a regeneration station.
 3. The player selects chunks. The UI immediately shows the number of paid
    chunks, any extra capacity supplied by cards, total dust cost, and why any
    chunk is protected or unavailable.
-4. The player spends magical dust (or the configured resource) to draw a
+4. The server exposes revisioned select/unselect operations and a read-only,
+   authoritative start-cost query for the selected set. The player chooses an
+   opening deal of four cards by default, with a supported range of four to
+   seven; see Section 7.1 for its separate price formula.
+5. The player spends magical dust (or the configured resource) to draw a
    chosen number of cards from the regeneration deck. The next draw costs more
    than the previous draw in the same draw action.
-5. The player plays cards onto the selected chunk set, chooses valid targets,
+6. The player plays cards onto the selected chunk set, chooses valid targets,
    and may use configured draw/discard or scope-modifying effects.
-6. The client requests a server preview. The preview includes the resulting
+7. The client requests a server preview. The preview includes the resulting
    biome/feature policy and a warning for any terrain, fluid, structure, or
    mob-state consequence the server can determine.
-7. On confirmation, the server revalidates the request, reserves its resources,
+8. On confirmation, the server revalidates the request, reserves its resources,
    prepares per-chunk jobs, and returns a session ID. The UI shows accepted,
    queued, generating, ready-to-commit, committed, skipped, or failed status.
-8. Each successful chunk is published atomically. The map and all clients
+9. Each successful chunk is published atomically. The map and all clients
    receive its new revision. Failed or cancelled chunks keep their prior world
    state and follow the refund rules below.
+
+Player cancellation is allowed only before a regeneration session is accepted
+and its generation has started. Once the first generation job begins, the
+session is non-cancellable by default and continues through its committed
+per-chunk results. A server may still stop work for safety, shutdown,
+authorization loss, stale revisions, or an unrecoverable failure; that is a
+server failure path, not a player-selected cancellation, and follows the
+transaction/refund rules. Cards that explicitly lock cancellation, such as
+`Volatile Stabilizer`, lock it as soon as they are played.
 
 The supporting progression loop is: gather or receive world item stacks, put
 them in a deliberately sized inventory, use a recipe book at the required
@@ -191,7 +234,7 @@ protection changes invalidate stale selection revisions and remove newly
 protected chunks from the selection.
 `query_revision_start_cost` is read-only and checks the expected selection
 revision and versioned world-owned pricing-policy revision, the selected
-chunks, the 4â€“7 card opening range, checked cost arithmetic, and a configured
+chunks, the 4–7 card opening range, checked cost arithmetic, and a configured
 total-cost cap. Pricing policy updates use compare-and-set; quotes return both
 revisions. Opening prices follow `B4, 2*B4, 4*B4, 8*B4`. The current runtime
 validator verifies stale policy rejection and a configured six-card quote.
@@ -272,6 +315,69 @@ source checks the repeated begin response and cancellation replay.
 
 The Libft inventory now keeps its mutable item map private in production builds. Persistence and reset paths use revisioned `clear_items()`, and the inventory regression suite passes 13/13 when isolated. The full Libft test link still has unrelated GPU/render platform symbol failures; production and analytics dependency builds should be rerun with the complete platform linker configuration.
 
+### 4.2 Multiplayer regeneration reservation and card window
+
+Starting a regeneration is a world session with an explicit reservation
+boundary. After the initiating player selects the chunks, the server performs
+an occupancy and safety check before drawing cards or spending regeneration
+resources.
+
+The initiating player may not select a chunk that currently contains another
+player, nor any of the eight horizontally neighboring chunks around that
+occupied chunk. This one-chunk exclusion ring prevents a player from being
+trapped by a regenerated border or used to troll a neighboring player. The
+rule applies to every player present in the world, including the initiator. A
+selection request that intersects an occupied chunk or exclusion ring is
+rejected with a clear reason and can be retried after the area is vacated. The
+server rechecks occupancy immediately before reservation; client maps and
+stale previews cannot bypass it.
+
+Once a valid selection is accepted and cards are drawn, the session enters its
+card-decision window. The server places visible, glowing temporary barrier
+walls around the affected chunk footprint before generation work begins. These
+walls are deliberately visible rather than invisible collision, render as a
+clear warning boundary, block movement and ordinary teleport/portal entry, and
+cannot be mined, opened, climbed, or bypassed by clients. They are temporary
+session state, not saved terrain or player-owned blocks. Players already inside
+the proposed footprint must leave before the reservation can be accepted; the
+server never strands a player inside a regenerating chunk.
+
+The default card-decision window is **five real-time minutes**, measured by
+server time rather than render frames or client timers. During the window, the
+initiating player and explicitly authorized session participants may play cards
+and modify the current immutable regeneration snapshot. Other players may see
+the boundary and session status but cannot alter the card sequence. The UI
+shows the remaining time, current locked-in cards, resolved effects,
+instability changes, resource costs, and any `NO_EFFECT`, `PARTIAL`, or
+conflict results.
+
+When the five-minute window expires, the server locks the current card choices,
+snapshot, instability deltas, and resource ledger. Any resources already spent
+are not refunded because the player failed to make a decision in time. The
+server then begins chunk regeneration under exactly that locked ruleset; late
+card commands, deck changes, or client retries are rejected as stale. There is
+no ordinary player cancellation after the session is locked. Cards that
+explicitly lock cancellation earlier, such as `Volatile Stabilizer`, follow
+the same rule immediately when played.
+
+Generation, lighting, mesh preparation, persistence, and publication continue
+under the existing asynchronous per-chunk transaction rules. The glowing
+barriers remain until all affected chunks have either published their complete
+new block/light/mesh state or reached an explicit safe failure state. On
+success, barrier removal and player access are one authoritative publication
+event; on failure, the old chunk remains protected and drawable until the
+server has resolved the failure and the session's refund/retention policy.
+Barrier state, session owner, participant permissions, timer deadline, locked
+card sequence, occupancy reservation, and resource charges are persisted so a
+disconnect or server restart cannot open a regeneration area accidentally.
+
+Required multiplayer tests cover occupied target chunks, occupied neighboring
+chunks, players entering during the card window, barrier collision and render
+visibility, portal/teleport attempts, timer expiry, late card commands,
+resource non-refunds after timeout, disconnect/reconnect, server restart,
+partial chunk failure, and atomic barrier removal only after complete chunk
+publication.
+
 ## 5. Station and protected area
 
 ### 5.1 Default safe zone
@@ -320,7 +426,109 @@ or orphan the job: either deny removal until it finishes/cancels, or let the
 server retain the session and its original policy. The first implementation
 should deny removal while a session is active.
 
-## 6. Map, selection, and preview
+## 6. World saves, character scope, and admission rules
+
+World persistence and character admission are foundational Game 1.0 systems,
+not optional convenience settings. A world save must be sufficient to resume a
+world without regenerating or guessing authoritative state, while a character
+profile must clearly declare which world-owned state it is allowed to carry.
+
+### 6.1 World save lifecycle
+
+The world manager must support:
+
+- creating worlds with stable IDs, names, seeds, generator/ruleset versions,
+  difficulty, ownership, access policy, and spawn policy;
+- listing, renaming, backing up, restoring, exporting, importing, and deleting
+  worlds with explicit confirmation for destructive operations;
+- autosave, manual save, orderly-shutdown save, and crash recovery without
+  blocking the render thread or holding world/chunk locks during slow I/O;
+- saving terrain revisions, player edits, entities, inventories, progression,
+  stations, claims, regeneration sessions, world settings, admission policy,
+  and migration version; and
+- atomic snapshot publication with a journal or temporary-file recovery path.
+
+A failed save must leave the last known-good save intact and must not silently
+report success. World files are authoritative persistence, not render caches:
+meshes, GPU buffers, transient light queues, worker requests, and analytics
+records may be discarded and rebuilt. Imported saves must be validated for
+size, IDs, revisions, checksums, supported migrations, and content versions
+before they become selectable.
+
+### 6.2 Character ownership modes
+
+Every character has a stable character ID and an explicit ownership mode:
+
+| Mode | Meaning | Cross-world use |
+| --- | --- | --- |
+| `WORLD_BOUND` | Progression and inventory belong to one world ID. | Rejected by other worlds unless explicitly migrated by the owner. |
+| `PORTABLE` | Character is owned by the player/account and may join compatible worlds. | Allowed only when the destination policy accepts portable characters. |
+
+The mode is selected at character creation and is not silently changed by
+joining a world. Changing `WORLD_BOUND` to `PORTABLE` requires an explicit,
+validated transaction and a backup/audit record; the first implementation may
+make the mode immutable until migration safety exists.
+
+Portable characters must not smuggle world-owned state between worlds. Store
+character-owned state separately from world-owned state. The portable subset
+may include appearance, cosmetics, and explicitly marked recipes or abilities;
+claims, stations, containers, local discoveries, world currency, pets, and
+world-bound items remain with their source world unless a versioned transfer
+rule explicitly says otherwise.
+
+### 6.3 World admission policy
+
+Each world stores a versioned admission policy with at least these modes:
+
+1. `WORLD_BOUND_ONLY`: only characters already bound to this world may join.
+2. `PORTABLE_ALLOWED`: compatible portable characters may join.
+3. `APPROVAL_REQUIRED`: portable characters require an invitation, allowlist,
+   or explicit owner/admin approval.
+4. `FRESH_CHARACTER_ONLY`: only newly created characters are accepted; existing
+   progression is not imported.
+
+The policy must also control solo, invite-only, friends-only, allowlist, and
+public access; imported inventory, recipes, abilities, equipment, and
+cosmetics; progression and item/value caps; content-version ranges; spawn and
+death rules; concurrent sessions; and whether the owner can revoke, eject, or
+ban a character ID.
+
+The UI must show the effective policy before world creation and before joining:
+what the character may bring, what remains in the source world, what is denied,
+and whether approval is required. The server rechecks it at login, transfer,
+save, and commit boundaries. Client UI is informative only.
+
+### 6.4 Join transaction and conflict handling
+
+Joining is an idempotent server transaction:
+
+```text
+authenticate character
+    -> load world and policy versions
+    -> validate compatibility and admission
+    -> calculate portable/world-bound state split
+    -> reserve a safe spawn and required capacity
+    -> publish one authoritative character session
+    -> save resulting world and character revisions
+```
+
+If any step fails, neither side is partially changed. Duplicate requests,
+disconnects, crashes, and retries must resolve to one result. A per-character
+lease prevents a portable character from duplicating items by joining multiple
+worlds concurrently. Incompatible policy or content versions produce an
+explicit migration-required state instead of silently applying another ruleset.
+
+### 6.5 Required validators and tests
+
+Add deterministic tests for save/reload, autosave, backup/restore,
+import/export, corruption detection, interrupted-save recovery, every
+admission mode, world-bound rejection, portable joins without duplication,
+allowlist/approval, fresh-character-only worlds, incompatible versions,
+capacity overflow, duplicate join requests, disconnect recovery, leases, and
+preservation of world IDs, character modes, policies, revisions, edits,
+entities, inventories, and regeneration sessions.
+
+## 7. Map, selection, and preview
 
 The map is a chunk-level planning view, not a second editable world.
 
@@ -413,6 +621,35 @@ Such chunks still count against the hard per-session maximum, protection
 rules, and generation budget. The server records the card effect responsible
 for every bonus slot. Cards cannot make safe-zone or protected chunks eligible.
 
+#### Opening-deal price and session-start API
+
+Expose server-owned draft operations equivalent to
+`begin_regeneration_selection`, `select_regeneration_chunk`,
+`unselect_regeneration_chunk`, `query_regeneration_start_cost`, and
+`commit_regeneration_start`. Selection calls use a selection revision and
+request ID, validate each coordinate against the same bounds/protection/
+occupancy/reservation policy used at commit, and are idempotent on exact retry.
+The cost query is read-only and returns structured counts, currency ID,
+component costs, total, revision, and a rejection reason where applicable.
+This specifies the server API/data contract only; client UI design and
+implementation are not part of this contract.
+
+The opening deal defaults to four cards and accepts four through seven. Let
+`B4` be the configured total opening-deal price for four cards:
+
+```text
+opening_card_cost(n) = B4 * 2^(n - 4),  n in [4, 7]
+```
+
+The totals are `B4`, `2*B4`, `4*B4`, and `8*B4`. This opening-deal price is
+distinct from the subsequent per-draw geometric schedule below. Checked
+integer math and configured caps are mandatory. Commit revalidates the exact
+selection revision and quote, then atomically reserves/debits resources,
+starts the CardGame with that opening-hand size, persists the idempotency
+result, and freezes selection. Failure changes none of dust, selected chunks,
+reservations, barriers, or card zones. Once this commit succeeds, player
+cancellation is unavailable under the default regeneration policy.
+
 ### 7.4 Reservation and refunds
 
 All authoritative costs use a server-side ledger and idempotent transaction
@@ -489,12 +726,21 @@ inventory and a deck, or in two deck contexts, at once.
 The configured deck contains **at least 20 and at most 100 card instances**.
 The initial starter deck contains 20 deliberately low-power cards. Deck edits
 are transactional: a card cannot be removed if that would leave fewer than 20
-cards, and a card cannot be inserted if the total would exceed 100. Deck size
-counts all owned instances across draw pile, operation hand, and discard pile;
-normal draws/plays move an instance between those zones and do not change deck
-size. The user can craft/obtain cards, insert them through the World Loom deck
-screen, and remove them back to inventory subject to those bounds and available
-inventory space.
+cards, a card definition cannot appear more than **4 times**, and a card cannot
+be inserted if the total would exceed 100. The four-copy limit is counted
+across the draw pile, operation hand, discard pile, and any temporarily held
+instance in the active regeneration session; moving a card between those
+zones does not create another copy. Normal draws/plays move an instance
+between zones and do not change deck size. The user can craft/obtain cards,
+insert them through the World Loom deck screen, and remove them back to
+inventory subject to those bounds and available inventory space.
+
+The four-copy limit is keyed by stable card-definition ID, not display name or
+localized text. It is checked again when a deck is loaded, when a card is
+crafted or transferred into the deck, and when a session starts. A malformed
+or legacy deck above the limit is quarantined for repair and cannot be used to
+start regeneration; the server must never silently truncate it or allow an
+over-cap deck to bypass the rule through draw/discard operations.
 
 Each card instance has a unique ID even when several copies share one card
 definition. The deck persists its ordered draw pile, hand, discard pile,
@@ -505,19 +751,38 @@ persisted shuffle stream. If no drawable cards exist, return a clear no-cards
 result; never silently create a card. Hand size, simultaneous sessions, and
 cards played per session are separately bounded by configuration.
 
+The regeneration hand has a hard cap of **10 cards**. When an effect draws a
+card while the hand is already full, the card is not retained and the draw is
+recorded as a **burned card**. Each burned card adds the configured amount of
+world instability to the current regeneration snapshot. Burning is
+server-authoritative, deterministic, visible in the preview/event log, and
+does not silently discard the card without applying its instability result.
+This rule applies to ordinary draws, card-generated draws, and craft-only
+cards such as `Ultimate Greed`.
+
 ### 8.2 Effect representation
 
 Card definitions are configuration-driven and refer to stable IDs. Prefer a
 small declarative set of validated regeneration operations in the first
 implementation. Example operations include:
 
-- add/remove a biome from an allowed set;
+- exclude a biome from an allowed set;
+- guarantee a biome when the current world rules and selected chunk footprint
+  can legally satisfy that guarantee;
 - adjust biome weights within configured bounds;
-- enable/disable an ore or alter its configured distribution profile;
+- enable/disable an ore or increase one ore's distribution profile by an exact
+  configured amount within world-defined caps;
+- guarantee at least one valid village footprint in the generated chunks when
+  the village feature is enabled and the selected area has enough space;
 - add a bounded water, lava, cave, structure, or surface-feature profile;
+- add bounded surface lava pools with the same containment and safety checks as
+  every other generated fluid;
 - modify feature density within world-defined safe limits;
-- draw/discard cards through the regeneration deck API;
+- draw cards, draw two then discard one, or discard cards through the
+  regeneration deck API;
 - grant a bounded number of extra chunk targets;
+- add a bounded amount of world instability when the draw pile and discard pile
+  are both empty and the player requests another card;
 - add a constraint or select a supported regeneration stage.
 
 Do not serialize raw function pointers, `void *` contexts, scripts, or process
@@ -537,15 +802,43 @@ Resolve generation policy in this order:
    preserved.
 3. World-owner generation configuration and selected regeneration mode/stage
    mask.
-4. Played card effects in a documented order (the default is the order played
-   by the player).
-5. Deterministic generation using the resulting immutable policy.
+4. Create a fresh immutable working snapshot by deep-copying the current
+   authoritative world-generation rules. This snapshot is the only policy
+   object cards may adapt for this regeneration session.
+5. Apply played card effects in a documented order (the default is the order
+   played by the player) to the snapshot's current state.
+6. Deterministic generation using the resulting immutable snapshot.
 
 Cards may modify values only inside configured ranges and may not remove
 mandatory safety constraints. Conflicting cards either compose by an explicit
 operation (`add`, `multiply`, `replace`, `intersect`, or `exclude`) or are
 rejected as incompatible during preview. Never rely on container iteration
 order to resolve conflicts.
+
+The authoritative world rules are never modified by regeneration. Every new
+regeneration request pulls the current base rules again and creates a new
+working snapshot; the previous session's adapted snapshot is never reused as
+the next session's base. A successful regeneration persists its generated
+chunks and the resolved snapshot digest for audit/replay, but does not write
+card changes back into the world's permanent generation configuration.
+
+Effects always inspect the snapshot as it exists at the moment they are
+played, including changes made by earlier cards. For example, if an earlier
+card excludes desert, a later card that guarantees desert is incompatible or
+has no legal effect according to the declared conflict policy; it must not
+silently consult the original world rules and undo the earlier card. Likewise,
+excluding a biome that is already absent, increasing an ore already at its
+configured cap, or guaranteeing a feature that is disabled by the current
+snapshot produces a deterministic no-effect result.
+
+The preview must show each card's evaluated result as `APPLIED`, `PARTIAL`,
+`CONFLICT`, or `NO_EFFECT`, with a human-readable reason and the before/after
+summary. A `NO_EFFECT` card is never silently consumed: by default the player
+can remove it before confirmation. If the player explicitly confirms a
+session containing it, the server may move it to discard according to the
+configured card policy, but the resulting snapshot and audit record must make
+the no-op visible. Safety violations and invalid card targets remain hard
+errors, not no-ops.
 
 The server canonicalizes the resolved policy and computes a digest. The digest
 includes generator version, terrain config, mode/stage mask, card definition
@@ -671,12 +964,460 @@ rehydrated before streaming loads them, subject to policy-cap and protection
 checks. Danger/reward opportunity planning and crash-atomic host-intent delivery
 remain open, as do the other rare card planners.
 
-Starter effects should be weak, transparent, and deterministic. Avoid cards
-that force lava, erase edits, override protection, create unbounded structures,
-or guarantee rare loot. Progression can add stronger combinations after the
-preview and rollback systems are reliable.
+### 8.4.1 Illustrative starter deck example
 
-### 8.5 Card recipe discovery and Card Press crafting
+The player starts with a **20-card regeneration deck**. These are illustrative
+basic definitions and balance content, not fixed implementation data:
+
+| Card | Example effect | Purpose |
+|---|---|---|
+| Biome Exclusion (4 copies) | Removes one selected biome from the snapshot's eligible biome set | Demonstrates safe biome filtering |
+| Deep Seam (4 copies) | Increases one selected ore profile by exactly **50%** relative to the current snapshot, subject to world caps | Adds a clearly bounded amount of one ore without bypassing distribution limits |
+| Village Charter (2 copies) | Guarantees one additional valid village footprint in the generated chunk set | Multiple copies compose additively: two copies request two villages, subject to space and safety limits |
+| Surface Magma (2 copies) | Enables a bounded surface-lava-pool profile | Adds a risky feature with containment and safety validation |
+| Double Draft (2 copies) | Draws two cards, then forces one discard from the resulting hand | Demonstrates card draw/discard sequencing |
+| Biome Compass (4 copies) | Adds a small configured set of eligible biome weights | Teaches composable biome selection without an unsafe replacement |
+| Surveyor's Reach (2 copies) | Grants one additional target chunk for this session | Demonstrates bonus scope and explicit accounting |
+
+These example counts total the required 20-card starter deck. Card definitions
+are configuration content and can change without changing the deck-size
+invariant.
+
+Starter effects should be weak, transparent, and deterministic. In particular,
+each `Village Charter` instance represents one village guarantee. Multiple
+instances therefore request multiple villages rather than strengthening one
+village. Each instance may fail with `NO_EFFECT` when no additional valid
+footprint remains because the selected chunks are too small, protected,
+already occupied, or the village feature is disabled;
+`Surface Magma` may only create small enclosed pools in legal terrain; and
+`Double Draft` must respect hand, draw, discard, and per-session limits.
+Progression can later add cards such as `Biome Guarantee` (force one eligible
+biome when the snapshot can satisfy it) and `Fortune's Draw` (draw one card)
+after the preview, snapshot, and rollback systems are reliable. Avoid cards
+that erase edits, override protection, create unbounded structures, or
+guarantee rare loot.
+
+### 8.5 Craft-only cards
+
+Craft-only cards are discovered and crafted through the Card Press or another
+explicit progression path. They are not inserted into the regular 20-to-100
+regeneration deck by default and must not appear in the normal starter draw
+pool. Keep every craft-only card in this section, including future rare cards,
+so deck legality and progression availability remain easy to audit.
+
+| Card | Availability | Effect |
+|---|---|---|
+| Volcano Mark | Craft-only rare card | Adds one bounded, regeneration-only volcano feature plan to the selected chunks, subject to the required footprint, protection, terrain, progression, and boss-content rules. |
+| Ultimate Greed | Craft-only rare card | Draws three cards; cards beyond the 10-card hand cap are burned and add instability, then the card adds its configured instability amount to the regenerated chunks. |
+| Biome Rupture | Craft-only rare card | Removes two selected eligible biomes from the current regeneration snapshot and adds its configured instability amount to the regenerated chunks. |
+| Ore Overgrowth | Craft-only rare card | Doubles the selected ore's current spawn profile in the regeneration snapshot, up to world-defined safety caps, and adds its configured instability amount to the regenerated chunks. |
+| Shipwreck Chart | Craft-only rare card | Guarantees one additional shipwreck in a valid generated ocean area, adds bounded underwater mobs, increases instability, and scales loot quality with the affected chunks' resulting instability. |
+| Ruined Village Relic | Craft-only rare card | Adds one bounded ruined-village structure with hostile spawners and rare loot, then adds its configured instability amount to the regenerated chunks. Loot quality scales with the affected chunks' resulting instability. |
+| Unstable Catalyst | Craft-only rare card | Applies one hidden random modifier from the validated undiscovered-effect pool to the selected chunks, permanently records it, and increases world instability. |
+| Desert Pyramid Seal | Craft-only rare card | Adds one regeneration-only desert pyramid built from sandstone, with bounded hostile spawners and a central loot chamber; increases instability and scales danger and rewards with the affected chunks' resulting instability. |
+| Ancient Canopy Seal | Craft-only rare card | Adds one regeneration-only giant forest tree with a climbable interior, ladders, trapdoors, darkness-based hostile spawners, and rare loot; increases instability and scales danger and rewards with the affected chunks' resulting instability. |
+| Spider Nest Seal | Craft-only rare card | Adds one regeneration-only spider nest connected to an existing cave system, with bounded spider spawners and loot-bearing corpses; increases instability and scales danger and rewards with the affected chunks' resulting instability. |
+| Volatile Stabilizer | Craft-only rare card | Normally reduces instability slightly, but its overload chance escalates every time it is used in the same regeneration session. An overload creates a much larger instability surge and unlocks a higher danger/reward opportunity. |
+
+`Volcano Mark` is consumed by the regeneration session that accepts it. It may
+be stored as a crafted card before use, but it is never generated by ordinary
+starter-deck draws. The preview must show its required footprint, affected
+chunks, blocked/protected areas, expected terrain and hazard changes, and any
+reason it has `NO_EFFECT` or is rejected. A volcano must never appear in
+ordinary world generation merely because the card exists in a player's
+collection.
+
+`Ultimate Greed` is also consumed by the accepting regeneration session. Its
+three draws use the same server-authoritative 10-card hand cap and empty-deck
+rules as ordinary draws. Any draw over the cap burns that card and adds the
+configured burned-card instability; if a draw occurs after both piles are
+empty, the corresponding empty-deck instability is added as well. These
+instability contributions are in addition to the card's configured instability
+cost and apply only to the chunks regenerated by that session. They do not
+change the base world rules or permanently destabilize unrelated chunks. The
+preview must show the three-card draw, retained versus burned cards, each
+instability contribution, the resulting danger threshold, and any cards that
+would be `NO_EFFECT` in the resulting snapshot.
+
+`Biome Rupture` consumes two biome-exclusion selections and applies both to the
+snapshot state at the moment it is played. If fewer than two selected biomes
+are currently eligible, each unavailable exclusion is reported separately as
+`NO_EFFECT`; the card never removes mandatory or already-absent biomes by
+silently changing another biome. Its configured instability is added even
+when one exclusion is ineffective only if the player explicitly confirms the
+resulting partial effect; a fully invalid card is rejected or left unplayed
+according to the normal card preview policy. The preview must show both biome
+targets, their individual results, the exact instability increase, and the
+resulting danger threshold.
+
+`Ore Overgrowth` applies a `2.0x` multiplier to one selected ore profile as it
+exists in the current snapshot, not to the original world configuration. If
+the world cap prevents a full doubling, the preview reports the applied capped
+value as `PARTIAL` and shows the exact result. If the ore is disabled, absent,
+or otherwise unavailable in the current snapshot, the card reports `NO_EFFECT`
+and does not silently substitute another ore. Its configured instability is
+shown and applied under the same confirmation and audit rules as the other
+craft-only rare cards.
+
+`Shipwreck Chart` is ocean-only. It consumes one shipwreck guarantee and can
+only apply when the current snapshot contains enough valid ocean area and the
+shipwreck structure footprint fits without crossing protected or incompatible
+terrain. Multiple accepted copies request multiple shipwrecks, subject to the
+world's structure and loot budgets. On land, in a non-ocean biome, or when no
+valid ocean footprint remains, the card reports `NO_EFFECT` or `PARTIAL` with
+the exact reason; it never converts land into ocean merely to satisfy the
+card. Shipwrecks use a stable cross-chunk structure plan and are tagged
+`OCEAN_ONLY` in the feature registry. A shipwreck may include a bounded,
+configured population of hostile underwater mobs. Those mobs must obey water
+volume, entity, difficulty, spawn, and protection budgets; the card must not
+create an unbounded underwater spawn source.
+
+Shipwreck loot is resolved from the resulting persisted instability level of
+each affected chunk after the card's instability delta is applied. Higher
+instability may unlock better loot tiers and a stronger bounded chance for rare
+items, using a versioned monotonic table with a hard maximum. Loot and
+underwater-mob placement use deterministic server seeds and are committed once
+with the structure/chunk revision, so previews, retries, reloads, and
+reconnects cannot reroll or duplicate them. The preview must show the
+instability increase, underwater-mob count/danger profile, loot tier/range,
+water-depth requirements, and any protected or invalid footprint areas.
+
+`Ruined Village Relic` is a deliberate risk/reward card. Its structure plan
+must contain a bounded number of hostile spawners, a configured rare-loot
+profile, valid collision/navigation space, and a stable structure instance ID.
+The spawners are part of the generated structure and must obey the world's
+entity, difficulty, protection, and hostile-mob budgets; the card must not
+create an unbounded spawn source. Player-built or protected content remains
+protected, and an invalid footprint produces `NO_EFFECT` or `PARTIAL` rather
+than moving the village into protected land.
+
+The loot profile is resolved from the resulting persisted instability level of
+each affected chunk, after the card's instability delta is applied. Higher
+instability may unlock better loot tiers and a stronger bounded chance for rare
+items, but it must use a versioned monotonic table with a hard maximum. Loot
+must be generated from a deterministic server seed and committed once with
+the structure/chunk revision; retries, reloads, and repeated preview requests
+must not reroll or duplicate it. The preview must show the instability tier,
+spawner count, danger profile, loot tier/range, and any protected or invalid
+parts of the footprint.
+
+`Desert Pyramid Seal` is a regeneration-only desert feature. The generator
+must require a valid desert footprint and the sandstone block palette before
+accepting the card; it must not place a pyramid in a non-desert biome or add
+desert terrain merely to satisfy the card. The pyramid contains a bounded
+number of hostile spawners and a protected central loot chamber. Its structure
+plan is cross-chunk safe, uses a stable instance ID, and preserves player or
+protected content.
+
+The pyramid's resulting chunk instability controls both its danger profile and
+its reward tier through versioned monotonic tables: higher instability can add
+more dangerous spawner settings and unlock better central-chamber loot, subject
+to hard entity, difficulty, item-value, and structure limits. Loot and spawner
+placement use deterministic server seeds and commit once with the generated
+structure revision. The preview shows the instability increase, spawner
+profile, expected danger, loot tier/range, desert-footprint requirements, and
+any `NO_EFFECT` or `PARTIAL` result.
+
+`Ancient Canopy Seal` is a regeneration-only forest feature. It requires a
+valid forest footprint and places one above-ground giant tree with a stable
+cross-chunk structure plan. The interior must contain a bounded climbable
+route using ladder blocks, navigable openings using trapdoors where configured,
+and a central or upper loot area. The structure must not appear in a non-forest
+biome or convert unrelated terrain merely to satisfy the card.
+
+The tree's spawners are deliberately placed in enclosed, low-light sections
+of the interior. The darkness is part of the encounter design: players must
+bring or create illumination to see and safely navigate the structure. Spawner
+activation, mob counts, light thresholds, ladder/trapdoor collision, and
+vertical traversal are all server-authoritative and bounded. The structure
+must never trap a player irrecoverably, block protected content, or create an
+unbounded hostile spawn source.
+
+As with the desert pyramid, the affected chunks' resulting instability selects
+monotonic, versioned danger and reward tiers. Higher instability may increase
+darkness-area danger, spawner settings, and rare-loot quality within hard
+entity, difficulty, item-value, and structure limits. The preview shows the
+forest-footprint check, vertical bounds, ladder/trapdoor route, light-risk
+areas, spawner profile, loot tier/range, instability increase, and any
+`NO_EFFECT` or `PARTIAL` result.
+
+`Spider Nest Seal` is an underground regeneration-only feature. The generator
+must first locate a valid existing cave-system connection in the resolved
+chunk snapshot. It must not create a disconnected underground room or tunnel
+solely to satisfy the card. If no cave connection with sufficient footprint,
+headroom, support, and protected-content clearance exists, the card reports
+`NO_EFFECT` before consumption.
+
+The nest contains a bounded number of spider spawners and loot-bearing corpse
+props or entities. Spawners must connect to the cave volume, obey mob,
+difficulty, entity, light, and per-structure budgets, and must never create an
+unbounded hostile spawn source. Corpses have stable IDs and deterministic loot
+tables; they are lootable once, persist their opened state, and cannot be
+duplicated by retries, chunk reloads, regeneration, or reconnects.
+
+The affected chunks' resulting instability selects monotonic, versioned spider
+danger and corpse-loot tiers within hard caps. Higher instability may increase
+spawner danger and improve loot quality, but it cannot bypass ownership,
+protection, item-value, or entity limits. The preview shows the cave connection,
+underground footprint, spawner count, expected danger, corpse-loot tier/range,
+instability increase, and any invalid or protected area.
+
+`Volatile Stabilizer` is a deliberate kiss/curse gamble. Each successful use
+normally reduces the affected chunks' instability by a configured amount. Each
+additional use in the same regeneration session increases its configured
+overload chance; the exact chance curve and reduction/surge values are content
+configuration, not hard-coded card behavior. The server resolves the overload
+immediately when the card is played using the session's deterministic RNG and
+records the result before presenting the updated preview.
+
+When it overloads, the normal reduction is replaced or followed by a much
+larger configured instability surge. The resolved surge is permanently attached
+to the affected chunk revisions and unlocks the resulting generic danger and
+reward band, such as a high-tier hostile-tower opportunity. The player sees
+that the card overloaded, the resolved instability change, and the resulting
+danger/reward band, but cannot use cancellation, a retry, reload, rollback, or
+another card to remove the committed overload.
+
+Playing the card consumes its instance and commits its resolved instability
+event to the session ledger. It immediately locks player cancellation for that
+regeneration session, even if terrain generation has not started yet. If the
+player continues, the regenerated chunks must use the committed instability
+result and its eligible kiss/curse feature opportunity; the result cannot be
+rerolled by abandoning and restarting the session.
+
+`Unstable Catalyst` is an intentional hidden-risk card. At authoritative card
+resolution, the backend selects one eligible modifier from a versioned,
+bounded pool of content the player has not yet unlocked or owns. The selected
+modifier ID, deterministic seed, ruleset version, affected chunks, and
+instability delta are recorded server-side, but the specific effect is not
+shown to the player in the normal preview. The UI must still disclose that an
+unknown permanent modifier will be applied, its affected footprint, the exact
+instability increase, and any general danger range required for informed
+consent. The server may reveal the effect later through a discovery, event, or
+content-specific in-world outcome.
+
+The hidden modifier is immutable: no later card, regeneration, rollback,
+death, save restore, migration, or ordinary world-rule edit may remove or
+reroll it. It may be superseded only by a separately designed explicit
+end-of-world or administrative migration, never by normal gameplay. The
+modifier applies to the selected chunk records and persists with them; it does
+not silently spread to unrelated chunks. If a selected chunk cannot accept a
+modifier, that chunk is rejected before the card is consumed.
+
+The eligible pool is deliberately limited to dangerous or potentially
+dangerous modifiers. Its initial generic candidates are:
+
+- ruined monster towers;
+- hostile camps;
+- spawner complexes;
+- cursed mines;
+- enemy fortifications;
+- monster nests; and
+- dangerous underground vaults.
+
+The pool may also contain explicitly registered `CROSSOVER_VARIANT` entries,
+such as an underwater ruined tower or another ocean-compatible hostile
+structure. A crossover entry may use concepts from a card feature–such as a
+shipwreck, volcano, or ruined village–but it is an instability-driven variant,
+not a hidden replay of that card's exact guarantee. Later candidates must be
+explicitly classified as `GENERIC_INSTABILITY` or `CROSSOVER_VARIANT` and
+tagged `DANGEROUS` or `POTENTIALLY_DANGEROUS` by the versioned feature registry.
+
+The pool must not silently include ordinary biome, ore, harmless structure, or
+cosmetic effects. Every candidate must pass the same protection, ownership,
+footprint, entity, fluid, difficulty, and generation-budget rules as an
+ordinary card. It must never grant arbitrary items, bypass character/world
+permissions, overwrite player content, or create unbounded entities. Selection
+is server-authoritative and deterministic for the committed event, while the
+effect identity remains hidden from ordinary player-facing output. Retries,
+previews, reconnects, and reloads must not reroll or duplicate the modifier.
+
+### 8.6 Empty-deck draws and world instability
+
+Drawing beyond an empty draw pile is not a free reshuffle. If both the draw
+pile and discard pile are empty, an accepted extra-draw request adds a bounded
+amount of **world instability** to the current regeneration session. The first
+implementation should make this an explicit, versioned snapshot value rather
+than silently changing the permanent world rules. The world owner can later
+configure whether instability is session-local, world-persistent, or disabled;
+that choice must be explicit before implementation.
+
+Instability is cumulative for the current snapshot and increases the danger of
+the chunks being regenerated. It may influence only validated, configured
+features, for example:
+
+- higher hostile-mob spawn density and stronger hostile-mob equipment tiers;
+- additional hostile spawn points or bounded mob spawners;
+- more uneven terrain and harder navigation than the base generation profile;
+- harsher but bounded cave, hazard, or surface-feature distributions; and
+- stronger combinations of existing hazards without bypassing protection,
+  fluid containment, chunk bounds, or entity-count limits.
+
+Keep instability content separate from explicit biome/reward cards. The
+content registry should classify generated features as:
+
+- `BIOME_SPECIFIC`: requested by a biome card and valid only for its biome or
+  terrain family, such as desert pyramids, forest canopies, shipwrecks, or
+  cave-connected spider nests;
+- `GENERIC_INSTABILITY`: selected by per-chunk instability thresholds and
+  eligible across many compatible biomes, such as ruined monster towers,
+  hostile camps, spawner complexes, cursed mines, enemy fortifications,
+  monster nests, and dangerous underground vaults; or
+- `CROSSOVER_VARIANT`: a generic danger concept adapted to a compatible biome,
+  such as an underwater ruined tower or shallow-ocean hostile settlement
+  rather than a normal above-ground village.
+
+Biome cards control deliberate biome-specific content and rewards. Instability
+controls the increasing presence and difficulty of generic hostile content and
+dangerous traversal. There may be crossover, but a generic instability event
+must not silently duplicate a card's guaranteed structure or bypass a card's
+biome requirements. The registry records the relationship explicitly so an
+instability feature can either use a compatible variant or be ineligible.
+
+The first generic instability feature should be a **ruined monster tower**.
+Once a chunk crosses its configured eligibility threshold, regeneration gives
+the tower a low, deterministic chance to appear if there is enough space,
+terrain support, protection clearance, and a valid chunk footprint. Its
+contents scale with the affected chunk's resulting instability:
+
+- low instability: ordinary hostile mobs and modest loot;
+- medium instability: multiple floors, stronger mobs, useful materials, and
+  bounded spawner content; and
+- high instability: elite mobs, spawners, rare crafting materials, and powerful
+  card ingredients.
+
+The tower is generic and may appear in many land biomes, but not every biome.
+Ocean chunks require a compatible `CROSSOVER_VARIANT` or are excluded. The
+primary ocean tower variant should be built taller so its occupied floors,
+spawners, and loot remain above the waterline, with a valid water approach so
+players can reach it using boats. Its footprint must include sufficient water
+approach clearance. A separate shallow-water or
+underwater ruined-tower variant may use aquatic navigation, water-compatible
+blocks, underwater mobs, and submerged loot, but it must be explicitly
+configured rather than assumed. The same compatibility approach applies to
+other generic instability features without turning every biome into a special
+case.
+
+This creates the intended risk/reward loop: stable worlds are safer but offer
+fewer dangerous opportunities, while player-driven instability makes travel
+and regeneration harder but unlocks better opportunities. The world becomes
+more dangerous because of deliberate player choices–powerful cards,
+overdrawing, empty-deck draws, and other accepted risk events–not because
+generation randomly ignores the configured rules.
+
+#### Instability kiss/curse rule
+
+Every instability increase must follow a **kiss/curse** contract. The curse is
+the additional danger imposed by the instability level; the kiss is a real,
+server-authoritative opportunity or reward unlocked by accepting that danger.
+An instability feature must not be purely punitive. Examples include stronger
+hostile mobs paired with better loot, more spawners paired with rare crafting
+materials, harder terrain paired with undiscovered feature access, or a higher
+hazard tier paired with better card ingredients.
+
+The relationship is defined by versioned monotonic tables: increasing a
+chunk's instability may never reduce its configured reward tier, and increasing
+the reward tier may never silently remove the corresponding danger. Both sides
+have hard caps for entities, terrain, item value, generation time, and player
+progression. The preview normally shows the danger and reward bands before
+confirmation. Hidden-risk cards may hide the exact selected feature, but must
+still disclose that the permanent modifier carries both a danger cost and a
+reward opportunity.
+
+If a valid instability level has no configured reward opportunity, the
+instability increase is rejected rather than creating a punishment-only state.
+Likewise, rewards must never be granted without the associated danger being
+committed to the same chunk revision. Loot, discoveries, card ingredients, and
+feature access are deterministic, persisted, and cannot be rerolled or
+duplicated by retries, reloads, or rollback.
+
+Instability must not directly create arbitrary entities, weapons, or terrain.
+Each threshold maps to a versioned danger profile with explicit maximums,
+preview text, deterministic seeds, and a per-session/entity budget. The UI
+must show the current instability, the next threshold, and the expected danger
+changes before confirmation. If no configured instability profile exists, the
+extra draw is rejected rather than silently producing an undefined result.
+
+Instability effects apply to the working snapshot after the draw request and
+before generation. They therefore compose with the cards currently played,
+but they never modify the authoritative base rules. The resolved instability
+level, threshold profile, spawned hazards, and card/draw events are persisted
+with the regeneration audit record so retries cannot reroll or duplicate the
+danger. Add dedicated later design work for whether instability survives a
+successful regeneration, decays over time, can be reduced by gameplay, and
+how multiplayer worlds share its ownership and visibility.
+
+#### Per-chunk instability state
+
+Instability is tracked independently for every chunk. It is not one global
+world number and it must not be inferred again from the current terrain. The
+authoritative record for each chunk contains at least:
+
+- world ID and chunk coordinates;
+- current integer instability level, clamped to the world's configured maximum;
+- instability ruleset/profile version used to interpret the level;
+- world-generation revision and resolved regeneration snapshot digest that
+  last changed the level;
+- monotonically increasing instability revision/event ID for stale-result and
+  duplicate-commit protection; and
+- bounded audit information identifying the source event, such as a card,
+  burned draw, empty-deck draw, challenge-start setting, decay, or gameplay
+  reduction.
+
+When a chunk is generated for the first time, its instability starts at `0` by
+default. A chunk regeneration begins from that chunk's persisted current level
+and applies only the instability delta accepted for that regeneration. A
+multi-chunk card effect applies the same validated delta independently to each
+affected chunk; a failed, skipped, protected, or stale chunk receives no
+change. Chunks outside the regenerated footprint are never changed as a side
+effect.
+
+World creation may expose an optional **starting instability** challenge
+setting. The default is `0`. If the player explicitly selects a higher value,
+every newly generated chunk in that world starts at that validated level
+instead of zero. The setting is stored in the immutable world-creation
+configuration, shown clearly before world creation, bounded by the maximum
+instability level, and cannot be changed retroactively to rewrite existing
+chunk records. A later ruleset may offer a deterministic per-region challenge
+profile, but it must resolve to an explicit starting level for each chunk.
+
+#### Persistence and update contract
+
+Per-chunk instability must be saved and restored with authoritative world
+state:
+
+1. Capture the current chunk instability record with the chunk's voxel/world
+   revision when a chunk is saved or unloaded.
+2. Commit terrain, entity, and instability changes through one idempotent
+   regeneration transaction, or leave all three at their previous revisions.
+3. Write records atomically and recover them from the last known-good save
+   after interruption or corruption.
+4. Load the record before a chunk becomes joinable or drawable; missing records
+   are initialized from the world starting-instability setting, never from
+   arbitrary stale worker memory.
+5. Include instability revision, profile version, and snapshot digest in
+   worker requests/results so stale generation cannot overwrite newer levels.
+6. Replicate the level and relevant danger-profile summary to authorized
+   clients, while keeping internal audit details server-owned.
+7. Include the records in backup, restore, export, import, migration, and
+   deterministic test fixtures. Compression is allowed, but must not merge
+   neighboring chunks into an ambiguous shared value.
+
+The renderer may cache the level for display, but it is not authoritative.
+Lighting, meshing, unloading, regeneration retries, and analytics must never
+reset a chunk's instability. A save/load cycle must reproduce the same
+per-chunk levels and danger-profile decisions for the same ruleset and event
+history.
+
+Required tests cover default-zero generation, nonzero challenge starts,
+independent neighboring chunk levels, repeated regeneration, partial
+multi-chunk failure, stale worker rejection, save/unload/reload, backup/
+restore, import/export, migration, duplicate event IDs, and multiplayer
+replication. Tests must prove that changing one chunk's instability cannot
+change an unrelated chunk and that a regenerated chunk's persisted level is
+used as the starting point for its next regeneration.
+
+### 8.7 Card recipe discovery and Card Press crafting
 
 Use a hybrid progression: exploration and controlled experimentation discover
 card recipes, while crafting a recipe the player already knows is deterministic.
@@ -694,7 +1435,7 @@ World Loom deck.
 
 **Known recipes:** the recipe book displays the exact card output, ingredients,
 Card Press requirement, cost tier, and any unlock requirement. Crafting a known
-recipe always produces that card definitionâ€“never a random substitute. Inputs,
+recipe always produces that card definition–never a random substitute. Inputs,
 output capacity, discovery state, and station revision are checked and
 committed as one idempotent server transaction. If crafting fails, neither
 materials nor a card are consumed/created.
@@ -714,7 +1455,7 @@ On a successful experiment, the server chooses one valid card from that
 configured, bounded candidate pool, creates the card instance, and records the
 discovered exact recipe. The player can then craft that result deterministically
 from the revealed recipe. Candidate results must all be useful and legal for
-the paid tierâ€“no blank outcomes, safety-rule bypasses, or low-cost chance at a
+the paid tier–no blank outcomes, safety-rule bypasses, or low-cost chance at a
 high-tier card. A discovery-biased pool should favor an eligible card the
 player has not discovered yet; repeated experiments must not become a
 reload/reroll exploit. If all eligible cards are known, the configuration may
@@ -762,7 +1503,31 @@ reloads, and deliberately repeated experiment requests must not duplicate
 materials/cards or reroll a completed experiment. Confirm the normal Card Press
 UI remains a recipe book and never becomes an ingredient grid.
 
-### 8.6 Libft CardGame adapter and World Loom integration
+### 8.8 Libft CardGame adapter and World Loom integration
+
+**Implementation checkpoint (2026-10-02):** the linked Libft design document
+now has an implementation ledger for the current uncommitted worktree. Libft
+foundations for typed host intents, in-memory snapshot/delta preservation,
+basic script-to-intent bridging, a sequenced/replayable physical-instance
+discard command and policy-aware draw/overflow foundations, a persistent
+recipe-book with configured default unlocks, a read-only recipe-availability
+query, prepared all-or-nothing crafting, and all-or-nothing single-inventory
+item addition have started, but these are not yet an integrated Minecraft
+World Loom feature. Keep this roadmap item open until the
+Minecraft-owned action/session adapter, card catalogue, persistence,
+multiplayer lifecycle, and end-to-end validators below are implemented.
+
+The Minecraft worktree also has a partial, UI-independent World Loom API:
+explicit select/unselect calls, loaded-chunk and selection-cap checks on the
+revisioned selection path, compare-and-set selection revisions, and a
+read-only quote for selected-chunk currency plus a four-to-seven-card opening
+deal with doubling price steps. Protection changes invalidate stale quotes.
+`./ft_vox_analytics --validate-world-revision` now passes for this API slice.
+Pricing policy is still supplied by the caller; there is no actor/session identity, request-ID
+idempotency, occupancy/exclusion-ring validation, authoritative balance/debit,
+atomic CardGame startup, reservation/barrier commit, or multiplayer session
+yet. This defines backend API only, not UI, and is not a completed
+regeneration-start transaction.
 
 Use the checked-out Libft `CardGame` module as the rules-neutral runtime for
 card identity, ordered zones, draws/shuffles, effect dispatch, choices,
@@ -805,7 +1570,7 @@ emission. Scripts can call `random_bounded(bound)` during an effect; it uses
 the match-owned persisted RNG and its state rolls back with a failed event.
 World policy validation and mutation remain in the Minecraft adapter and
 coordinator. Resolved choice lookup is available to the active effect actor.
-Script-side draw/discard operations are implemented. `RegenerationCardSession` persists the bounded context payload and script bridge manifest hash in its checksummed RCS1 version 4 snapshot; GameSession stores that adapter snapshot. Restore installs context keys and values, then accepts an optional catalog only after verifying the caller-supplied trusted content manifest and policy hash, before restoring engine state. Versions 1â€“3 remain readable for scriptless sessions. GameSession now accepts a trusted catalog before startup and binds it to the active generation-policy manifest. Authored catalog delivery and host authentication remain content integration work.
+Script-side draw/discard operations are implemented. `RegenerationCardSession` persists the bounded context payload and script bridge manifest hash in its checksummed RCS1 version 4 snapshot; GameSession stores that adapter snapshot. Restore installs context keys and values, then accepts an optional catalog only after verifying the caller-supplied trusted content manifest and policy hash, before restoring engine state. Versions 1–3 remain readable for scriptless sessions. GameSession now accepts a trusted catalog before startup and binds it to the active generation-policy manifest. Authored catalog delivery and host authentication remain content integration work.
 
 The GameSession lifecycle now accepts an authenticated catalog before
 `start()` and binds it to the active generation-policy manifest for new and
@@ -844,7 +1609,7 @@ open.
 Version-9 combined GameSession checkpoints can now carry the instability
 store payload alongside CardGame and regeneration-rule state. The host must
 configure the matching instability policy before startup so policy-bound
-records can be restored. Versions 1â€“8 remain readable. This preserves the
+records can be restored. Versions 1–8 remain readable. This preserves the
 store across session restart.
 Ore Overgrowth now requires an explicit host-configured positive instability
 delta, bound into the generation manifest. Before consuming the card, GameSession
@@ -911,7 +1676,7 @@ active match-state bound. Keep the two limits independently validated; a
 future content change must not silently push an active deck past engine
 capacity.
 
-### 8.7 Card Table minigame
+### 8.9 Card Table minigame
 
 Game 1.0 includes a small, fully playable card-game activity at a Card Table
 (name provisional), built on a separate Libft `card_game_engine` instance.
@@ -965,7 +1730,7 @@ conditional resources, summon/action allowances, zones, timing windows,
 stack admission/order, triggers, and combat policy without changing the
 generic engine for each card.
 
-### 8.8 Required changes at the Libft and Minecraft boundaries
+### 8.10 Required changes at the Libft and Minecraft boundaries
 
 **Libft CardGame changes:**
 
@@ -1189,6 +1954,23 @@ Add property tests for every emitted fluid cell: it belongs to a valid feature,
 its support/boundary rules hold, and edge continuation agrees when adjacent
 chunks are generated in either order.
 
+The built-in biome set must include an **ocean** biome with a stable biome ID,
+deep-water and sea-floor rules, shoreline transition rules, an allowed
+underwater terrain profile, and a clear distinction from rivers, lakes, and
+ordinary coastal land. Ocean generation must be deterministic across chunk
+boundaries and must not place land-only vegetation or structures in water.
+Ocean cards and `OCEAN_ONLY` features query the resolved biome/terrain snapshot;
+they do not bypass it or manufacture an ocean solely to satisfy a structure
+guarantee. A generated ocean must preserve valid water containment, floor
+support, lighting, and safe transitions at its borders.
+
+Shipwrecks are the first ocean-only structure. Their global plan must include
+an anchor, rotation, bounding box, valid water-depth range, required ocean
+footprint, loot/content version, and stable structure instance ID. A wreck may
+cross chunk boundaries, but every fragment must agree on ownership and must be
+generated only when the complete plan passes ocean, protection, terrain,
+collision, and structure-budget validation.
+
 ### 10.4 Extensible custom generation features and structures
 
 Custom content must use a versioned, data-driven generation contract rather
@@ -1209,7 +1991,7 @@ from that shared plan. Each chunk stores a structure-fragment reference with
 the instance ID, global bounds, local fragment bounds, anchor relation, and
 which neighboring chunk edges the structure continues across. The renderer
 must understand that a village road/building/volcano contour crossing a chunk
-edge is one continuous structureâ€“not a completed structure ending at each
+edge is one continuous structure–not a completed structure ending at each
 chunk boundary. It must use consistent global coordinates, seam ownership,
 face culling, lighting inputs, and neighbor dependencies so the edge does not
 become a gap, duplicate surface, or false opaque wall. Do not copy the whole
@@ -1250,7 +2032,7 @@ ordinary world generation or reserved for a regeneration card by config.
 
 **Volcano** is a late progression feature and is explicitly
 `REGENERATION_ONLY`: the default world-generation configuration never places
-one. Based on the chunk-regeneration context, â€“minimum 9x9â€“ means a minimum
+one. Based on the chunk-regeneration context, –minimum 9x9– means a minimum
 footprint of **9 by 9 chunks (81 contiguous chunks)**; confirm this unit before
 implementation if blocks rather than chunks were intended. The feature card
 requires an unlocked high tier, previews the entire footprint and cost, and is
@@ -1773,7 +2555,7 @@ or flickering chunks, and deterministic output for identical input hashes.
 
 ## 17. Implementation sequence
 
-### Phase 0 â€“ validate the existing foundation
+### Phase 0 – validate the existing foundation
 
 1. Inventory the existing `World` revision API, `M` preview, asynchronous
    generation pipeline, result-commit path, chunk/light/render publication,
@@ -1791,7 +2573,7 @@ or flickering chunks, and deterministic output for identical input hashes.
    match-state bound. Do not change the submodule pointer as part of this
    roadmap.
 
-### Pre-Phase 1 â€“ finish the minimum playable vertical slice
+### Pre-Phase 1 – finish the minimum playable vertical slice
 
 This is the first implementation gate, before the broader Phase 1 work. Its
 purpose is to validate the central regeneration interaction as early as
@@ -1827,7 +2609,7 @@ and the tests prove preservation, rollback, idempotency, and atomic visual
 publication. Do not begin broad survival implementation before recording this
 result.
 
-### Phase 1 â€“ Regeneration 1.0
+### Phase 1 – Regeneration 1.0
 
 Expand the proven slice into a complete player-facing regeneration release:
 
@@ -1862,7 +2644,7 @@ stations, farming, health/hunger, combat, card-recipe experimentation, or all
 four animal species. Dust and cards use the smallest authoritative contracts
 needed for this milestone and can later be adapted to the full item economy.
 
-### Phase 2 â€“ Game 1.0 item and inventory foundation
+### Phase 2 – Game 1.0 item and inventory foundation
 
 1. Audit Libft Game's item/inventory/recipe APIs on the target branch; define
    Minecraft stable item IDs, block-item mappings, stack rules, and adapters.
@@ -1889,7 +2671,7 @@ subscribed snapshots with a bounded round-robin budget. This carries spawn,
 merge, pickup, and despawn updates using full chunk refreshes. Item-specific
 deltas and reconnect/revision race validation remain open.
 
-### Phase 3 â€“ Game 1.0 crafting and survival loop
+### Phase 3 – Game 1.0 crafting and survival loop
 
 1. Add recipe-book crafting (no grid), station checks, workbench, furnace,
    fuel, ore smelting, and cooking.
@@ -1918,7 +2700,7 @@ version-1 catalog codec stored in combined session snapshot version 5; versions
 1-4 remain readable. Strict compile passes, but runtime restore coverage remains
 open.
 
-### Phase 4 â€“ Game 1.0 card manufacture and discovery
+### Phase 4 – Game 1.0 card manufacture and discovery
 
 1. Add paper/card materials and the Card Press using the recipe-book model.
 2. Add exploration blueprints, deterministic known recipes, and optional
@@ -1928,7 +2710,7 @@ open.
    card collection/minigame catalogue without changing stable definition,
    printing, or physical-instance IDs.
 
-### Phase 5 â€“ Game 1.0 Card Table minigame
+### Phase 5 – Game 1.0 Card Table minigame
 
 1. Build the Minecraft adapter on the pinned Libft CardGame module; configure
    one explicit two-player profile with versioned phases, zones, resource
@@ -1947,7 +2729,22 @@ open.
 5. Add optional minigame rewards through a separate idempotent reward ledger;
    never let match/replay retries duplicate dust, cards, unlocks, or gear.
 
-### Phase 6 â€“ Game 1.0 player avatars and customization
+
+### Cross-cutting Game 1.0 world persistence and admission gate
+
+Before calling any later Game 1.0 phase complete:
+
+1. Ship world creation, multiple-world save/load, autosave, backup/restore,
+   import/export, crash recovery, migration, and corruption handling.
+2. Ship `WORLD_BOUND` and `PORTABLE` character profiles with a server-owned
+   portable-state split and per-character transfer lease.
+3. Ship world admission policies for world-bound-only, portable-allowed,
+   approval-required, and fresh-character-only worlds, with clear UI previews
+   and transactional join/leave behavior.
+4. Pass the save, reload, duplicate-join, policy, migration, and no-duplication
+   validators in section 6.5 before enabling public multiplayer worlds.
+
+### Phase 6 – Game 1.0 player avatars and customization
 
 1. Add the final block-style player rig/model, default appearance, and
    authoritative pose/animation replication.
@@ -1955,7 +2752,7 @@ open.
 3. Confirm armor, tools, shields, bows, and staffs display on the model without
    changing gameplay collision or combat authority.
 
-### Phase 7 â€“ Game 1.0 neutral fauna
+### Phase 7 – Game 1.0 neutral fauna
 
 1. Complete authoritative entity ownership, persistence, spawn/despawn, and
    renderer submission; implement sheep as the first species vertical slice.
@@ -1964,7 +2761,7 @@ open.
 3. Verify regeneration cannot duplicate, erase, or relocate protected
    creatures, eggs, drops, or breeding state.
 
-### Phase 8 â€“ Game 1.0 custom structures and regeneration progression
+### Phase 8 – Game 1.0 custom structures and regeneration progression
 
 1. Add a configurable village feature pack with structure fragments that cross
    chunk borders and a bounded village population of job-configured villagers.
@@ -1979,7 +2776,7 @@ open.
 5. Preserve structure instance state, village stock/reputation, progression
    unlocks, and one-time boss rewards across regeneration and retries.
 
-### Phase 9 â€“ broader content and extension
+### Phase 9 – broader content and extension
 
 1. Add richer draw/discard, bonus-scope, feature, and combination cards.
 2. Add further structure definitions and progression content through config,
@@ -2031,6 +2828,10 @@ playable, without requiring the broader survival package:
   card identities, 20-card starter deck, 20-to-100 deck bounds, persistence,
   idempotency, cancellation, and refunds pass boundary and failure-injection
   tests;
+- the server-side selection API supports exact select/unselect, revisioned
+  cost quotes, and an opening hand of four through seven cards whose total
+  price doubles at each increment; quote and commit races, stale selections,
+  insufficient funds, and retries cannot partially reserve, charge, or deal;
 - starter cards have validated effects, deterministic policy resolution,
   preview warnings, and a versioned configuration digest; full Card Press
   manufacturing is not required for this gate;
@@ -2067,6 +2868,27 @@ identity systems. It is accepted when:
   pickup, stacking, save/load, and replication;
 - water and lava exist as world fluids and can be legally transferred using
   empty, water, and lava buckets under server validation;
+- the ocean biome has deterministic depth, floor, shoreline, lighting, and
+  chunk-boundary rules; craft-only Shipwreck Charts can create only validated
+  ocean shipwrecks and never place them on land;
+- boats can be crafted, placed, boarded, piloted, saved, recovered, and
+  replicated transactionally, including ordinary water access to ocean
+  structures;
+- craft-only Ruined Village Relics create bounded hostile spawners and rare
+  loot, with deterministic loot quality increasing monotonically from the
+  affected chunks' resulting instability and never rerolling on retry;
+- craft-only Shipwreck Charts increase affected-chunk instability, create only
+  bounded ocean-valid underwater mobs, and scale deterministic loot quality
+  monotonically from the resulting instability without duplication;
+- craft-only Desert Pyramid Seals generate only in valid desert footprints,
+  use sandstone construction with bounded hostile spawners and a central loot
+  chamber, and scale both danger and rewards monotonically from instability;
+- craft-only Ancient Canopy Seals generate only in forests, use ladder and
+  trapdoor traversal through a dark giant-tree interior, and provide bounded
+  spawner danger and instability-scaled rewards;
+- craft-only Spider Nest Seals generate only when connected to a valid cave
+  system, use bounded spider spawners and one-time loot-bearing corpses, and
+  scale danger and rewards monotonically from instability;
 - the recipe book, workbench, furnace, fuel, smelting, cooking, inventory,
   paper/card materials, Card Press recipes, and deck transfer preserve item
   counts transactionally;
@@ -2086,11 +2908,22 @@ identity systems. It is accepted when:
   as full Hearthstone, Magic or Yu-Gi-Oh! rules implementations;
 - health and hunger are authoritative and persistent; farming, grain/bread,
   fruit, raw/cooked foods, and optional thirst follow configured rules;
+- underwater breath is authoritative and persistent, refills at the surface,
+  and causes recurring health damage after the configured 60-second default
+  until the player surfaces or dies;
 - starter tools, armor, weapons, shields, staffs, and combat/magic profiles
   have explicit recipes, balance configuration, and server validation;
 - players have a rendered character model and can customize an allowed,
   persistent appearance profile; appearance cannot change collision, reach,
   movement, damage, or other authoritative gameplay stats;
+- players can create, save, resume, back up, restore, import, and delete
+  multiple worlds safely; interrupted or corrupt saves recover to the last
+  known-good snapshot;
+- characters explicitly use either `WORLD_BOUND` or `PORTABLE` ownership, with
+  world-owned and portable state kept separate and protected from duplication;
+- each world exposes versioned admission rules for world-bound-only,
+  portable-allowed, approval-required, and fresh-character-only access, plus
+  clear controls for what a portable character may bring;
 - the custom-structure framework renders a village continuously across chunk
   borders; villagers have bounded gathering jobs, village-owned storage,
   negative responses to unauthorized taking, and persistent positive
@@ -2201,7 +3034,7 @@ Libft `ft_map` growth bug: insertion doubled capacity for every new key,
 eventually preventing later item definitions from being stored. Both copy and
 move insertion now grow only when the map is full. Libft character saves now
 serialize inventory from a locked, value-only snapshot, including physical
-item IDs and item modifiers; older saves without instance IDs load with ID 0. The Libft inventory transfer API now offers a transaction-ID overload with an explicit scope and a bounded, volatile 4,096-entry replay cache; the compatibility overload has no deduplication contract. Focused transfer regressions pass 12/12, including scoped-ID isolation and fail-closed capacity behavior. `WorldItemStore::pickup` now uses the scoped transfer API for each exact quantity attempt, while its actor/request cache handles pickup retries. Both caches are process-local, and the pickup cache evicts old request IDs. Saved-world integration still needs durable inventory recovery and atomic coordination with mining/drop transactions. `GameSession` now exposes hand-only recipe query/craft actions through `MinecraftRecipeCatalog`; actions require the expected inventory revision and use a bounded 4,096-result session request cache whose high-water mark rejects evicted IDs. The item-catalog validator passes a successful craft, exact retry, changed-payload rejection, and stale-revision retry through this API. The hand-craft cache is stored in combined session snapshot version 5 alongside processing-job state; versions 1â€“4 remain readable, with older files loading empty action/job caches. Hand crafting still uses station 0. Furnace jobs use the timed queue and save codec, but placed-furnace ownership/reach checks, station UI/network transport and crash-safe resource coordination remain open. Durable mining/drop transactions, the broader recipe action surface, and content-specific runtime policies also remain open.
+item IDs and item modifiers; older saves without instance IDs load with ID 0. The Libft inventory transfer API now offers a transaction-ID overload with an explicit scope and a bounded, volatile 4,096-entry replay cache; the compatibility overload has no deduplication contract. Focused transfer regressions pass 12/12, including scoped-ID isolation and fail-closed capacity behavior. `WorldItemStore::pickup` now uses the scoped transfer API for each exact quantity attempt, while its actor/request cache handles pickup retries. Both caches are process-local, and the pickup cache evicts old request IDs. Saved-world integration still needs durable inventory recovery and atomic coordination with mining/drop transactions. `GameSession` now exposes hand-only recipe query/craft actions through `MinecraftRecipeCatalog`; actions require the expected inventory revision and use a bounded 4,096-result session request cache whose high-water mark rejects evicted IDs. The item-catalog validator passes a successful craft, exact retry, changed-payload rejection, and stale-revision retry through this API. The hand-craft cache is stored in combined session snapshot version 5 alongside processing-job state; versions 1–4 remain readable, with older files loading empty action/job caches. Hand crafting still uses station 0. Furnace jobs use the timed queue and save codec, but placed-furnace ownership/reach checks, station UI/network transport and crash-safe resource coordination remain open. Durable mining/drop transactions, the broader recipe action surface, and content-specific runtime policies also remain open.
 
 Define an immutable item definition with a stable `item_definition_id`,
 display/localization key, icon/model key, stack limit, category/tags, weight
@@ -2454,15 +3287,15 @@ roadmap, the non-air names are:
 
 | Group | Existing built-in blocks | Default drop item |
 |---|---|---|
-| Soil and terrain | `voxel:grass`, `voxel:dirt`, `voxel:sand`, `voxel:gravel`, `voxel:clay`, `voxel:coarse_dirt`, `voxel:podzol`, `voxel:mud`, `voxel:red_sand`, `voxel:terracotta`, `voxel:salt`, `voxel:wet_sand` | Same block item, except grass drops dirt |
+| Soil and terrain | `voxel:grass`, `voxel:dirt`, `voxel:sand`, `voxel:gravel`, `voxel:clay`, `voxel:coarse_dirt`, `voxel:podzol`, `voxel:mud`, `voxel:red_sand`, `voxel:sandstone`, `voxel:terracotta`, `voxel:salt`, `voxel:wet_sand` | Same block item, except grass drops dirt |
 | Common and regional stone | `voxel:stone`, `voxel:bedrock`, `voxel:permafrost`, `voxel:canyon_rock`, `voxel:slate`, `voxel:moss_rock`, `voxel:granite`, `voxel:andesite`, `voxel:diorite`, `voxel:obsidian`, `voxel:mossy_stone`, `voxel:cracked_stone`, `voxel:limestone`, `voxel:basalt`, `voxel:frozen_stone`, `voxel:chalk`, `voxel:volcanic_rock`, `voxel:quartz`, `voxel:amethyst`, `voxel:amber`, `voxel:frost_crystal`, `voxel:shimmer_stone` | Same block item |
 | Ores | `voxel:coal_ore`, `voxel:iron_ore`, `voxel:gold_ore`, `voxel:diamond_ore`, `voxel:emerald_ore`, `voxel:copper_ore` | Same ore-block item; the furnace may consume that item to make its configured bar/material |
-| Wood and plants | `voxel:shrub`, `voxel:oak_log`, `voxel:oak_leaves`, `voxel:cactus`, `voxel:pine_log`, `voxel:pine_leaves`, `voxel:birch_log`, `voxel:birch_leaves`, `voxel:red_flower`, `voxel:yellow_flower`, `voxel:tall_grass`, `voxel:fern`, `voxel:dead_bush`, `voxel:red_mushroom`, `voxel:brown_mushroom`, `voxel:mushroom_stem`, `voxel:lily_pad`, `voxel:seagrass` | Same block item |
+| Wood and plants | `voxel:shrub`, `voxel:oak_log`, `voxel:oak_leaves`, `voxel:cactus`, `voxel:pine_log`, `voxel:pine_leaves`, `voxel:birch_log`, `voxel:birch_leaves`, `voxel:red_flower`, `voxel:yellow_flower`, `voxel:tall_grass`, `voxel:fern`, `voxel:dead_bush`, `voxel:red_mushroom`, `voxel:brown_mushroom`, `voxel:mushroom_stem`, `voxel:lily_pad`, `voxel:seagrass`, `voxel:ladder`, `voxel:trapdoor` | Same block item |
 | Cold-region blocks | `voxel:snow`, `voxel:ice`, `voxel:packed_ice`, `voxel:packed_snow` | Same block item |
 | Fluid | `voxel:water`, `voxel:lava` (source); `voxel:flowing_water`, `voxel:flowing_lava` | Source cells are reserved for bucket transfer; flowing cells have no direct item |
 
 `voxel:air` never drops. The explicitly required exception is
-`voxel:grass` â€“ `voxel:dirt` item. Every other existing non-air, non-fluid
+`voxel:grass` – `voxel:dirt` item. Every other existing non-air, non-fluid
 block has a self-drop mapping by default, including decorative plants and
 ore blocks; a future exception must be an explicit, reviewed drop-table
 override rather than a missing mapping. `voxel:bedrock` keeps its self-drop
@@ -2483,12 +3316,13 @@ new biome block from silently becoming unobtainable or duplicating an item.
 
 This is the minimum planned catalog, grouped by purpose. Exact quantities,
 stack limits, yields, and recipe costs remain game configuration and are
-balance valuesâ€“not hard-coded assumptions in the inventory or recipe engine.
+balance values–not hard-coded assumptions in the inventory or recipe engine.
 
 | Item family | Required item definitions |
 |---|---|
 | Block items | One placeable item for every applicable current block above; new placeable farmland, mature/plantable crop or seed representations as needed, paper-plant block, workbench, furnace, Paper Mill, Card Press, World Loom, and later storage blocks. A block drop references an item definition; it does not create a bespoke item type per drop event. |
 | Fluid containers | Empty bucket, water bucket, lava bucket. The empty bucket is crafted from configured metal bars at a workbench. Filled buckets have stack limit 1; an empty bucket may stack only if its item-state representation is identical. A filled bucket is a single fluid-container item with `fluid_kind`, fixed capacity, and no arbitrary client-writable payload. |
+| Water vehicles | Boat item and authoritative boat entity. Boats use configured wood/plank recipes, carry bounded passengers, navigate water and shore transitions, and persist their owner/state/position without becoming duplicated item entities. |
 | Wood and basic materials | Oak/pine/birch logs and leaves as block items; configured planks and sticks as processed items; stone and gravel block items; coal/fuel; plant fiber; paper reed fiber; paper/card stock; configured ink/pigment/binding material. |
 | Regeneration resource | Magical dust as a stable item/resource ID, refined from configured crystal block items and optionally found in exploration caches; depositing it transfers value exactly once into the World Loom/player regeneration ledger. |
 | Mining and metal progression | Coal, iron, gold, copper, diamond, and emerald ore-block items matching the existing blocks; smelted iron/gold/copper bars (only where a recipe is defined); configured crystals/gems; pickaxes, axes, swords, and their recipe components. Ore-block items remain collectible even if a required tool tier controls whether they can be mined. |
@@ -2503,6 +3337,27 @@ save/network representation, pickup/drop policy, and clear ownership rules.
 Recipe outputs, block drops, mob drops, bucket transfers, and deck transfers
 must all use the same item definitions. UI labels/icons are presentation;
 they are never authoritative item identity.
+
+#### Boats and water traversal
+
+Boats are the first water vehicle and are required for ocean exploration,
+including access to above-water instability towers. A boat has a
+stable entity ID, owner/session state, position and orientation, passenger
+slots, damage/destruction state, and a corresponding recoverable boat item
+when the configured rules allow it to leave the world. Server authority owns
+movement, collision, boarding, disembarking, water buoyancy, shore transitions,
+and boat-item recovery. Clients may predict presentation but cannot duplicate
+boats, teleport passengers, or enter protected structures without validation.
+
+Boat placement requires a valid water surface and clearance for the hull and
+passengers. Ordinary boat movement and disembark rules must provide a valid way
+to reach the structure and must not trap or strand a boat at a chunk border.
+Boats and passengers persist
+through save/load, chunk unload/reload, disconnect/reconnect, and server
+restart; an interrupted transfer either leaves the boat entity intact or
+creates exactly one recoverable item. Required tests cover ocean travel,
+shallow water, shore transitions, collision, chunk borders, passenger
+replication, destruction/recovery, and retry-safe persistence.
 
 #### Block breaking and ground drops
 
@@ -2682,7 +3537,7 @@ The player has:
 
 - **Health:** visible current/max health, initially proposed as 20 health
   points (10 hearts).
-- **Food level (hunger):** visible 0â€“20 points (10 food icons).
+- **Food level (hunger):** visible 0–20 points (10 food icons).
 - **Saturation:** hidden fractional reserve, initially 5 points in a newly
   created survival character, bounded by the current food level and 20.
 - **Exhaustion:** hidden fractional activity cost. Once it reaches 4 points,
@@ -2696,7 +3551,7 @@ saturation matter separately: a food can fill the visible bar but provide a
 larger or smaller reserve before hunger starts falling again.
 
 Use the following Java-Minecraft-like defaults as starting balance data, not
-scattered constants. â€“Saturation modifierâ€“ is the food quality multiplier;
+scattered constants. –Saturation modifier– is the food quality multiplier;
 the raw saturation addition is `nutrition * modifier * 2`, then capped by the
 player's resulting food level. Food values may be changed by the world config.
 
@@ -2754,7 +3609,47 @@ see [Hunger management](https://minecraft.wiki/w/Tutorial:Hunger_management),
 design references, not a requirement to reproduce every version-specific
 Minecraft edge case.
 
-### 21.3 Thirst is optional and gated
+### 21.3 Breath and underwater survival
+
+Breath is separate from hunger, thirst, and health. A living character has a
+server-authoritative breath value with a configurable maximum. The default
+maximum is **60 seconds** of underwater time, measured in simulation ticks
+rather than render frames. The player can breathe normally while their head is
+in air or at the water surface. Returning to the surface restores breath to
+full at a configured recovery rate; the first implementation may refill it
+immediately once the player is clearly breathing air.
+
+While the character's breathing point is submerged, breath decreases only on
+the authoritative simulation clock. A short grace period may cover surface
+transitions and water-volume boundary jitter, but it must be bounded and
+deterministic. When breath reaches zero, the character takes recurring
+underwater suffocation damage at a configured interval until they reach the
+surface or die. Suffocation damage cannot underflow health, bypass armor rules
+unless explicitly configured, or be applied twice after a retry. The player
+cannot remain underwater indefinitely by rendering, reconnecting, or changing
+chunks.
+
+The server must define and validate:
+
+- the breathing-point test for water, air pockets, flowing water, and partial
+  submersion;
+- maximum breath, recovery rate, grace period, damage interval, and damage
+  amount as versioned world rules;
+- whether approved equipment, effects, or vehicles extend breath without
+  bypassing the zero-breath damage rule;
+- persistence of current breath, health, death, and respawn state across save,
+  unload/reload, reconnect, and cross-chunk movement; and
+- replication of breath and damage events without trusting client timers.
+
+The UI must show current breath while submerged, warn before depletion, and
+make suffocation damage and surface recovery understandable. Required tests
+cover exactly-at-surface behavior, air pockets, one-minute depletion,
+post-depletion damage until death, surface recovery, chunk borders, water
+flow/partial submersion, save/load, reconnect, duplicate damage requests, and
+respawn reset. Breath processing must be bounded per simulation tick and must
+not run in the render loop.
+
+### 21.4 Thirst is optional and gated
 
 Do not add thirst to the first playable survival pass. Hunger, health, cooking,
 and item progression already create a complete basic loop. Add thirst only if
@@ -2855,7 +3750,7 @@ branches and the Regeneration 1.0 gate together.
 
 ## 24. Performance and stability implementation contract
 
-This feature adds work in nearly every hot pathâ€“world updates, items, entities,
+This feature adds work in nearly every hot path–world updates, items, entities,
 inventory, crafting, lighting, networking, and rendering. Performance is an
 acceptance criterion, not a later optimization task. Implement the ownership,
 queue, and scheduling limits below before adding large amounts of content.
@@ -3062,7 +3957,7 @@ transaction rather than repeated list scans and per-card lock/unlock cycles.
 Define and expose hard caps for selected chunks per regeneration session,
 in-flight generation jobs, queued result count/bytes, snapshot halo size,
 visible ground items, active nearby creatures, per-chunk item/entity records,
-recipe catalog size, inventory slots, deck size (20â€“100), card draw count, and
+recipe catalog size, inventory slots, deck size (20–100), card draw count, and
 network message size. Validate the cap before allocation. Estimate worst-case
 temporary memory as:
 
@@ -3165,7 +4060,7 @@ checked fixed-point/integer math for skill multipliers and resource costs.
 ### 25.2 Provisional armor profiles
 
 The values below are a starting balance fixture for a 100-HP character and
-typical early attacks around 20â€“35 raw damage. They are config data and must be
+typical early attacks around 20–35 raw damage. They are config data and must be
 adjusted from combat tests, not constants spread across attack code.
 
 | Set | Head / chest / legs / boots flat reduction | Full-set identity | Tradeoff |
@@ -3271,7 +4166,7 @@ the cloth-set benefit. Add a small, understandable first spell list:
 | Ward | Grant a short, capped flat-defense effect | 20 focus, 8-second cooldown |
 
 These costs and values are balance examples. A separate configurable `focus`
-resource (candidate 0â€“100 with slow server-tick regeneration) pays for spells;
+resource (candidate 0–100 with slow server-tick regeneration) pays for spells;
 it is not hunger or saturation. Every spell has stable ID, validated target
 rules, range, cost, cooldown, effect duration, and maximum stack policy. The
 server atomically checks/spends focus and applies the effect. Repeated cast
@@ -3282,11 +4177,11 @@ should favor a few useful spells over a large spell scripting system.
 
 The initial gear triangle is:
 
-- **Cloth + staff â€“ flexible magic:** lower flat defense, broader utility,
+- **Cloth + staff – flexible magic:** lower flat defense, broader utility,
   healing/ward options, and configurable spell efficiency.
-- **Leather + bow â€“ mobile ranged:** medium defense, movement advantage, and
+- **Leather + bow – mobile ranged:** medium defense, movement advantage, and
   stronger bow damage, balanced by ammunition and close-range vulnerability.
-- **Iron + sword + shield â€“ tanky melee:** highest flat defense and guard
+- **Iron + sword + shield – tanky melee:** highest flat defense and guard
   potential, balanced by slower movement and close-range positioning.
 
 These are recommended builds and tutorial presets, not exclusive classes.
@@ -3424,10 +4319,10 @@ avatars and bound animation/update work by visible nearby players.
 Progress update (2026-10-11): Card transfer application now restores the inventory, card-session and journal snapshots when terminal persistence fails. The world-item validator injects terminal-save failure and checks rollback to PREPARED followed by a successful exact retry; its source compiles with strict MinGW warnings, but runtime execution remains unverified because bundled Git Bash fails to create its MSYS named object (NtCreateDirectoryObject, 0xC0000022). GameSession card-intent compensation now reports errors from chunk removal and card/rules snapshot restoration instead of masking them with the initial failure. GameSession.cpp passes strict Windows MinGW syntax compilation. Durable host-intent transaction coordination and the atomic World Loom start remain unfinished.
 
 
-Progress update (2026-10-11): WorldRevisionServer confirm now requires a configured host committer instead of directly starting generation. It forwards actor/Loom identity, request ID, both expected revisions, and a 4â€“7 opening-card count; cached exact retries call the host once, while changed request payloads are rejected. The World Revision validator covers the delegation boundary, exact retry, changed-payload rejection, and fail-closed confirmation without a configured committer; strict MinGW syntax compilation passes. The production GameSession coordinator is not wired yet, so resource debit, opening deal, durable chunk reservation/barriers, and recoverable generation commit remain open.
+Progress update (2026-10-11): WorldRevisionServer confirm now requires a configured host committer instead of directly starting generation. It forwards actor/Loom identity, request ID, both expected revisions, and a 4–7 opening-card count; cached exact retries call the host once, while changed request payloads are rejected. The World Revision validator covers the delegation boundary, exact retry, changed-payload rejection, and fail-closed confirmation without a configured committer; strict MinGW syntax compilation passes. The production GameSession coordinator is not wired yet, so resource debit, opening deal, durable chunk reservation/barriers, and recoverable generation commit remain open.
 
 
-Progress update (2026-10-11): RegenerationCardSession now has a persisted, request-idempotent opening-deal operation that extends the four-card bootstrap hand to the quoted 4â€“7 cards before any card action or transfer. The validator checks draw/hand counts and retry across snapshot restore. Strict MinGW compilation passes; runtime execution remains unverified through the current Make runner. Resource debit and World Loom transaction wiring remain open.
+Progress update (2026-10-11): RegenerationCardSession now has a persisted, request-idempotent opening-deal operation that extends the four-card bootstrap hand to the quoted 4–7 cards before any card action or transfer. The validator checks draw/hand counts and retry across snapshot restore. Strict MinGW compilation passes; runtime execution remains unverified through the current Make runner. Resource debit and World Loom transaction wiring remain open.
 
 
 Progress update (2026-10-11): GameSession now provides a bindable World Revision commit callback. It rechecks quoted revisions/cost, checkpoints a prepared shared-journal record, debits currency, applies the persisted opening deal, starts generation and checkpoints the terminal record; pre-generation failures restore inventory/cards and abort. Startup aborts prepared starts because the draft/selection is not persisted. Strict MinGW syntax compilation passes. The app does not yet construct/bind a production WorldRevisionServer, and durable draft, chunk reservation, barriers, and crash-consistent generation recovery remain open.
@@ -3649,7 +4544,7 @@ built-in blocks and generation version 10. Strict syntax compilation passes;
 runtime catalog and workstation transaction validation remain open.
 
 Volcano footprint configuration (2026-10-12): GameSession now accepts a
-pre-start 9â€“16 chunk footprint setting. The setting flows through the
+pre-start 9–16 chunk footprint setting. The setting flows through the
 generation manifest, paid-square preflight, revision reservation and worker
 terrain scaling. Width 9 retains the previous manifest hash; non-default widths
 are bound into the manifest. WorldRevisionValidator source now includes a
@@ -3742,7 +4637,7 @@ Validator sweep and stale expectations (2026-10-13): A direct MinGW link assembl
 
 RegenerationCard validator stack and snapshot verification (2026-10-13): `RegenerationCardSession` is 502,176 bytes on this build; the physical-import validator held five sessions locally, exceeding the Windows default thread stack. It now allocates those fixtures on the heap with explicit allocation-failure handling. Strict MinGW warning-as-error syntax compilation passes. A focused executable built from current session, CardGame, inventory and validator sources ran the exact physical-import validator successfully, including three physical-card imports, script context, restored mapping, exact retry, and byte-identical RCS snapshot replay. This resolves the reported RCS byte mismatch for that path. The full Libft suite, other application validators and `--validate-all` remain unverified.
 
-Regeneration Card validator recovery and Volcano Mark preflight (2026-10-13): The physical-import validator now heap-allocates its five 502 KB session fixtures, preventing Windows stack overflow; its RCS serialize/restore/retry byte comparison passes. The World Rules validatorâ€™s second Surveyorâ€™s Reach fixture now uses a distinct chunk coordinate so it exercises the configured cap, and `RegenerationWorldRules::preflight_card_effect` admits the special Volcano Mark definition (15) through its ID guard. The current RegenerationCardValidator executable passes end to end (`regeneration-cards: ok`, result 0); both changed sources pass strict MinGW warning-as-error compilation. Full Libft tests and application-wide validators remain unverified.
+Regeneration Card validator recovery and Volcano Mark preflight (2026-10-13): The physical-import validator now heap-allocates its five 502 KB session fixtures, preventing Windows stack overflow; its RCS serialize/restore/retry byte comparison passes. The World Rules validator’s second Surveyor’s Reach fixture now uses a distinct chunk coordinate so it exercises the configured cap, and `RegenerationWorldRules::preflight_card_effect` admits the special Volcano Mark definition (15) through its ID guard. The current RegenerationCardValidator executable passes end to end (`regeneration-cards: ok`, result 0); both changed sources pass strict MinGW warning-as-error compilation. Full Libft tests and application-wide validators remain unverified.
 
 CardGame host-intent snapshot and replay coverage (2026-10-13): The byte snapshot test now restores into an engine with the same registered callback/rules manifest as the source; the previous fixture omitted a callback whose presence is intentionally included in the rules hash. Its direct MinGW runtime harness passes checksum rejection, snapshot restore, pending records, hash equality and no-mutation-on-invalid-snapshot checks. The multi-draw serialized replay test now compares each pending host-intent sequence, schema ID/version, field type and field value after replay deserialization; its direct MinGW runtime harness passes. Both test files pass strict warning-as-error syntax compilation. The full Libft suite remains unverified; direct linking its existing response file fails because its object/archive set has mismatched sections and missing renderer symbols.
 
