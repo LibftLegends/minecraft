@@ -22,7 +22,14 @@ class EntityState
 		PLAYER,
 		ZOMBIE,
 		CREEPER,
-		SKELETON
+		SKELETON,
+		BOAT,
+		COW,
+		PIG,
+		CHICKEN,
+		SHEEP,
+		SPIDER,
+		PROJECTILE
 	};
 
 	enum class ActionState

@@ -24,7 +24,7 @@ int32_t WorldRevisionRequestApplier::validate_request_chunks(WorldRevisionManage
 	const std::vector<WorldRevisionManager::RevisionChunk> &selected_chunks,
 	const std::vector<WorldRevisionManager::RevisionChunk> &protected_chunks) noexcept
 {
-	const uint32_t valid_stage_mask = TERRAIN_STAGE_BASE_TERRAIN | TERRAIN_STAGE_CAVES | TERRAIN_STAGE_FLUIDS | TERRAIN_STAGE_DECORATION | TERRAIN_STAGE_STRUCTURES | TERRAIN_STAGE_ORES;
+	const uint32_t valid_stage_mask = VOXEL_STAGE_BASE_TERRAIN | VOXEL_STAGE_CAVES | VOXEL_STAGE_FLUIDS | VOXEL_STAGE_DECORATION | VOXEL_STAGE_STRUCTURES | VOXEL_STAGE_ORES;
 
 	if ((stage_mask & ~valid_stage_mask) != 0U)
 		return (FT_ERR_INVALID_ARGUMENT);
@@ -36,8 +36,9 @@ int32_t WorldRevisionRequestApplier::validate_request_chunks(WorldRevisionManage
 			return (FT_ERR_INVALID_OPERATION);
 		for (const WorldRevisionManager::RevisionChunk &protected_entry : protected_chunks)
 		{
-			if (std::abs(selected.chunk_x - protected_entry.chunk_x) <= 1
-				&& std::abs(selected.chunk_z - protected_entry.chunk_z) <= 1)
+			if (WorldRevisionChunkSet::within_protection_ring(
+					selected.chunk_x, selected.chunk_z,
+					protected_entry.chunk_x, protected_entry.chunk_z))
 				return (FT_ERR_INVALID_OPERATION);
 		}
 	}
@@ -73,7 +74,7 @@ int32_t WorldRevisionRequestApplier::apply_protection_and_selection(WorldRevisio
 }
 
 int32_t WorldRevisionRequestApplier::apply(WorldRevisionManager &manager,
-	World &world, const terrain_generation_config &config, int32_t mode,
+	World &world, const voxel_generation_config &config, int32_t mode,
 	uint32_t stage_mask,
 	const std::vector<WorldRevisionManager::RevisionChunk> &selected_chunks,
 	const std::vector<WorldRevisionManager::RevisionChunk> &protected_chunks,

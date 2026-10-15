@@ -1,4 +1,227 @@
 #include "../../src/validators/WorldVisibilityValidator.hpp"
+#include <cmath>
+#include <chrono>
+#include <cstdio>
+#include <memory>
+#include <new>
+#include <thread>
+
+static void visibility_validation_phase(const char *phase,
+	const std::chrono::steady_clock::time_point &started) noexcept
+{
+	const uint64_t elapsed_ms = static_cast<uint64_t>(
+		std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now() - started).count());
+	std::fprintf(stderr, "visible-distance: phase=%s elapsed_ms=%llu\n",
+		phase, static_cast<unsigned long long>(elapsed_ms));
+	std::fflush(stderr);
+}
+
+static bool wait_for_required_visible_distance(World &world,
+	const Camera &camera) noexcept
+{
+	const std::chrono::steady_clock::time_point deadline =
+		std::chrono::steady_clock::now() + std::chrono::seconds(30);
+	int32_t error_code;
+
+	while (std::chrono::steady_clock::now() < deadline)
+	{
+		error_code = world.update_around(camera.x, camera.z, 0,
+			WorldCoordinates::REQUIRED_VISIBLE_DISTANCE);
+		if (error_code != FT_ERR_SUCCESS)
+			return (false);
+		if (WorldVisibilityValidator::validate_visible_distance(world,
+				camera.x, camera.z, camera.yaw,
+				WorldCoordinates::REQUIRED_VISIBLE_DISTANCE))
+			return (true);
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	World::StreamDiagnostics diagnostics = world.stream_diagnostics();
+	std::size_t absent_count = 0U;
+	std::size_t queued_count = 0U;
+	std::size_t generating_count = 0U;
+	std::size_t failed_count = 0U;
+	std::size_t ready_candidate_count = 0U;
+	for (const WorldChunkStreamer::StreamCandidate &candidate
+		: world.chunk_streamer.stream_candidates_)
+	{
+		if (candidate.state == WorldChunkStreamer::CANDIDATE_ABSENT)
+			absent_count += 1U;
+		else if (candidate.state == WorldChunkStreamer::CANDIDATE_QUEUED)
+			queued_count += 1U;
+		else if (candidate.state == WorldChunkStreamer::CANDIDATE_GENERATING)
+			generating_count += 1U;
+		else if (candidate.state == WorldChunkStreamer::CANDIDATE_FAILED_RETRYABLE)
+			failed_count += 1U;
+		else if (candidate.state == WorldChunkStreamer::CANDIDATE_READY)
+			ready_candidate_count += 1U;
+	}
+	std::fprintf(stderr,
+		"visible-distance: async stream timeout loaded=%d pending=%zu "
+		"ready=%zu active=%zu failed=%zu candidates={absent=%zu queued=%zu "
+		"generating=%zu failed=%zu ready=%zu cursor=%zu}\n",
+		world.loaded_chunk_count,
+		diagnostics.pending_count, diagnostics.ready_count,
+		diagnostics.active_generation_count, diagnostics.failed_count,
+		absent_count, queued_count, generating_count, failed_count,
+		ready_candidate_count, world.chunk_streamer.stream_candidate_cursor_);
+	return (false);
+}
+
+static bool wait_for_chunk_state(World &world, double camera_x,
+	double camera_z, int32_t chunk_x, int32_t chunk_z, bool expected_present)
+	noexcept
+{
+	const std::chrono::steady_clock::time_point deadline =
+		std::chrono::steady_clock::now() + std::chrono::seconds(30);
+	int32_t error_code;
+
+	while (std::chrono::steady_clock::now() < deadline)
+	{
+		error_code = world.update_around(camera_x, camera_z, 0,
+			WorldCoordinates::REQUIRED_VISIBLE_DISTANCE);
+		if (error_code != FT_ERR_SUCCESS)
+			return (false);
+		if ((world.find_chunk(chunk_x, chunk_z) != nullptr)
+			== expected_present)
+			return (true);
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	World::StreamDiagnostics diagnostics = world.stream_diagnostics();
+	std::fprintf(stderr,
+		"slot-reuse: async state timeout chunk=(%d,%d) expected=%s "
+		"loaded=%d pending=%zu ready=%zu active=%zu failed=%zu\n", chunk_x,
+		chunk_z, expected_present ? "present" : "absent",
+		world.loaded_chunk_count, diagnostics.pending_count,
+		diagnostics.ready_count, diagnostics.active_generation_count,
+		diagnostics.failed_count);
+	return (false);
+}
+
+static bool required_light_converged(const World &world,
+	const Camera &camera) noexcept
+{
+	const int32_t radius = 1;
+	const int32_t center_chunk_x = WorldCoordinates::floor_divide(
+		static_cast<int32_t>(camera.x), GAME_VOXEL_CHUNK_WIDTH);
+	const int32_t center_chunk_z = WorldCoordinates::floor_divide(
+		static_cast<int32_t>(camera.z), GAME_VOXEL_CHUNK_DEPTH);
+	int32_t index;
+
+	index = 0;
+	while (index < world.chunk_count)
+	{
+		const WorldChunk &chunk = world.chunks[index];
+		const int32_t offset_x = chunk.chunk_x - center_chunk_x;
+		const int32_t offset_z = chunk.chunk_z - center_chunk_z;
+		if (chunk.initialized == true
+			&& offset_x * offset_x + offset_z * offset_z <= radius * radius
+			&& (chunk.mesh_dirty || chunk.pending_mesh_request_id != 0U
+				|| chunk.light_revision == 0U))
+			return (false);
+		index += 1;
+	}
+	return (true);
+}
+
+static bool wait_for_required_light_convergence(World &world,
+	const Camera &camera) noexcept
+{
+	const std::chrono::steady_clock::time_point deadline =
+		std::chrono::steady_clock::now() + std::chrono::seconds(30);
+	int32_t error_code;
+
+	while (std::chrono::steady_clock::now() < deadline)
+	{
+		error_code = world.update_around(camera.x, camera.z, 0,
+			WorldCoordinates::REQUIRED_VISIBLE_DISTANCE);
+		if (error_code != FT_ERR_SUCCESS)
+			return (false);
+		if (required_light_converged(world, camera))
+			return (true);
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	World::StreamDiagnostics diagnostics = world.stream_diagnostics();
+	std::size_t capture_task_count;
+	{
+		std::lock_guard<std::mutex> capture_lock(
+			world.chunk_streamer.remesh_capture_mutex_);
+		capture_task_count = world.chunk_streamer.remesh_capture_tasks_.size();
+	}
+	std::fprintf(stderr,
+		"visible-distance: light convergence timeout pending=%zu active=%zu "
+		"stale=%zu pipeline_queued=%zu pipeline_active=%zu "
+		"remesh_in_flight=%zu capture_tasks=%zu capture_in_flight=%zu "
+		"priority=%zu next_submit=%llu frame=%llu\n",
+		diagnostics.pending_count,
+		diagnostics.active_generation_count, diagnostics.stale_result_count,
+		world.chunk_streamer.pipeline().queued_count(),
+		world.chunk_streamer.pipeline().active_count(),
+		world.chunk_streamer.pipeline().remesh_in_flight_count(),
+		capture_task_count,
+		world.chunk_streamer.remesh_capture_in_flight_.load(),
+		world.chunk_streamer.priority_remeshes_.size(),
+		static_cast<unsigned long long>(
+			world.chunk_streamer.next_remesh_submission_frame_),
+		static_cast<unsigned long long>(world.chunk_streamer.stream_frame_));
+	{
+		std::size_t priority_index = 0U;
+		for (const WorldChunkStreamer::RemeshPriority &priority
+			: world.chunk_streamer.priority_remeshes_)
+		{
+			const WorldChunk *priority_chunk = world.find_chunk(
+				priority.chunk_x, priority.chunk_z);
+			std::fprintf(stderr,
+				"visible-distance: priority[%zu] chunk=(%d,%d) interactive=%d "
+				"dirty=%d pending=%llu waits=%d dependency=(%d,%d)\n",
+				priority_index, priority.chunk_x, priority.chunk_z,
+				priority.interactive ? 1 : 0,
+				priority_chunk != nullptr && priority_chunk->mesh_dirty ? 1 : 0,
+				priority_chunk == nullptr ? 0ULL : static_cast<unsigned long long>(
+					priority_chunk->pending_mesh_request_id),
+				priority_chunk != nullptr && priority_chunk->waits_for_neighbor_light
+					? 1 : 0,
+				priority_chunk == nullptr ? 0 : priority_chunk->light_dependency_chunk_x,
+				priority_chunk == nullptr ? 0 : priority_chunk->light_dependency_chunk_z);
+			priority_index += 1U;
+			if (priority_index >= 12U)
+				break ;
+		}
+	}
+	{
+		const int32_t radius = 1;
+		const int32_t center_chunk_x = WorldCoordinates::floor_divide(
+			static_cast<int32_t>(camera.x), GAME_VOXEL_CHUNK_WIDTH);
+		const int32_t center_chunk_z = WorldCoordinates::floor_divide(
+			static_cast<int32_t>(camera.z), GAME_VOXEL_CHUNK_DEPTH);
+		int32_t index = 0;
+		while (index < world.chunk_count)
+		{
+			const WorldChunk &chunk = world.chunks[index];
+			const int32_t offset_x = chunk.chunk_x - center_chunk_x;
+			const int32_t offset_z = chunk.chunk_z - center_chunk_z;
+			if (chunk.initialized == true
+				&& offset_x * offset_x + offset_z * offset_z <= radius * radius
+				&& (chunk.mesh_dirty
+					|| chunk.pending_mesh_request_id != 0U
+					|| chunk.light_revision == 0U))
+				std::fprintf(stderr,
+					"visible-distance: light gap chunk=(%d,%d) dirty=%d "
+					"pending=%llu light_revision=%llu mesh_revision=%llu "
+					"waits_for_neighbor=%d dependency=(%d,%d)\n",
+					chunk.chunk_x, chunk.chunk_z, chunk.mesh_dirty ? 1 : 0,
+					static_cast<unsigned long long>(
+						chunk.pending_mesh_request_id),
+					static_cast<unsigned long long>(chunk.light_revision),
+					static_cast<unsigned long long>(chunk.mesh_revision),
+					chunk.waits_for_neighbor_light ? 1 : 0,
+					chunk.light_dependency_chunk_x,
+					chunk.light_dependency_chunk_z);
+			index += 1;
+		}
+	}
+	return (false);
+}
 
 WorldVisibilityValidator::WorldVisibilityValidator()
 {
@@ -22,22 +245,29 @@ WorldVisibilityValidator &WorldVisibilityValidator::operator=(const WorldVisibil
 
 int WorldVisibilityValidator::validate() const
 {
-	World world;
+	std::unique_ptr<World> world_storage(new (std::nothrow) World());
+	if (world_storage == nullptr)
+		return (1);
+	World &world = *world_storage;
 	Camera validation_camera;
 	int32_t error_code;
+	const std::chrono::steady_clock::time_point validation_started =
+		std::chrono::steady_clock::now();
 
+	visibility_validation_phase("initialize-start", validation_started);
 	error_code = world.initialize("integration-seed");
 	if (error_code != FT_ERR_SUCCESS)
 		return (1);
+	visibility_validation_phase("initialize-complete", validation_started);
 	validation_camera.initialize();
 	PlayerController::spawn_player_on_ground(&validation_camera, world);
-	error_code = world.update_around(validation_camera.x, validation_camera.z,
-			WorldCoordinates::CHUNK_COUNT);
-	if (error_code != FT_ERR_SUCCESS)
+	visibility_validation_phase("full-stream-start", validation_started);
+	if (!wait_for_required_visible_distance(world, validation_camera))
 	{
 		world.destroy();
 		return (1);
 	}
+	visibility_validation_phase("async-stream-complete", validation_started);
 	if (validate_visible_distance(world, validation_camera.x,
 			validation_camera.z, validation_camera.yaw,
 			WorldCoordinates::REQUIRED_VISIBLE_DISTANCE) == false)
@@ -49,10 +279,284 @@ int WorldVisibilityValidator::validate() const
 		world.destroy();
 		return (1);
 	}
+	if (!wait_for_required_light_convergence(world, validation_camera))
+	{
+		world.destroy();
+		return (1);
+	}
+	visibility_validation_phase("visible-distance-complete", validation_started);
+	if (validate_height_invariant(world) == false)
+	{
+		world.destroy();
+		return (1);
+	}
+	visibility_validation_phase("height-invariant-complete", validation_started);
+	if (validate_streamed_mesh_drawability(world) == false)
+	{
+		world.destroy();
+		return (1);
+	}
+	visibility_validation_phase("drawability-complete", validation_started);
+	if (validate_streamed_culling_admission(world, validation_camera)
+		== false)
+	{
+		world.destroy();
+		return (1);
+	}
+	visibility_validation_phase("culling-admission-complete", validation_started);
+	if (validate_same_coordinate_slot_reuse(world, validation_camera)
+		== false)
+	{
+		world.destroy();
+		return (1);
+	}
+	visibility_validation_phase("slot-reuse-complete", validation_started);
+	/* Move the stream center by one chunk and rebuild it through the bounded
+	 * asynchronous path. This
+	 * exercises storage-slot reuse and verifies that newly assigned chunks keep
+	 * their coordinates, mesh bounds, and solid/water index partitions. */
+	validation_camera.x += static_cast<double>(GAME_VOXEL_CHUNK_WIDTH);
+	if (wait_for_required_visible_distance(world, validation_camera))
+		error_code = FT_ERR_SUCCESS;
+	else
+		error_code = FT_ERR_TIMEOUT;
+	visibility_validation_phase("recenter-complete", validation_started);
+	if (error_code != FT_ERR_SUCCESS
+		|| !wait_for_required_light_convergence(world, validation_camera)
+		|| validate_height_invariant(world) == false
+		|| validate_streamed_mesh_drawability(world) == false
+		|| validate_streamed_culling_admission(world, validation_camera)
+			== false)
+	{
+		std::fprintf(stderr,
+			"visible-distance: recenter validation failed error=%d loaded=%d\n",
+			error_code, world.loaded_chunk_count);
+		world.destroy();
+		return (1);
+	}
 	std::printf("visible-distance: ok required=%d chunks_loaded=%d\n",
 		WorldCoordinates::REQUIRED_VISIBLE_DISTANCE, world.loaded_chunk_count);
 	world.destroy();
 	return (0);
+}
+
+bool WorldVisibilityValidator::validate_height_invariant(const World &world)
+{
+	int32_t chunk_index;
+	int32_t local_x;
+	int32_t local_y;
+	int32_t local_z;
+	int32_t highest_solid_y;
+	uint32_t block_id;
+	double collision_surface_y;
+	int32_t center_x;
+	int32_t center_z;
+
+	chunk_index = 0;
+	while (chunk_index < world.chunk_count)
+	{
+		const WorldChunk &chunk = world.chunks[chunk_index];
+
+		if (chunk.initialized == true)
+		{
+			if (chunk.world_x != chunk.chunk_x * GAME_VOXEL_CHUNK_WIDTH
+				|| chunk.world_z != chunk.chunk_z * GAME_VOXEL_CHUNK_DEPTH)
+			{
+				std::fprintf(stderr,
+					"height-invariant: offset mismatch slot=%d chunk=(%d,%d) world=(%d,%d)\n",
+					chunk_index, chunk.chunk_x, chunk.chunk_z,
+					chunk.world_x, chunk.world_z);
+				return (false);
+			}
+			highest_solid_y = -1;
+			local_z = 0;
+			while (local_z < GAME_VOXEL_CHUNK_DEPTH)
+			{
+				local_x = 0;
+				while (local_x < GAME_VOXEL_CHUNK_WIDTH)
+				{
+					local_y = GAME_VOXEL_CHUNK_HEIGHT - 1;
+					while (local_y >= 0)
+					{
+						if (chunk.chunk.read_block(local_x, local_y,
+							local_z, &block_id) != FT_ERR_SUCCESS)
+							return (false);
+						if (block_id != GAME_VOXEL_AIR_BLOCK)
+						{
+							if (local_y > highest_solid_y)
+								highest_solid_y = local_y;
+							break;
+						}
+						local_y -= 1;
+					}
+					local_x += 1;
+				}
+				local_z += 1;
+			}
+			if (highest_solid_y >= 0
+				&& (chunk.mesh.has_occupied_bounds == FT_FALSE
+					|| chunk.mesh.occupied_bounds.maximum_y
+						!= highest_solid_y + 1))
+			{
+				std::fprintf(stderr,
+					"height-invariant: mesh mismatch slot=%d chunk=(%d,%d) solid_top=%d mesh_max_y=%d\n",
+					chunk_index, chunk.chunk_x, chunk.chunk_z,
+					highest_solid_y,
+					chunk.mesh.occupied_bounds.maximum_y);
+				return (false);
+			}
+			if (chunk.mesh.indices.size()
+				!= chunk.mesh.solid_indices.size()
+					+ chunk.mesh.water_indices.size())
+			{
+				std::fprintf(stderr,
+					"mesh-invariant: partition mismatch slot=%d chunk=(%d,%d) "
+					"indices=%zu solid=%zu water=%zu\n", chunk_index,
+					chunk.chunk_x, chunk.chunk_z, chunk.mesh.indices.size(),
+					chunk.mesh.solid_indices.size(),
+					chunk.mesh.water_indices.size());
+				return (false);
+			}
+			center_x = chunk.world_x + (GAME_VOXEL_CHUNK_WIDTH / 2);
+			center_z = chunk.world_z + (GAME_VOXEL_CHUNK_DEPTH / 2);
+			if (world.surface_top_at(center_x, center_z,
+					&collision_surface_y) == false)
+				return (false);
+		}
+		chunk_index += 1;
+	}
+	return (true);
+}
+
+bool WorldVisibilityValidator::validate_streamed_mesh_drawability(
+	const World &world)
+{
+	int32_t index;
+
+	index = 0;
+	while (index < world.chunk_count)
+	{
+		const WorldChunk &chunk = world.chunks[index];
+		if (chunk.initialized == true
+			&& chunk.mesh.has_occupied_bounds == FT_TRUE
+			&& (chunk.mesh.vertices.empty() == FT_TRUE
+				|| (chunk.mesh.solid_indices.empty() == FT_TRUE
+					&& chunk.mesh.water_indices.empty() == FT_TRUE)))
+		{
+			std::fprintf(stderr,
+				"drawability-invariant: empty draw payload slot=%d "
+				"chunk=(%d,%d) vertices=%zu solid=%zu water=%zu\n", index,
+				chunk.chunk_x, chunk.chunk_z, chunk.mesh.vertices.size(),
+				chunk.mesh.solid_indices.size(),
+				chunk.mesh.water_indices.size());
+			return (false);
+		}
+		index += 1;
+	}
+	return (true);
+}
+
+bool WorldVisibilityValidator::validate_streamed_culling_admission(
+	const World &world, const Camera &camera)
+{
+	RenderCache cache;
+	int32_t index;
+	double closest_x;
+	double closest_z;
+	double distance_squared;
+	double envelope;
+
+	cache.configure(camera, 1280, 720, world.active_render_distance);
+	envelope = cache.render_distance + std::sqrt(static_cast<double>(
+		GAME_VOXEL_CHUNK_WIDTH * GAME_VOXEL_CHUNK_WIDTH
+		+ GAME_VOXEL_CHUNK_DEPTH * GAME_VOXEL_CHUNK_DEPTH));
+	index = 0;
+	while (index < world.chunk_count)
+	{
+		const WorldChunk &chunk = world.chunks[index];
+		if (chunk.initialized == true
+			&& chunk.mesh.has_occupied_bounds == FT_TRUE)
+		{
+			closest_x = camera.x;
+			if (closest_x < static_cast<double>(chunk.world_x))
+				closest_x = static_cast<double>(chunk.world_x);
+			else if (closest_x > static_cast<double>(chunk.world_x
+				+ GAME_VOXEL_CHUNK_WIDTH))
+				closest_x = static_cast<double>(chunk.world_x
+					+ GAME_VOXEL_CHUNK_WIDTH);
+			closest_z = camera.z;
+			if (closest_z < static_cast<double>(chunk.world_z))
+				closest_z = static_cast<double>(chunk.world_z);
+			else if (closest_z > static_cast<double>(chunk.world_z
+				+ GAME_VOXEL_CHUNK_DEPTH))
+				closest_z = static_cast<double>(chunk.world_z
+					+ GAME_VOXEL_CHUNK_DEPTH);
+			distance_squared = (closest_x - camera.x)
+			* (closest_x - camera.x)
+			+ (closest_z - camera.z) * (closest_z - camera.z);
+			if (distance_squared <= envelope * envelope
+				&& !MeshCuller::chunk_is_visible(camera, chunk, cache))
+			{
+				std::fprintf(stderr,
+					"culling-admission: occupied streamed chunk rejected "
+					"slot=%d chunk=(%d,%d) world=(%d,%d) camera=(%.2f,%.2f) "
+					"render_distance=%.2f\n", index, chunk.chunk_x,
+					chunk.chunk_z, chunk.world_x, chunk.world_z, camera.x,
+					camera.z, cache.render_distance);
+				return (false);
+			}
+		}
+		index += 1;
+	}
+	return (true);
+}
+
+bool WorldVisibilityValidator::validate_same_coordinate_slot_reuse(
+	World &world, const Camera &camera)
+{
+	const WorldChunk *before;
+	const WorldChunk *after;
+	const uint64_t before_revision = world.find_chunk(0, 0) != nullptr
+		? world.find_chunk(0, 0)->mesh_revision : 0U;
+
+	before = world.find_chunk(0, 0);
+	if (before == nullptr || before_revision == 0U)
+	{
+		std::fprintf(stderr,
+			"slot-reuse: initial origin chunk is unavailable\n");
+		return (false);
+	}
+	if (!wait_for_chunk_state(world,
+			camera.x + static_cast<double>(GAME_VOXEL_CHUNK_WIDTH * 13),
+			camera.z, 0, 0, false))
+	{
+		std::fprintf(stderr,
+			"slot-reuse: origin chunk was not evicted\n");
+		return (false);
+	}
+	if (!wait_for_chunk_state(world, camera.x, camera.z, 0, 0, true))
+	{
+		std::fprintf(stderr,
+			"slot-reuse: origin chunk was not regenerated\n");
+		return (false);
+	}
+	after = world.find_chunk(0, 0);
+	if (after == nullptr
+		|| after->mesh_revision == before_revision
+		|| after->mesh.has_occupied_bounds == FT_FALSE)
+	{
+		std::fprintf(stderr,
+			"slot-reuse: regenerated origin identity invalid "
+			"before=%llu after=%llu present=%d occupied=%d\n",
+			static_cast<unsigned long long>(before_revision),
+			after == nullptr ? 0ULL
+				: static_cast<unsigned long long>(after->mesh_revision),
+			after != nullptr ? 1 : 0,
+			after != nullptr && after->mesh.has_occupied_bounds
+				== FT_TRUE ? 1 : 0);
+		return (false);
+	}
+	return (true);
 }
 
 bool WorldVisibilityValidator::validate_visible_distance(const World &world,

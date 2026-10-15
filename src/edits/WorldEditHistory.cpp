@@ -1,7 +1,9 @@
 #include "../../src/chunks/WorldChunkLoader.hpp"
 #include "../../src/edits/WorldEditCommand.hpp"
 #include "../../src/edits/WorldEditHistory.hpp"
+#include "../../src/coordinates/WorldCoordinates.hpp"
 #include "../../src/world/World.hpp"
+#include <algorithm>
 
 WorldEditHistory::WorldEditHistory() : undo_count_(0U), redo_count_(0U)
 {
@@ -59,12 +61,14 @@ bool WorldEditHistory::can_redo() const
 int32_t WorldEditHistory::apply(World &world, const Record &entry,
 	uint32_t block_id_to_write)
 {
+	std::vector<World::FluidCellOverride> staged_overrides;
 	int32_t				chunk_x;
 	int32_t				chunk_z;
 	int32_t				local_x;
 	int32_t				local_z;
 	WorldChunk			*wc;
 	game_block_edit_op	recorded_edit;
+	uint32_t			previous_block_id;
 	int32_t				error_code;
 
 	wc = WorldEditCommand::resolve_chunk(world, entry.edit.world_x,
@@ -72,18 +76,82 @@ int32_t WorldEditHistory::apply(World &world, const Record &entry,
 			local_z);
 	if (!wc)
 		return (FT_ERR_NOT_FOUND);
+	error_code = wc->chunk.read_block(local_x, entry.edit.world_y, local_z,
+		&previous_block_id);
+	if (error_code != FT_ERR_SUCCESS)
+		return (error_code);
+	try
+	{
+		staged_overrides = world.fluid_cell_overrides_;
+		std::size_t index = 0U;
+		for (; index < staged_overrides.size(); ++index)
+			if (staged_overrides[index].world_x == entry.edit.world_x
+				&& staged_overrides[index].world_y == entry.edit.world_y
+				&& staged_overrides[index].world_z == entry.edit.world_z)
+				break ;
+		if (index == staged_overrides.size())
+		{
+			if (staged_overrides.size() >= 16384U)
+				return (FT_ERR_FULL);
+			staged_overrides.push_back({entry.edit.world_x, entry.edit.world_y,
+				entry.edit.world_z, block_id_to_write});
+		}
+		else
+			staged_overrides[index].block_id = block_id_to_write;
+		std::sort(staged_overrides.begin(), staged_overrides.end(),
+			[](const World::FluidCellOverride &left,
+				const World::FluidCellOverride &right)
+			{
+				const int32_t left_chunk_x = WorldCoordinates::floor_divide(
+					left.world_x, GAME_VOXEL_CHUNK_WIDTH);
+				const int32_t right_chunk_x = WorldCoordinates::floor_divide(
+					right.world_x, GAME_VOXEL_CHUNK_WIDTH);
+				const int32_t left_chunk_z = WorldCoordinates::floor_divide(
+					left.world_z, GAME_VOXEL_CHUNK_DEPTH);
+				const int32_t right_chunk_z = WorldCoordinates::floor_divide(
+					right.world_z, GAME_VOXEL_CHUNK_DEPTH);
+				if (left_chunk_x != right_chunk_x)
+					return (left_chunk_x < right_chunk_x);
+				if (left_chunk_z != right_chunk_z)
+					return (left_chunk_z < right_chunk_z);
+				if (left.world_y != right.world_y)
+					return (left.world_y < right.world_y);
+				if (left.world_x != right.world_x)
+					return (left.world_x < right.world_x);
+				return (left.world_z < right.world_z);
+			});
+	}
+	catch (...)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
 	error_code = wc->chunk.write_block(local_x, entry.edit.world_y, local_z,
 			block_id_to_write);
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
+	wc->mark_content_changed();
+	error_code = wc->publish_read_state_after_block_edit(local_x,
+		entry.edit.world_y, local_z, block_id_to_write);
+	if (error_code != FT_ERR_SUCCESS)
+	{
+		(void)wc->chunk.write_block(local_x, entry.edit.world_y, local_z,
+			previous_block_id);
+		return (error_code);
+	}
+	world.fluid_cell_overrides_.swap(staged_overrides);
+	world.mark_geometry_changed();
+	world.chunk_streamer.mark_remesh_dirty(*wc);
 	recorded_edit.world_x = entry.edit.world_x;
 	recorded_edit.world_y = entry.edit.world_y;
 	recorded_edit.world_z = entry.edit.world_z;
 	recorded_edit.block_type = block_id_to_write;
 	recorded_edit.tick = world.current_tick;
 	(void)wc->chunk.record_dirty_edit(recorded_edit);
-	return (WorldChunkLoader::remesh_edited_chunk_border(world.chunks,
-			world.chunk_count, chunk_x, chunk_z, local_x, local_z));
+	(void)world.invalidate_loom_station_if_block_changed(
+		entry.edit.world_x, entry.edit.world_y, entry.edit.world_z,
+		block_id_to_write);
+	world.chunk_streamer.mark_neighbor_remeshes(chunk_x, chunk_z, true);
+	return (FT_ERR_SUCCESS);
 }
 
 int32_t WorldEditHistory::undo(World &world)

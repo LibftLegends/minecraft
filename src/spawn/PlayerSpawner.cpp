@@ -84,5 +84,8 @@ void PlayerSpawner::spawn_player_on_ground(Camera *camera, const World &world)
 			return ;
 		radius = radius + 1;
 	}
-	PlayerGround::drop_camera_to_ground(camera, world);
+	/* Keep the current position if no safe spawn was found. Dropping in place
+	 * could place the player inside an active World Loom reservation barrier. */
+	if (!world.revision_barriers_active())
+		PlayerGround::drop_camera_to_ground(camera, world);
 }

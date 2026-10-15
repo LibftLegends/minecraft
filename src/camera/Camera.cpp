@@ -3,7 +3,7 @@
 const double Camera::MOUSE_SENSITIVITY = 0.0025;
 const double Camera::TURN_SPEED = 1.8;
 const double Camera::LOOK_SPEED = 1.2;
-const double Camera::PITCH_LIMIT = 1.2;
+const double Camera::PITCH_LIMIT = 1.5533430342749532;
 const double Camera::BOOST_MULTIPLIER = 20.0;
 const double Camera::INV_SQRT_2 = 0.7071067811865475;
 
@@ -48,11 +48,20 @@ double Camera::clamp(double value, double minimum, double maximum)
 	return (value);
 }
 
+double Camera::max_pitch()
+{
+	return (Camera::PITCH_LIMIT);
+}
+
 void Camera::initialize()
 {
 	this->x = 0.0;
 	this->y = 78.62;
-	this->z = -8.0;
+	/* World startup seeds the origin chunk before the player is placed. Keep
+	 * the initial spawn query inside that seeded chunk; starting at -8 put the
+	 * player in chunk -1, forcing the first async batch to be invalidated and
+	 * requeued during loading. */
+	this->z = 0.0;
 	this->yaw = 0.0;
 	this->pitch = 0.0;
 	this->speed = 4.0;

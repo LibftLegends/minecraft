@@ -21,6 +21,8 @@ class WorldBlockQuery
 		int32_t world_y, int32_t world_z);
 	static bool block_id_at(const World &world, int32_t world_x,
 		int32_t world_y, int32_t world_z, uint32_t *block_id);
+	static bool light_level_at(const World &world, int32_t world_x,
+		int32_t world_y, int32_t world_z, uint8_t *light_level);
 
   private:
 	static bool find_chunk_local(const World &world, int32_t wx, int32_t wz,

@@ -108,7 +108,8 @@ void SkyboxRenderer::clear_frame(ft_render_framebuffer &framebuffer,
 	const std::vector<uint32_t>	&row_colors = cached_row_colors(
 			framebuffer.height);
 
-	std::fill(depth_buffer.begin(), depth_buffer.end(), 1.0e30);
+	/* The software rasterizer stores inverse depth: larger values are nearer. */
+	std::fill(depth_buffer.begin(), depth_buffer.end(), 0.0);
 	for (int32_t y = 0; y < framebuffer.height; ++y)
 	{
 		row = static_cast<size_t>(y * framebuffer.width);
