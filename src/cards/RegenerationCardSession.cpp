@@ -356,7 +356,7 @@ int32_t RegenerationCardSession::effect_callback(
 			&& context.action_request_id != payload_request_id)
 		{
 			clear_active_context();
-			return (FT_ERR_CONFLICT);
+			return (FT_ERR_INVALID_ARGUMENT);
 		}
 		session->active_request_id_ = regeneration_payload_read_u64(
 			context.play_payload, 0U);

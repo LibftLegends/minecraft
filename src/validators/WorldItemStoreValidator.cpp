@@ -3896,7 +3896,7 @@ int WorldItemStoreValidator::validate() const
 					card_session_test_state, regeneration_rules_test_state,
 					chunk_instability_test_state, revision_metadata_test_state,
 					v13_fluid_state, entity_state, v16_crop_growth_state,
-					static_cast<uint64_t>(0xA17E000000000001ULL),
+						0xA17E000000000001ULL,
 					revision_checkpoint_test);
 		}
 		if (error_code == FT_ERR_SUCCESS
@@ -3919,7 +3919,7 @@ int WorldItemStoreValidator::validate() const
 		}
 		if (error_code == FT_ERR_SUCCESS
 			&& (restored_output_session_id
-				!= static_cast<uint64_t>(0xA17E000000000001ULL)
+							!= 0xA17E000000000001ULL
 				|| restored_crop_policy_state != v16_crop_growth_state
 				|| restored_entity_state != entity_state))
 			error_code = FT_ERR_INVALID_STATE;

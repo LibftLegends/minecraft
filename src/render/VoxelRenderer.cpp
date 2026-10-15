@@ -143,9 +143,11 @@ bool VoxelRenderer::draw_world_item_markers(ft_render_framebuffer &framebuffer,
 				+ left_z * left_z;
 			const double right_distance = right_x * right_x
 				+ right_y * right_y + right_z * right_z;
-			return (left_distance < right_distance
-				|| (left_distance == right_distance
-					&& left.entity_id < right.entity_id));
+			if (left_distance < right_distance)
+				return (true);
+			if (right_distance < left_distance)
+				return (false);
+			return (left.entity_id < right.entity_id);
 		});
 	const std::size_t marker_count = std::min<std::size_t>(
 		visible_items.size(), 48U);

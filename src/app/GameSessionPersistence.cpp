@@ -857,7 +857,7 @@ static int32_t game_session_persistence_load_file(const char *file_path,
 			- static_cast<std::size_t>(chunk_instability_size)
 			- static_cast<std::size_t>(revision_metadata_size)
 			- static_cast<std::size_t>(fluid_state_size)
-			- static_cast<std::size_t>(entity_state_size))
+			- static_cast<std::size_t>(entity_state_size)
 		|| revision_server_state_size > reader.size - reader.offset
 			- static_cast<std::size_t>(character_size)
 			- static_cast<std::size_t>(item_size)

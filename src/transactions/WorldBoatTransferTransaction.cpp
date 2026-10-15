@@ -17,6 +17,11 @@ namespace
 	static const uint32_t BOAT_RETRIEVE = 2U;
 	static const uint32_t BOAT_MOVE = 3U;
 
+	static bool same_double_bits(double left, double right) noexcept
+	{
+		return (std::memcmp(&left, &right, sizeof(double)) == 0);
+	}
+
 	static void append_u32(std::vector<uint8_t> &bytes, uint32_t value)
 	{
 		for (uint32_t shift = 0U; shift < 32U; shift += 8U)
@@ -662,10 +667,14 @@ int32_t WorldBoatTransferTransaction::move_for_actor(
 		{
 			if (expected_entity_revision == UINT64_MAX
 				|| before.revision != expected_entity_revision + 1U
-				|| before.state.position_x != next_state.position_x
-				|| before.state.position_y != next_state.position_y
-				|| before.state.position_z != next_state.position_z
-				|| before.state.orientation_yaw != next_state.orientation_yaw
+				|| !same_double_bits(before.state.position_x,
+					next_state.position_x)
+				|| !same_double_bits(before.state.position_y,
+					next_state.position_y)
+				|| !same_double_bits(before.state.position_z,
+					next_state.position_z)
+				|| !same_double_bits(before.state.orientation_yaw,
+					next_state.orientation_yaw)
 				|| before.owner_actor_id != authenticated_actor_id
 				|| before.item_instance_id
 					!= read_u64(existing.payload, 44U))

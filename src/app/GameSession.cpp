@@ -1342,7 +1342,6 @@ GameSession::GameSession(const GameSession &other)
       cached_vram_mb_(0U), cached_biome_world_x_(0), cached_biome_world_z_(0),
       cached_biome_valid_(false), revision_preview_center_x_(0), revision_preview_center_z_(0),
       revision_preview_identifier_(0U), revision_preview_cache_valid_(false),
-		boat_actor_authorizer_(nullptr), boat_actor_authorizer_user_data_(nullptr),
       revision_preview_cache_(), pickup_request_id_(1U),
 	processing_tick_accumulator_(0.0), error_code_(FT_ERR_SUCCESS)
 {
@@ -1470,13 +1469,13 @@ int GameSession::start(const std::string &seed, ApplicationWindow &window,
 	}
 	for (uint32_t recipe_id : RECIPE_RESEARCH_RECIPE_IDS)
 	{
-		error_code = this->recipe_catalog_.register_discovery_source(
+		error_code_ = this->recipe_catalog_.register_discovery_source(
 			RECIPE_RESEARCH_SOURCE_TYPE, recipe_id, recipe_id);
-		if (error_code != FT_ERR_SUCCESS)
+		if (error_code_ != FT_ERR_SUCCESS)
 		{
 			(void)this->recipe_catalog_.destroy();
 			(void)this->item_catalog_.destroy();
-			return (error_code);
+			return (error_code_);
 		}
 	}
 	startup_restore_stage = "world-item-store-initialization";
@@ -5287,7 +5286,7 @@ int32_t GameSession::research_card_recipe(uint64_t request_id,
 	uint64_t random_state = game_session_recipe_research_seed(this->seed_,
 		request_id, expected_inventory_revision,
 		this->world_.world_revision().identifier);
-	const uint64_t bound = static_cast<uint64_t>(candidates.size());
+	const uint64_t bound = candidates.size();
 	const uint64_t rejection_threshold = (0U - bound) % bound;
 	uint64_t random_value;
 	do
@@ -5652,7 +5651,7 @@ int32_t GameSession::try_launch_equipped_bow() noexcept
 	if (bow == nullptr)
 		return (this->player_character_.get_error());
 	const bool has_bow = *bow
-		&& (*bow)->get_id() == MinecraftItemCatalog::BOW_ITEM_ID;
+		&& (*bow)->get_item_id() == MinecraftItemCatalog::BOW_ITEM_ID;
 	(void)bow->destroy();
 	delete bow;
 	if (!has_bow)

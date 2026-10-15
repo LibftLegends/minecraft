@@ -140,7 +140,7 @@ int32_t BlockInteractor::try_delete_target_block(World *world,
 				error_code = FT_ERR_PERMISSION_DENIED;
 			else
 			{
-				const int32_t item_id = (*equipped_tool)->get_id();
+				const int32_t item_id = (*equipped_tool)->get_item_id();
 				const bool matching_class =
 					required_class == MINECRAFT_MINING_TOOL_PICKAXE
 						? item_id >= MinecraftItemCatalog::WOOD_PICKAXE_ITEM_ID
@@ -183,6 +183,7 @@ int32_t BlockInteractor::try_delete_target_block(World *world,
 			(void)maximum;
 			(void)equipped_tool->destroy();
 			delete equipped_tool;
+		}
 		}
 		else
 		{

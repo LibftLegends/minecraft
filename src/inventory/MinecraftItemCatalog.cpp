@@ -1,5 +1,6 @@
 #include "../../src/inventory/MinecraftItemCatalog.hpp"
 
+#include "../../Libft/Modules/Voxel/voxel_api.hpp"
 #include "../../Libft/Modules/Voxel/voxel_block_registry.hpp"
 #include "../../Libft/Modules/Game/game_inventory.hpp"
 #include <limits>

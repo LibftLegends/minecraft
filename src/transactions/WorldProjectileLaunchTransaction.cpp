@@ -125,7 +125,7 @@ namespace
 		{
 			old_modifier_id = (*bow)->get_modifier1_id();
 			old_modifier_value = (*bow)->get_modifier1_value();
-			if ((*bow)->get_id() != MinecraftItemCatalog::BOW_ITEM_ID
+		if ((*bow)->get_item_id() != MinecraftItemCatalog::BOW_ITEM_ID
 				|| (*bow)->get_instance_id() != read_u64(record.payload, 36U))
 				result = FT_ERR_INVALID_STATE;
 		}
@@ -354,7 +354,7 @@ int32_t WorldProjectileLaunchTransaction::launch(const char *snapshot_path,
 	ft_sharedptr<game_item> *bow = character.get_equipped_item(EQUIP_WEAPON);
 	if (bow == nullptr)
 		return (character.get_error());
-	if (!(*bow) || (*bow)->get_id() != MinecraftItemCatalog::BOW_ITEM_ID
+	if (!(*bow) || (*bow)->get_item_id() != MinecraftItemCatalog::BOW_ITEM_ID
 		|| (*bow)->get_instance_id() == 0U)
 	{
 		(void)bow->destroy();

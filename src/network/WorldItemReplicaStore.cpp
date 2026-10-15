@@ -23,7 +23,6 @@ int32_t WorldItemReplicaStore::replace_chunk(
 	const ProtocolWorldItemSnapshotMessage &snapshot) noexcept
 {
 	std::map<uint64_t, WorldItemSnapshot> staged;
-	std::size_t count = 0U;
 
 	std::lock_guard<std::mutex> lock(this->mutex_);
 	if (!this->initialized_)

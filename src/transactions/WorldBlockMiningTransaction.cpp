@@ -295,14 +295,14 @@ namespace
 					else
 					{
 						if (*equipped_tool
-							&& (*equipped_tool)->get_id()
+									&& (*equipped_tool)->get_item_id()
 								== static_cast<int32_t>(read_u32(
 									record.payload, 92U))
 							&& (*equipped_tool)->get_instance_id()
 								== read_u64(record.payload, 96U))
 						{
 							game_inventory_item_snapshot tool = {};
-							tool.item_id = (*equipped_tool)->get_id();
+									tool.item_id = (*equipped_tool)->get_item_id();
 							tool.instance_id = (*equipped_tool)->get_instance_id();
 							tool.stack_size = 1;
 							tool.max_stack = 1;

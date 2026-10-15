@@ -184,19 +184,6 @@ namespace
 		return (result);
 	}
 
-	MinecraftRecipeIngredientSpec minecraft_recipe_alternatives(
-		const std::vector<int32_t> &item_ids, int32_t quantity)
-	{
-		MinecraftRecipeIngredientSpec result = {};
-		if (item_ids.size()
-			> game_crafting_ingredient::MAX_ALTERNATIVE_ITEM_IDS)
-			return (result);
-		for (int32_t item_id : item_ids)
-			result.item_ids[result.item_id_count++] = item_id;
-		result.quantity = quantity;
-		return (result);
-	}
-
 	int32_t minecraft_block_item_id(uint32_t block_id)
 	{
 		return (MinecraftItemCatalog::BLOCK_ITEM_ID_BASE
