@@ -9,8 +9,13 @@ EntityState::EntityState() : id(0U), type(0U), position_x(0.0), position_y(0.0),
 }
 
 EntityState::EntityState(const EntityState &other)
+	: id(other.id), type(other.type), position_x(other.position_x),
+	  position_y(other.position_y), position_z(other.position_z),
+	  velocity_x(other.velocity_x), velocity_y(other.velocity_y),
+	  velocity_z(other.velocity_z), orientation_yaw(other.orientation_yaw),
+	  orientation_pitch(other.orientation_pitch), health(other.health),
+	  action_state(other.action_state), tick(other.tick)
 {
-	*this = other;
 }
 
 EntityState::~EntityState()

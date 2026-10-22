@@ -668,7 +668,8 @@ namespace
 			{-1, 0}, {1, 0}, {0, -1}, {0, 1},
 			{-1, -1}, {-1, 1}, {1, -1}, {1, 1}
 		};
-		while (frame < LIGHT_HARNESS_MAX_STARTUP_FRAMES)
+		const uint64_t start_frame = frame;
+		while (frame - start_frame < LIGHT_HARNESS_MAX_STARTUP_FRAMES)
 		{
 			lighting_watchdog_heartbeat("startup_neighborhood", frame, 0U);
 			bool ready = chunk_is_ready_for_oracle(world.find_chunk(0, 0));
@@ -682,12 +683,31 @@ namespace
 			}
 			if (ready == true)
 				return (FT_ERR_SUCCESS);
-			int32_t error_code = world.update_around(0.0, 0.0, 0,
+			int32_t error_code = world.update_around(0.0, 0.0, 1,
 				WorldCoordinates::MIN_RENDER_DISTANCE);
 			if (error_code != FT_ERR_SUCCESS)
 				return (error_code);
 			frame += 1U;
 			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+		{
+			const World::StreamDiagnostics diagnostics = world.stream_diagnostics();
+			std::fprintf(stderr,
+				"lighting-harness: startup neighborhood timeout frame="
+				FT_UINT64_DECIMAL_FORMAT " candidates=%zu ready=%zu pending=%zu "
+				"retryable=%zu failed=%zu stream_frame="
+				FT_UINT64_DECIMAL_FORMAT " last_error=%d missing=",
+				frame, diagnostics.candidate_count, diagnostics.ready_count,
+				diagnostics.pending_count, diagnostics.retryable_count,
+				diagnostics.failed_count, diagnostics.frame,
+				diagnostics.last_error);
+			for (const auto &offset : offsets)
+			{
+				const WorldChunk *chunk = world.find_chunk(offset[0], offset[1]);
+				if (chunk == nullptr || !chunk->initialized)
+					std::fprintf(stderr, "(%d,%d) ", offset[0], offset[1]);
+			}
+			std::fprintf(stderr, "\n");
 		}
 		return (FT_ERR_TIMEOUT);
 	}
@@ -933,9 +953,12 @@ namespace
 			world.stream_diagnostics();
 		uint64_t edit_frame = frame;
 		uint64_t elapsed;
+		uint32_t previous_block_id = GAME_VOXEL_AIR_BLOCK;
 		int32_t error_code;
 
 		if (before_chunk == nullptr || !before_chunk->initialized)
+			return (FT_ERR_NOT_FOUND);
+		if (!world.block_id_at(world_x, world_y, world_z, &previous_block_id))
 			return (FT_ERR_NOT_FOUND);
 		error_code = harness.begin_edit(edit_id, frame, world_x, world_y,
 			world_z, before_diagnostics.remesh_scanned_cells,
@@ -943,7 +966,12 @@ namespace
 			before_diagnostics.remesh_full_completed_count);
 		if (error_code != FT_ERR_SUCCESS)
 			return (error_code);
-		if (block_id == GAME_VOXEL_AIR_BLOCK)
+		if (voxel_block_is_fluid_source(previous_block_id) == FT_TRUE
+			|| voxel_block_is_fluid_source(block_id) == FT_TRUE)
+			error_code = world.replace_fluid_source_at(world_x, world_y,
+				world_z, previous_block_id, block_id,
+				before_chunk->voxel_revision);
+		else if (block_id == GAME_VOXEL_AIR_BLOCK)
 			error_code = world.delete_block_at(world_x, world_y, world_z);
 		else
 			error_code = world.place_block_at(world_x, world_y, world_z, block_id);
@@ -1278,8 +1306,22 @@ namespace
 			world.stream_diagnostics().remesh_incremental_completed_count,
 			world.stream_diagnostics().remesh_full_completed_count);
 		if (error_code == FT_ERR_SUCCESS)
-			error_code = world.place_block_at(world_x, world_y, world_z,
-				LIGHT_HARNESS_STONE);
+			try
+			{
+				error_code = world.place_block_at(world_x, world_y, world_z,
+					LIGHT_HARNESS_STONE);
+			}
+			catch (const std::bad_alloc &)
+			{
+				/* The injected global allocator reports failure through new as
+				 * bad_alloc.  Convert it to the API's allocation error and continue
+				 * checking that the failed edit did not publish partial state. */
+				error_code = FT_ERR_NO_MEMORY;
+			}
+			catch (...)
+			{
+				error_code = FT_ERR_INTERNAL;
+			}
 		if (error_code == FT_ERR_SUCCESS)
 		{
 			uint32_t block_id = GAME_VOXEL_AIR_BLOCK;
@@ -1844,8 +1886,22 @@ namespace
 			if (cma_set_alloc_limit(allocation_limits[index])
 				!= FT_ERR_SUCCESS)
 				return (FT_ERR_INTERNAL);
-			error_code = world.place_block_at(world_x, world_y, world_z,
-				LIGHT_HARNESS_STONE);
+			try
+			{
+				error_code = world.place_block_at(world_x, world_y, world_z,
+					LIGHT_HARNESS_STONE);
+			}
+			catch (const std::bad_alloc &)
+			{
+				/* Fault injection also reaches standard-library allocations in
+				 * downstream edit/remesh bookkeeping.  Keep the sweep alive so it
+				 * can verify the edit's failure atomicity instead of terminating. */
+				error_code = FT_ERR_NO_MEMORY;
+			}
+			catch (...)
+			{
+				error_code = FT_ERR_INTERNAL;
+			}
 			if (cma_set_alloc_limit(0U) != FT_ERR_SUCCESS)
 				return (FT_ERR_INTERNAL);
 			if (error_code != FT_ERR_SUCCESS)
@@ -3446,6 +3502,8 @@ int LightingTestHarness::validate_edit_matrix() noexcept
 		error_code = world.initialize("lighting-harness-edits");
 	if (error_code == FT_ERR_SUCCESS)
 		error_code = wait_for_startup(world, frame);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = wait_for_startup_neighborhood(world, frame);
 	if (error_code != FT_ERR_SUCCESS)
 		record_scenario_result(harness, error_code, "edit-matrix-startup",
 			scenario_count, scenario_failure_count, first_failure);

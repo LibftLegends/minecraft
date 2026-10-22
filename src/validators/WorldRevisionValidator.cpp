@@ -1902,7 +1902,7 @@ int32_t WorldRevisionValidator::roundtrip_metadata(World &world) noexcept
 int32_t WorldRevisionValidator::apply_request_test(World &world) noexcept
 {
 	World::RevisionRequest request;
-	World::RevisionRequestResult request_result;
+	World::RevisionRequestResult request_result = {};
 
 	if (request.config.initialize(world.voxel_generation_settings())
 		!= FT_ERR_SUCCESS)
@@ -3284,6 +3284,64 @@ int32_t WorldRevisionValidator::test_game_session_committed_start_retry()
 	return (result);
 }
 
+static bool world_revision_validator_chunk_has_stabilizer_site(
+	const World &world, int32_t chunk_x, int32_t chunk_z) noexcept
+{
+	static const int32_t CENTERS[3U][2U] = {
+		{4, 4}, {12, 4}, {8, 12}};
+	const WorldChunk *chunk = world.find_chunk(chunk_x, chunk_z);
+	if (chunk == nullptr || !chunk->initialized)
+		return (false);
+	for (const auto &center : CENTERS)
+	{
+		int32_t minimum_ground = GAME_VOXEL_CHUNK_HEIGHT;
+		int32_t maximum_ground = -1;
+		bool valid_site = true;
+		for (int32_t offset_z = -2; offset_z <= 2 && valid_site; ++offset_z)
+		{
+			for (int32_t offset_x = -2; offset_x <= 2 && valid_site; ++offset_x)
+			{
+				int32_t ground_y = -1;
+				for (int32_t y = GAME_VOXEL_CHUNK_HEIGHT - 8; y >= 2; --y)
+				{
+					uint32_t block = GAME_VOXEL_AIR_BLOCK;
+					if (chunk->chunk.read_block(center[0] + offset_x, y,
+							center[1] + offset_z, &block) != FT_ERR_SUCCESS)
+						return (false);
+					if (voxel_block_is_solid(block) != FT_FALSE)
+					{
+						ground_y = y;
+						break ;
+					}
+					if (block != GAME_VOXEL_AIR_BLOCK)
+						break ;
+				}
+				if (ground_y < 2 || ground_y + 7 >= GAME_VOXEL_CHUNK_HEIGHT)
+				{
+					valid_site = false;
+					break ;
+				}
+				for (int32_t y = ground_y + 1; y <= ground_y + 6; ++y)
+				{
+					uint32_t block = GAME_VOXEL_AIR_BLOCK;
+					if (chunk->chunk.read_block(center[0] + offset_x, y,
+							center[1] + offset_z, &block) != FT_ERR_SUCCESS
+						|| block != GAME_VOXEL_AIR_BLOCK)
+					{
+						valid_site = false;
+					break ;
+					}
+				}
+				minimum_ground = std::min(minimum_ground, ground_y);
+				maximum_ground = std::max(maximum_ground, ground_y);
+			}
+		}
+		if (valid_site && minimum_ground == maximum_ground)
+			return (true);
+	}
+	return (false);
+}
+
 int32_t WorldRevisionValidator::test_game_session_volatile_stabilizer()
 	noexcept
 {
@@ -3309,6 +3367,10 @@ int32_t WorldRevisionValidator::test_game_session_volatile_stabilizer()
 	World::WorldRevision revision;
 	uint64_t selection_revision = 0U;
 	uint32_t stabilizer_uses = 0U;
+	int32_t stabilizer_chunk_x = 0;
+	int32_t stabilizer_chunk_z = 0;
+	int32_t player_chunk_x = 0;
+	int32_t player_chunk_z = 0;
 	uint32_t spawner_id = 0U;
 	uint32_t spawner_entity_id = 0U;
 	uint32_t first_instance_id = 0U;
@@ -3338,6 +3400,16 @@ int32_t WorldRevisionValidator::test_game_session_volatile_stabilizer()
 	failure_stage = "start-first-session";
 	if (result == FT_ERR_SUCCESS)
 		result = session->start(seed, window, *renderer);
+	if (result == FT_ERR_SUCCESS)
+	{
+		ft_bool recipe_newly_known = FT_FALSE;
+		failure_stage = "unlock-stabilizer-card-recipe-fixture";
+		result = session->recipe_catalog_.unlock_recipe(
+			MinecraftRecipeCatalog::VOLATILE_STABILIZER_CARD_RECIPE_ID,
+			0x53544142494C495AULL, &recipe_newly_known);
+		if (result == FT_ERR_SUCCESS && recipe_newly_known != FT_TRUE)
+			result = FT_ERR_INVALID_STATE;
+	}
 	if (result == FT_ERR_SUCCESS)
 	{
 		EntityState chicken_state;
@@ -3769,6 +3841,78 @@ int32_t WorldRevisionValidator::test_game_session_volatile_stabilizer()
 	}
 	if (result == FT_ERR_SUCCESS)
 	{
+		bool opportunity_found = false;
+		World::RevisionProtectionInfo protection = {};
+		failure_stage = "prepare-stabilizer-opportunity-site";
+		player_chunk_x = WorldCoordinates::floor_divide(
+			session->player_character_.get_x(), GAME_VOXEL_CHUNK_WIDTH);
+		player_chunk_z = WorldCoordinates::floor_divide(
+			session->player_character_.get_z(), GAME_VOXEL_CHUNK_DEPTH);
+		/* Fixture terrain is written through the generator path, which leaves
+		 * the chunk eligible for regeneration; ordinary player edits do not. */
+		for (int32_t radius = 0; radius <= 32 && !opportunity_found; ++radius)
+		{
+			for (int32_t z = -radius; z <= radius && !opportunity_found; ++z)
+			{
+				for (int32_t x = -radius; x <= radius
+					&& !opportunity_found; ++x)
+				{
+					if (std::abs(x) != radius && std::abs(z) != radius)
+						continue;
+					/* Selection correctly rejects the player's chunk and its
+					 * immediate ring; avoid choosing a fixture that only fails when
+					 * the restored session republishes occupancy. */
+					if (std::abs(x - player_chunk_x) <= 1
+						&& std::abs(z - player_chunk_z) <= 1)
+						continue;
+					const WorldChunk *candidate =
+						session->world_.find_chunk(x, z);
+					if (candidate == nullptr || !candidate->initialized)
+						continue;
+					if (session->world_.get_revision_protection_info(x, z,
+							&protection) != FT_ERR_SUCCESS)
+						continue;
+					if (protection.generation_protected || protection.loom_safe_zone
+						|| protection.manually_protected
+						|| protection.occupied_player_exclusion)
+						continue;
+					opportunity_found = true;
+					stabilizer_chunk_x = x;
+					stabilizer_chunk_z = z;
+				}
+			}
+		}
+		if (!opportunity_found)
+			result = FT_ERR_NOT_FOUND;
+		if (result == FT_ERR_SUCCESS)
+		{
+			WorldChunk *opportunity_chunk = session->world_.find_chunk_mutable(
+				stabilizer_chunk_x, stabilizer_chunk_z);
+			if (opportunity_chunk == nullptr || !opportunity_chunk->initialized)
+				result = FT_ERR_NOT_FOUND;
+			/* Set generated terrain rather than player overrides, preserving the
+			 * chunk's unprotected state for selection and persistence validation. */
+			for (int32_t z = 2; z <= 6 && result == FT_ERR_SUCCESS; ++z)
+			{
+				for (int32_t x = 2; x <= 6 && result == FT_ERR_SUCCESS; ++x)
+				{
+					result = opportunity_chunk->chunk.write_generated_block(x, 248,
+						z, VOXEL_GENERATOR_STONE_BLOCK_ID);
+					for (int32_t y = 249; y <= 254
+						&& result == FT_ERR_SUCCESS; ++y)
+						result = opportunity_chunk->chunk.write_generated_block(x, y,
+							z, GAME_VOXEL_AIR_BLOCK);
+				}
+			}
+			if (result == FT_ERR_SUCCESS
+				&& (!world_revision_validator_chunk_has_stabilizer_site(
+					session->world_, stabilizer_chunk_x, stabilizer_chunk_z)
+					|| opportunity_chunk->chunk.is_generation_protected() == FT_TRUE))
+				result = FT_ERR_INVALID_STATE;
+		}
+	}
+	if (result == FT_ERR_SUCCESS)
+	{
 		failure_stage = "begin-fixture-revision";
 		result = session->world_.begin_world_revision(
 			session->world_.voxel_generation_settings(),
@@ -3780,7 +3924,8 @@ int32_t WorldRevisionValidator::test_game_session_volatile_stabilizer()
 		revision = session->world_.world_revision();
 		selection_revision = revision.selection_revision;
 		result = session->world_.update_revision_chunk_selection(
-			selection_revision, 4U, 2, 0, true, &selection_revision);
+			selection_revision, WorldRevisionManager::HARD_MAX_SELECTED_CHUNKS,
+			stabilizer_chunk_x, stabilizer_chunk_z, true, &selection_revision);
 	}
 	if (result == FT_ERR_SUCCESS)
 	{
@@ -3796,9 +3941,11 @@ int32_t WorldRevisionValidator::test_game_session_volatile_stabilizer()
 	if (result == FT_ERR_SUCCESS)
 	{
 		session->world_loom_start_committed_ = true;
-		result = session->world_.get_chunk_instability(2, 0, &record);
+		result = session->world_.get_chunk_instability(stabilizer_chunk_x,
+			stabilizer_chunk_z, &record);
 	}
-	failure_stage = "put-stabilizers-in-hand";
+	if (result == FT_ERR_SUCCESS)
+		failure_stage = "put-stabilizers-in-hand";
 	for (uint32_t ordinal = 0U; ordinal < 2U
 		&& result == FT_ERR_SUCCESS; ++ordinal)
 	{
@@ -3816,14 +3963,17 @@ int32_t WorldRevisionValidator::test_game_session_volatile_stabilizer()
 		else if (result == FT_ERR_SUCCESS)
 			second_instance_id = card.instance_id;
 	}
-	failure_stage = "first-success-outcome";
+	if (result == FT_ERR_SUCCESS)
+		failure_stage = "first-success-outcome";
 	choice.kind = REGENERATION_CARD_CHOICE_NONE;
-	failure_stage = "first-success-retry";
+	if (result == FT_ERR_SUCCESS)
+		failure_stage = "first-success-retry";
 	if (result == FT_ERR_SUCCESS)
 		result = session->play_regeneration_card(FIRST_REQUEST_ID,
 			first_instance_id, choice, &first_intent);
 	if (result == FT_ERR_SUCCESS)
-		result = session->world_.get_chunk_instability(2, 0, &record);
+		result = session->world_.get_chunk_instability(stabilizer_chunk_x,
+			stabilizer_chunk_z, &record);
 	if (result == FT_ERR_SUCCESS && (record.current_value != 15U
 		|| first_intent.private_result != 0U
 		|| first_intent.private_ordinal != 0U))
@@ -3832,17 +3982,20 @@ int32_t WorldRevisionValidator::test_game_session_volatile_stabilizer()
 		result = session->play_regeneration_card(FIRST_REQUEST_ID,
 			first_instance_id, choice, &replayed_first_intent);
 	if (result == FT_ERR_SUCCESS)
-		result = session->world_.get_chunk_instability(2, 0, &record);
+		result = session->world_.get_chunk_instability(stabilizer_chunk_x,
+			stabilizer_chunk_z, &record);
 	if (result == FT_ERR_SUCCESS && (record.current_value != 15U
 		|| !replayed_first_intent.replayed
 		|| replayed_first_intent.private_result != 0U))
 		result = FT_ERR_INVALID_STATE;
-	failure_stage = "second-overload-outcome";
+	if (result == FT_ERR_SUCCESS)
+		failure_stage = "second-overload-outcome";
 	if (result == FT_ERR_SUCCESS)
 		result = session->play_regeneration_card(SECOND_REQUEST_ID,
 			second_instance_id, choice, &second_intent);
 	if (result == FT_ERR_SUCCESS)
-		result = session->world_.get_chunk_instability(2, 0, &record);
+		result = session->world_.get_chunk_instability(stabilizer_chunk_x,
+			stabilizer_chunk_z, &record);
 	if (result == FT_ERR_SUCCESS && (record.current_value != 22U
 		|| second_intent.private_result != 0U
 		|| second_intent.private_ordinal != 0U))
@@ -3856,27 +4009,39 @@ int32_t WorldRevisionValidator::test_game_session_volatile_stabilizer()
 					== REGENERATION_MODIFIER_STABILIZER_OVERLOAD);
 			}))
 		result = FT_ERR_INVALID_STATE;
-	failure_stage = "second-overload-use-count";
+	if (result == FT_ERR_SUCCESS)
+		failure_stage = "second-overload-use-count";
 	if (result == FT_ERR_SUCCESS)
 		result = session->regeneration_world_rules_.
 			get_volatile_stabilizer_use_count(&stabilizer_uses);
 	if (result == FT_ERR_SUCCESS && stabilizer_uses != 2U)
 		result = FT_ERR_INVALID_STATE;
-	failure_stage = "stop-first-session";
+	if (result == FT_ERR_SUCCESS)
+		failure_stage = "stop-first-session";
 	if (session->active_)
 		session->stop();
-	failure_stage = "configure-restored-session";
 	if (result == FT_ERR_SUCCESS)
+	{
+		failure_stage = "configure-restored-instability-policy";
 		result = restored->configure_chunk_instability_policy(instability_policy);
+	}
 	if (result == FT_ERR_SUCCESS)
+	{
+		failure_stage = "configure-restored-stabilizer-policy";
 		result = restored->configure_volatile_stabilizer_policy(risk_curve, 2U,
 			5, 7);
+	}
 	if (result == FT_ERR_SUCCESS)
+	{
+		failure_stage = "configure-restored-clock-provider";
 		result = restored->configure_revision_clock_provider(
 			&world_revision_validator_clock, &clock_epoch_ms);
-	failure_stage = "start-restored-session";
+	}
 	if (result == FT_ERR_SUCCESS)
+	{
+		failure_stage = "start-restored-session";
 		result = restored->start(seed, window, *renderer);
+	}
 	if (result == FT_ERR_SUCCESS)
 	{
 		std::vector<WorldItemSnapshot> restored_eggs;
@@ -3929,7 +4094,8 @@ int32_t WorldRevisionValidator::test_game_session_volatile_stabilizer()
 	if (result == FT_ERR_SUCCESS)
 		failure_stage = "restored-session-instability";
 	if (result == FT_ERR_SUCCESS)
-		result = restored->world_.get_chunk_instability(2, 0, &record);
+		result = restored->world_.get_chunk_instability(stabilizer_chunk_x,
+			stabilizer_chunk_z, &record);
 	if (result == FT_ERR_SUCCESS && record.current_value != 22U)
 		result = FT_ERR_INVALID_STATE;
 	if (result == FT_ERR_SUCCESS
@@ -3951,7 +4117,8 @@ int32_t WorldRevisionValidator::test_game_session_volatile_stabilizer()
 	if (result == FT_ERR_SUCCESS)
 		failure_stage = "restored-retry-check";
 	if (result == FT_ERR_SUCCESS)
-		result = restored->world_.get_chunk_instability(2, 0, &record);
+		result = restored->world_.get_chunk_instability(stabilizer_chunk_x,
+			stabilizer_chunk_z, &record);
 	if (result == FT_ERR_SUCCESS && (record.current_value != 22U
 		|| !restored_retry_intent.replayed))
 		result = FT_ERR_INVALID_STATE;

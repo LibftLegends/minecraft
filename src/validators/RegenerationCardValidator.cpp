@@ -32,35 +32,49 @@ int RegenerationCardValidator::validate_sequenced_choice_expiry() noexcept
 	std::vector<uint8_t> restored_snapshot;
 	std::vector<uint8_t> legacy_snapshot;
 	uint32_t resolved_count = UINT32_MAX;
-	if (!source || !restored
-		|| source->initialize(4U, 0x455850495259ULL) != FT_ERR_SUCCESS
-		|| source->resolve_expired_choices(0x4558504952590001ULL,
-			100U, &resolved_count) != FT_ERR_SUCCESS
-		|| resolved_count != 0U
-		|| source->serialize_snapshot(snapshot) != FT_ERR_SUCCESS
-		|| source->resolve_expired_choices(0x4558504952590001ULL,
-			100U, &resolved_count) != FT_ERR_SUCCESS
-		|| resolved_count != 0U
-		|| source->serialize_snapshot(retry_snapshot) != FT_ERR_SUCCESS
-		|| snapshot != retry_snapshot
-		|| source->resolve_expired_choices(0x4558504952590001ULL,
-			200U, &resolved_count) != FT_ERR_INVALID_ARGUMENT
-		|| source->serialize_snapshot(retry_snapshot) != FT_ERR_SUCCESS
-		|| snapshot != retry_snapshot
-		|| restored->restore_snapshot(snapshot.data(), snapshot.size())
-			!= FT_ERR_SUCCESS
-		|| restored->serialize_snapshot(restored_snapshot) != FT_ERR_SUCCESS
-		|| restored->resolve_expired_choices(0x4558504952590001ULL,
-			100U, &resolved_count) != FT_ERR_SUCCESS
-		|| resolved_count != 0U
-		|| restored->serialize_snapshot(retry_snapshot) != FT_ERR_SUCCESS
-		|| restored_snapshot != retry_snapshot)
+	const auto fail_stage = [](const char *stage) noexcept
+	{
+		std::fprintf(stderr,
+			"regeneration-cards: sequenced choice expiry stage=%s failed\n",
+			stage);
 		return (1);
+	};
+	if (!source || !restored
+		|| source->initialize(4U, 0x455850495259ULL) != FT_ERR_SUCCESS)
+		return (fail_stage("initialize"));
+	if (source->resolve_expired_choices(0x4558504952590001ULL,
+			100U, &resolved_count) != FT_ERR_SUCCESS || resolved_count != 0U)
+		return (fail_stage("initial-empty-resolution"));
+	if (source->serialize_snapshot(snapshot) != FT_ERR_SUCCESS)
+		return (fail_stage("initial-snapshot"));
+	if (source->resolve_expired_choices(0x4558504952590001ULL,
+			100U, &resolved_count) != FT_ERR_SUCCESS || resolved_count != 0U)
+		return (fail_stage("same-request-retry"));
+	if (source->serialize_snapshot(retry_snapshot) != FT_ERR_SUCCESS
+		|| snapshot != retry_snapshot)
+		return (fail_stage("retry-idempotency"));
+	if (source->resolve_expired_choices(0x4558504952590001ULL,
+			200U, &resolved_count) != FT_ERR_INVALID_ARGUMENT)
+		return (fail_stage("changed-epoch-rejection"));
+	if (source->serialize_snapshot(retry_snapshot) != FT_ERR_SUCCESS
+		|| snapshot != retry_snapshot)
+		return (fail_stage("rejection-atomicity"));
+	if (restored->restore_snapshot(snapshot.data(), snapshot.size())
+		!= FT_ERR_SUCCESS)
+		return (fail_stage("snapshot-restore"));
+	if (restored->serialize_snapshot(restored_snapshot) != FT_ERR_SUCCESS)
+		return (fail_stage("restored-snapshot"));
+	if (restored->resolve_expired_choices(0x4558504952590001ULL,
+			100U, &resolved_count) != FT_ERR_SUCCESS || resolved_count != 0U)
+		return (fail_stage("restored-same-request-retry"));
+	if (restored->serialize_snapshot(retry_snapshot) != FT_ERR_SUCCESS
+		|| restored_snapshot != retry_snapshot)
+		return (fail_stage("restored-retry-idempotency"));
 	if (restored->resolve_expired_choices(0x4558504952590001ULL,
 			300U, &resolved_count) != FT_ERR_INVALID_ARGUMENT
 		|| restored->serialize_snapshot(retry_snapshot) != FT_ERR_SUCCESS
 		|| restored_snapshot != retry_snapshot)
-		return (1);
+		return (fail_stage("restored-changed-epoch-rejection"));
 	try
 	{
 		legacy_snapshot = snapshot;

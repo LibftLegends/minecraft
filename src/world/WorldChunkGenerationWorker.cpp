@@ -1374,6 +1374,14 @@ namespace
 		if (metadata->occludes_faces != FT_FALSE
 			|| metadata->light_attenuation >= 15U)
 			return (0U);
+		/* The above cell may still carry the old dark value because the
+		 * opaque block being removed prevented its prior skylight. Re-open a
+		 * true sky column from voxel geometry instead of inheriting that stale
+		 * derived light sample. */
+		if (local_y + 1 >= GAME_VOXEL_CHUNK_HEIGHT
+			|| snapshot_column_has_direct_sky(snapshot, chunk_x, chunk_z,
+				local_x, local_y + 1, local_z))
+			return (15U);
 		attenuation = metadata->light_attenuation;
 		if (local_y + 1 >= GAME_VOXEL_CHUNK_HEIGHT)
 			source_sky = 15U;
@@ -1714,6 +1722,18 @@ namespace
 		return (voxel_light_pack(sky_light, block_light));
 	}
 
+	std::size_t incremental_removal_seen_index(int32_t x, int32_t y,
+		int32_t z, uint8_t channel) noexcept
+	{
+		const std::size_t voxel_index =
+			(static_cast<std::size_t>(z)
+				* static_cast<std::size_t>(GAME_VOXEL_CHUNK_HEIGHT)
+				+ static_cast<std::size_t>(y))
+				* static_cast<std::size_t>(GAME_VOXEL_CHUNK_WIDTH)
+			+ static_cast<std::size_t>(x);
+		return (voxel_index * 2U + static_cast<std::size_t>(channel));
+	}
+
 	uint8_t incremental_recomputed_channel(const voxel_light_chunk &light,
 		const WorldGenerationPipeline::WorldChunkSnapshot &snapshot,
 		int32_t chunk_x, int32_t chunk_z, int32_t x, int32_t y, int32_t z,
@@ -1733,6 +1753,12 @@ namespace
 			chunk_z * GAME_VOXEL_CHUNK_DEPTH + z, &block_id) != FT_ERR_SUCCESS)
 			return (0U);
 		metadata = &voxel_get_block_metadata(block_id);
+		if (channel == 1U)
+		{
+			result = voxel_block_emitted_light_level(block_id);
+			if (result != 0U)
+				return (result);
+		}
 		if (metadata->light_attenuation >= 15U
 			|| metadata->occludes_faces != FT_FALSE)
 			return (0U);
@@ -1740,8 +1766,6 @@ namespace
 			&& snapshot_column_has_direct_sky(snapshot, chunk_x, chunk_z,
 				x, y, z))
 			result = 15U;
-		if (channel == 1U)
-			result = voxel_block_emitted_light_level(block_id);
 		while (direction < 6U)
 		{
 			const int32_t source_x = x + delta_x[direction];
@@ -1755,11 +1779,13 @@ namespace
 				&& source_y >= 0 && source_y < GAME_VOXEL_CHUNK_HEIGHT
 				&& source_z >= 0 && source_z < GAME_VOXEL_CHUNK_DEPTH)
 				source_light = light.get(source_x, source_y, source_z);
-			else if (WorldChunkSnapshotReader::lookup_snapshot_light(
-				const_cast<WorldGenerationPipeline::WorldChunkSnapshot *>(&snapshot),
-				chunk_x * GAME_VOXEL_CHUNK_WIDTH + source_x, source_y,
-				chunk_z * GAME_VOXEL_CHUNK_DEPTH + source_z, &source_light)
-				!= FT_ERR_SUCCESS)
+			else if (snapshot.lighting_halo_blocked != FT_FALSE
+				|| WorldChunkSnapshotReader::lookup_snapshot_light(
+					const_cast<WorldGenerationPipeline::WorldChunkSnapshot *>(
+						&snapshot),
+					chunk_x * GAME_VOXEL_CHUNK_WIDTH + source_x, source_y,
+					chunk_z * GAME_VOXEL_CHUNK_DEPTH + source_z, &source_light)
+					!= FT_ERR_SUCCESS)
 			{
 				direction += 1U;
 				continue ;
@@ -1787,6 +1813,7 @@ namespace
 		const std::shared_ptr<std::atomic<uint64_t>> &cancellation_token,
 		uint64_t cancellation_token_value,
 		std::vector<incremental_removal_node> &removal_queue,
+		std::vector<uint8_t> &removal_queued_cells,
 		std::size_t *removal_queue_index,
 		std::vector<incremental_removal_node> &addition_queue,
 		std::size_t *addition_queue_index,
@@ -1845,6 +1872,11 @@ namespace
 		{
 			try
 			{
+				const std::size_t voxel_count =
+					static_cast<std::size_t>(GAME_VOXEL_CHUNK_WIDTH)
+					* static_cast<std::size_t>(GAME_VOXEL_CHUNK_DEPTH)
+					* static_cast<std::size_t>(GAME_VOXEL_CHUNK_HEIGHT);
+				removal_queued_cells.assign(voxel_count * 2U, 0U);
 				removal_queue.reserve(128U);
 				addition_queue.reserve(128U);
 			}
@@ -1853,6 +1885,28 @@ namespace
 				return (FT_ERR_NO_MEMORY);
 			}
 		}
+		auto enqueue_removal = [&](int32_t x, int32_t y, int32_t z,
+			uint8_t channel, uint8_t level) -> int32_t
+		{
+			const std::size_t seen_index = incremental_removal_seen_index(
+				x, y, z, channel);
+			/* Keep the strongest frontier level seen at this cell.  A weaker
+			 * arrival must not fan out repeatedly, but a later stronger path must
+			 * be allowed through so removal remains correct in branching light
+			 * fields. */
+			if (removal_queued_cells[seen_index] >= level)
+				return (FT_ERR_SUCCESS);
+			try
+			{
+				removal_queue.push_back({x, y, z, channel, level});
+			}
+			catch (...)
+			{
+				return (FT_ERR_NO_MEMORY);
+			}
+			removal_queued_cells[seen_index] = level;
+			return (FT_ERR_SUCCESS);
+		};
 		if (*state_initialized == FT_FALSE && external_source != FT_FALSE)
 		{
 			int32_t source_world_x = chunk_x * GAME_VOXEL_CHUNK_WIDTH
@@ -1914,8 +1968,9 @@ namespace
 					? static_cast<uint8_t>(new_source_level - attenuation) : 0U;
 				if (old_contribution > 0U)
 				{
-					removal_queue.push_back({changed_x, changed_y, changed_z,
-						channel, old_contribution});
+					if (enqueue_removal(changed_x, changed_y, changed_z,
+						channel, old_contribution) != FT_ERR_SUCCESS)
+						return (FT_ERR_NO_MEMORY);
 					if (incremental_channel_value(light.get(changed_x,
 						changed_y, changed_z), channel) <= old_contribution
 						&& light.set(changed_x, changed_y, changed_z,
@@ -1931,13 +1986,15 @@ namespace
 			const uint8_t old_light = light.get(changed_x, changed_y, changed_z);
 			if (voxel_light_sky(old_light) != 0U)
 			{
-				removal_queue.push_back({changed_x, changed_y, changed_z, 0U,
-					voxel_light_sky(old_light)});
+				if (enqueue_removal(changed_x, changed_y, changed_z, 0U,
+					voxel_light_sky(old_light)) != FT_ERR_SUCCESS)
+					return (FT_ERR_NO_MEMORY);
 			}
 			if (voxel_light_block(old_light) != 0U)
 			{
-				removal_queue.push_back({changed_x, changed_y, changed_z, 1U,
-					voxel_light_block(old_light)});
+				if (enqueue_removal(changed_x, changed_y, changed_z, 1U,
+					voxel_light_block(old_light)) != FT_ERR_SUCCESS)
+					return (FT_ERR_NO_MEMORY);
 			}
 			if (light.set(changed_x, changed_y, changed_z, 0U)
 				!= FT_ERR_SUCCESS)
@@ -2048,33 +2105,35 @@ namespace
 							!= FT_ERR_SUCCESS)
 							return (FT_ERR_NO_MEMORY);
 					}
-					else if (current != 0U && current <= node.level)
+					else if (current != 0U)
 					{
-						if (light.set(x, y, z,
-							incremental_set_channel(light.get(x, y, z),
-								node.channel, 0U)) != FT_ERR_SUCCESS)
-							return (FT_ERR_NO_MEMORY);
-						removal_queue.push_back({x, y, z, node.channel,
-							current});
+						const std::size_t seen_index =
+							incremental_removal_seen_index(x, y, z,
+								node.channel);
+
+						if (removal_queued_cells[seen_index] < current)
 						{
-							const uint8_t replacement =
-								incremental_recomputed_channel(light, snapshot, chunk_x,
-									chunk_z, x, y, z, node.channel);
-							if (replacement != 0U)
+							if (light.set(x, y, z,
+								incremental_set_channel(light.get(x, y, z),
+									node.channel, 0U)) != FT_ERR_SUCCESS)
+								return (FT_ERR_NO_MEMORY);
+							if (enqueue_removal(x, y, z, node.channel,
+								current) != FT_ERR_SUCCESS)
+								return (FT_ERR_NO_MEMORY);
+							/* Defer replacement discovery until the complete removal
+							 * frontier has drained. Re-seeding from neighbors while
+							 * doomed light is still present resurrects the removed source. */
+							try
 							{
-								if (light.set(x, y, z,
-									incremental_set_channel(light.get(x, y, z),
-										node.channel, replacement))
-									!= FT_ERR_SUCCESS)
-									return (FT_ERR_NO_MEMORY);
-								addition_queue.push_back({x, y, z, node.channel,
-									replacement});
+								addition_queue.push_back({x, y, z,
+									node.channel, 0U});
+							}
+							catch (...)
+							{
+								return (FT_ERR_NO_MEMORY);
 							}
 						}
 					}
-					else if (current > node.level)
-						addition_queue.push_back({x, y, z, node.channel,
-							current});
 				}
 				direction += 1U;
 			}
@@ -2114,6 +2173,33 @@ namespace
 					cancellation_token_value))
 				return (FT_ERR_INVALID_STATE);
 			const incremental_removal_node node = addition_queue[index];
+			if (node.level == 0U)
+			{
+				const uint8_t replacement = incremental_recomputed_channel(light,
+					snapshot, chunk_x, chunk_z, node.x, node.y, node.z,
+					node.channel);
+				const uint8_t current = incremental_channel_value(
+					light.get(node.x, node.y, node.z), node.channel);
+				if (replacement > current)
+				{
+					if (light.set(node.x, node.y, node.z,
+						incremental_set_channel(light.get(node.x, node.y, node.z),
+							node.channel, replacement)) != FT_ERR_SUCCESS)
+						return (FT_ERR_NO_MEMORY);
+					try
+					{
+						addition_queue.push_back({node.x, node.y, node.z,
+							node.channel, replacement});
+					}
+					catch (...)
+					{
+						return (FT_ERR_NO_MEMORY);
+					}
+				}
+				index += 1U;
+				*processed += 1U;
+				continue ;
+			}
 			static const int32_t delta_x[6] = {1, -1, 0, 0, 0, 0};
 			static const int32_t delta_y[6] = {0, 0, 1, -1, 0, 0};
 			static const int32_t delta_z[6] = {0, 0, 0, 0, 1, -1};
@@ -2169,6 +2255,25 @@ namespace
 		*addition_queue_index = index;
 		if (index < addition_queue.size())
 			return (FT_ERR_SUCCESS);
+		/* Preserve a newly exposed direct-sky source after subtracting the old
+		 * light field.  Removal nodes from the pre-edit field may revisit this
+		 * voxel, but they must not win over the block geometry in the new
+		 * snapshot. */
+		const voxel_block_metadata &new_block_metadata =
+			voxel_get_block_metadata(new_block_id);
+		if (external_source == FT_FALSE
+			&& (old_block_id != new_block_id)
+			&& new_block_metadata.occludes_faces == FT_FALSE
+			&& new_block_metadata.light_attenuation == 0U
+			&& snapshot_column_has_direct_sky(snapshot, chunk_x, chunk_z,
+				changed_x, changed_y + 1, changed_z))
+		{
+			const uint8_t packed = light.get(changed_x, changed_y, changed_z);
+			if (light.set(changed_x, changed_y, changed_z,
+				voxel_light_pack(15U, voxel_light_block(packed)))
+				!= FT_ERR_SUCCESS)
+				return (FT_ERR_NO_MEMORY);
+		}
 		removal_queue.clear();
 		addition_queue.clear();
 		*removal_queue_index = 0U;
@@ -2626,6 +2731,10 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 					request.incremental_light_seeds[
 						request.incremental_seed_index];
 				uint64_t seed_processed = 0U;
+				#if defined(LIBFT_ENABLE_ANALYTICS)
+				const uint64_t processed_before =
+					request.incremental_processed_cells;
+				#endif
 				ft_bool preserve_existing =
 					(request.incremental_seed_index == 0U
 						&& request.incremental_removal_state_initialized == FT_FALSE
@@ -2653,6 +2762,7 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 						seed.old_source_light, request.cancellation_token,
 						request.cancellation_token_value,
 						request.incremental_removal_queue,
+						request.incremental_removal_queued_cells,
 						&request.incremental_removal_queue_index,
 						request.incremental_removal_addition_queue,
 						&request.incremental_removal_addition_queue_index,
@@ -2661,6 +2771,25 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 						node_budget, &seed_complete,
 						request.incremental_removal_external_new_channel);
 				request.incremental_processed_cells += seed_processed;
+			#if defined(LIBFT_ENABLE_ANALYTICS)
+				if (seed.removal != FT_FALSE
+					&& request.incremental_processed_cells / 65536U
+						> processed_before / 65536U)
+				{
+					std::fprintf(stderr,
+						"[WorldLight] removal progress request=%llu chunk=(%d,%d) "
+						"processed=%llu slice=%llu remove=%zu/%zu add=%zu/%zu\n",
+						static_cast<unsigned long long>(request.request_id),
+						request.chunk_x, request.chunk_z,
+						static_cast<unsigned long long>(
+							request.incremental_processed_cells),
+						static_cast<unsigned long long>(seed_processed),
+						request.incremental_removal_queue_index,
+						request.incremental_removal_queue.size(),
+						request.incremental_removal_addition_queue_index,
+						request.incremental_removal_addition_queue.size());
+				}
+			#endif
 				if (error_code != FT_ERR_SUCCESS)
 				{
 					result->error_code = error_code;
@@ -2768,7 +2897,9 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 					seed_index != 0U ? FT_TRUE : FT_FALSE,
 					seed.external_source, seed.old_source_light,
 					request.cancellation_token, request.cancellation_token_value,
-					removal_queue, &removal_queue_index,
+					removal_queue,
+					request.incremental_removal_queued_cells,
+					&removal_queue_index,
 					removal_addition_queue, &removal_addition_queue_index,
 					&removal_state_initialized, &removal_addition_started,
 					0xffffffffU, &result->incremental_light_deltas_complete,

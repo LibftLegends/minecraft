@@ -9,6 +9,11 @@ class RecipeDiscoveryTransaction
   public:
 	static int32_t execute(MinecraftRecipeCatalog &recipe_catalog,
 		uint32_t source_type_id, uint32_t source_id,
+		uint64_t source_event_id,
+		const GameSessionSnapshotWriter &snapshot_writer,
+		game_recipe_unlock_result *result_out) noexcept;
+	static int32_t execute(MinecraftRecipeCatalog &recipe_catalog,
+		uint32_t source_type_id, uint32_t source_id,
 		uint64_t source_event_id, const GameSessionSnapshotWriter &snapshot_writer,
 		ft_bool *newly_unlocked) noexcept;
 };

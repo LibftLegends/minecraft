@@ -1102,7 +1102,7 @@ namespace
 	static int32_t game_session_find_volcano_square(
 		const std::vector<World::RevisionChunkCoordinate> &paid_selected,
 		const std::vector<World::RevisionChunkCoordinate> &all_selected,
-		uint64_t reserved_chunk_count, uint32_t chunk_width) noexcept
+		std::size_t reserved_chunk_count, uint32_t chunk_width) noexcept
 	{
 		std::vector<WorldRevisionManager::RevisionChunk> selected_records;
 		std::vector<WorldRevisionManager::RevisionChunk> reserved_records;
@@ -1117,8 +1117,7 @@ namespace
 		try
 		{
 			selected_records.reserve(all_selected.size());
-			reserved_records.reserve(static_cast<std::size_t>(
-				reserved_chunk_count));
+			reserved_records.reserve(reserved_chunk_count);
 			for (const World::RevisionChunkCoordinate &chunk : all_selected)
 			{
 				const bool bonus = std::find_if(paid_selected.begin(),
@@ -1130,9 +1129,9 @@ namespace
 						}) == paid_selected.end();
 				selected_records.push_back({chunk.chunk_x, chunk.chunk_z, bonus});
 			}
-			for (uint64_t index = 0U; index < reserved_chunk_count; ++index)
+			for (std::size_t index = 0U; index < reserved_chunk_count; ++index)
 				reserved_records.push_back(
-					selected_records[static_cast<std::size_t>(index)]);
+					selected_records[index]);
 		}
 		catch (...)
 		{
@@ -2928,10 +2927,10 @@ int32_t GameSession::query_regeneration_card_effect_status(
 		uint32_t pending_count = 0U;
 		uint64_t reserved_single_chunks = 0U;
 		uint64_t reserved_volcano_plans = 0U;
-		uint64_t reserved_shipwreck_plans = 0U;
-		uint64_t reserved_pyramid_plans = 0U;
-		uint64_t reserved_canopy_plans = 0U;
-		uint64_t reserved_spider_nest_plans = 0U;
+		std::size_t reserved_shipwreck_plans = 0U;
+		std::size_t reserved_pyramid_plans = 0U;
+		std::size_t reserved_canopy_plans = 0U;
+		std::size_t reserved_spider_nest_plans = 0U;
 		uint64_t volcano_footprint = static_cast<uint64_t>(
 			this->volcano_mark_footprint_chunks_)
 			* this->volcano_mark_footprint_chunks_;
@@ -3059,7 +3058,7 @@ int32_t GameSession::query_regeneration_card_effect_status(
 			std::vector<uint8_t> site_masks;
 			std::vector<uint8_t> visited_chunks;
 			std::vector<int32_t> chunk_jobs;
-			const uint64_t job_count = reserved_shipwreck_plans
+			const std::size_t job_count = reserved_shipwreck_plans
 				+ reserved_pyramid_plans + reserved_canopy_plans
 				+ reserved_spider_nest_plans;
 
@@ -3069,15 +3068,15 @@ int32_t GameSession::query_regeneration_card_effect_status(
 			{
 				try
 				{
-					job_types.reserve(static_cast<std::size_t>(job_count));
+					job_types.reserve(job_count);
 					job_types.insert(job_types.end(),
-						static_cast<std::size_t>(reserved_shipwreck_plans), 1U);
+						reserved_shipwreck_plans, 1U);
 					job_types.insert(job_types.end(),
-						static_cast<std::size_t>(reserved_pyramid_plans), 2U);
+						reserved_pyramid_plans, 2U);
 					job_types.insert(job_types.end(),
-						static_cast<std::size_t>(reserved_canopy_plans), 4U);
+						reserved_canopy_plans, 4U);
 					job_types.insert(job_types.end(),
-						static_cast<std::size_t>(reserved_spider_nest_plans), 8U);
+						reserved_spider_nest_plans, 8U);
 					site_masks.reserve(selected_chunks.size());
 					for (const World::RevisionChunkCoordinate &target
 						: selected_chunks)
@@ -4928,20 +4927,39 @@ int32_t GameSession::grant_recipe_discovery(uint32_t source_type_id,
 	uint32_t source_id, uint64_t source_event_id,
 	ft_bool *newly_unlocked) noexcept
 {
+	game_recipe_unlock_result unlock_result = {};
+	int32_t result;
+
+	if (newly_unlocked == nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
+	*newly_unlocked = FT_FALSE;
+	result = this->grant_recipe_discovery_with_result(source_type_id,
+		source_id, source_event_id, &unlock_result);
+	if (result == FT_ERR_SUCCESS)
+		*newly_unlocked = unlock_result.recipe_newly_known;
+	return (result);
+}
+
+int32_t GameSession::grant_recipe_discovery_with_result(
+	uint32_t source_type_id, uint32_t source_id, uint64_t source_event_id,
+	game_recipe_unlock_result *result_out) noexcept
+{
 	const GameSessionSnapshotWriter snapshot_writer = {
 		&GameSession::save_snapshot_callback, this};
 
 	if (!this->active_)
 		return (FT_ERR_INVALID_OPERATION);
-	if (newly_unlocked == nullptr)
+	if (result_out == nullptr)
 		return (FT_ERR_INVALID_ARGUMENT);
+	result_out->event_newly_recorded = FT_FALSE;
+	result_out->recipe_newly_known = FT_FALSE;
 	if (!GameSession::authorize_recipe_discovery_event(
 			this->recipe_discovery_authorizer_, source_type_id, source_id,
 			source_event_id, this->recipe_discovery_authorizer_user_data_))
 		return (FT_ERR_INVALID_OPERATION);
 	return (RecipeDiscoveryTransaction::execute(this->recipe_catalog_,
 		source_type_id, source_id, source_event_id, snapshot_writer,
-		newly_unlocked));
+		result_out));
 }
 
 int32_t GameSession::configure_recipe_discovery_authorizer(

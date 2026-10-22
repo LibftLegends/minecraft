@@ -506,6 +506,18 @@ int32_t WorldGenerationResultCommitter::commit_remesh_result(World &world,
 		chunk->mark_light_input_changed();
 		return (FT_ERR_SUCCESS);
 	}
+	/* Revisions identify the immutable request snapshot, but light-input
+	 * validity can also change through a local invalidation that intentionally
+	 * preserves the previous drawable buffer.  Never publish geometry whose
+	 * packed light was prepared from that now-stale field. */
+	if (geometry_only
+		&& (!chunk->light_is_current() || !chunk->light_ready_for_render))
+	{
+		(void)chunk_mesh_destroy(replacement_mesh);
+		chunk->clear_pending_remesh_request();
+		chunk->mesh_dirty = true;
+		return (FT_ERR_SUCCESS);
+	}
 	if (!geometry_only && !geometry_final
 		&& result.incremental_light != FT_FALSE
 		&& (mesh_light_is_severely_regressed(chunk->mesh, replacement_mesh)

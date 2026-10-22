@@ -290,6 +290,7 @@ class WorldGenerationPipeline
 		std::vector<IncrementalLightNode> incremental_additive_queue;
 		std::size_t incremental_additive_queue_index;
 		std::vector<IncrementalRemovalNode> incremental_removal_queue;
+		std::vector<uint8_t> incremental_removal_queued_cells;
 		std::vector<IncrementalRemovalNode> incremental_removal_addition_queue;
 		std::size_t incremental_removal_queue_index;
 		std::size_t incremental_removal_addition_queue_index;

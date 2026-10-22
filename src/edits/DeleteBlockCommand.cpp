@@ -40,6 +40,8 @@ int32_t DeleteBlockCommand::execute(World &world) const
 	ft_bool incremental_additive_light;
 	ft_bool incremental_removal_light;
 	uint8_t existing_light;
+	std::shared_ptr<WorldChunkReadState> prepared_read_state;
+	int32_t err;
 	WorldChunk *wc = resolve_chunk(world, world_x, world_y, world_z, cx, cz, lx,
 			lz);
 	if (!wc)
@@ -54,14 +56,15 @@ int32_t DeleteBlockCommand::execute(World &world) const
 		return (FT_ERR_PERMISSION_DENIED);
 	if (voxel_block_is_breakable(existing_block_id) == FT_FALSE)
 		return (FT_ERR_INVALID_OPERATION);
-	int32_t err = wc->chunk.write_block(lx, world_y, lz, GAME_VOXEL_AIR_BLOCK);
+	err = wc->prepare_read_state_after_block_edit(lx, world_y, lz,
+		GAME_VOXEL_AIR_BLOCK, prepared_read_state);
+	if (err != FT_ERR_SUCCESS)
+		return (err);
+	err = wc->chunk.write_block(lx, world_y, lz, GAME_VOXEL_AIR_BLOCK);
 	if (err != FT_ERR_SUCCESS)
 		return (err);
 	wc->mark_content_changed();
-	err = wc->publish_read_state_after_block_edit(lx, world_y, lz,
-		GAME_VOXEL_AIR_BLOCK);
-	if (err != FT_ERR_SUCCESS)
-		return (err);
+	wc->commit_prepared_read_state_after_block_edit(prepared_read_state);
 	world.mark_geometry_changed();
 	world.chunk_streamer.mark_remesh_dirty(*wc);
 	wc->cancel_remesh_work();

@@ -471,9 +471,8 @@ int32_t WorldRevisionRegenerator::start(WorldRevisionManager &manager,
 	}
 	if (!manager.feature_plans_.empty() && staged_selected.empty())
 		return (FT_ERR_NOT_FOUND);
-	uint64_t reserved_feature_chunks = static_cast<uint64_t>(
-		village_plan_count) + static_cast<uint64_t>(magma_plan_count)
-		+ static_cast<uint64_t>(shipwreck_plan_count);
+	std::size_t reserved_feature_chunks = village_plan_count
+		+ magma_plan_count + shipwreck_plan_count;
 	for (const auto &plan : manager.feature_plans_)
 	{
 		if (plan.kind != WorldGenerationPipeline::GenerationFeaturePlan::VOLCANO)
@@ -481,8 +480,8 @@ int32_t WorldRevisionRegenerator::start(WorldRevisionManager &manager,
 		if (plan.volcano_footprint_chunks < 9U
 			|| plan.volcano_footprint_chunks > 16U)
 			return (FT_ERR_CONFIGURATION);
-		reserved_feature_chunks += static_cast<uint64_t>(
-			plan.volcano_footprint_chunks) * plan.volcano_footprint_chunks;
+		reserved_feature_chunks += plan.volcano_footprint_chunks
+			* plan.volcano_footprint_chunks;
 	}
 	if (reserved_feature_chunks > staged_selected.size())
 		return (FT_ERR_FULL);
@@ -501,8 +500,7 @@ int32_t WorldRevisionRegenerator::start(WorldRevisionManager &manager,
 		submissions.reserve(manager.selected_.size());
 		features_by_selected_chunk.resize(manager.selected_.size());
 		std::vector<WorldRevisionManager::RevisionChunk> reserved_chunks;
-		reserved_chunks.reserve(static_cast<std::size_t>(
-			reserved_feature_chunks));
+		reserved_chunks.reserve(reserved_feature_chunks);
 		for (std::size_t selected_index = 0U;
 			selected_index < manager.selected_.size(); ++selected_index)
 		{

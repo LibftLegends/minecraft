@@ -391,6 +391,9 @@ class GameSession
 	int32_t grant_recipe_discovery(uint32_t source_type_id,
 		uint32_t source_id, uint64_t source_event_id,
 		ft_bool *newly_unlocked) noexcept;
+	int32_t grant_recipe_discovery_with_result(uint32_t source_type_id,
+		uint32_t source_id, uint64_t source_event_id,
+		game_recipe_unlock_result *result_out) noexcept;
 	/* Card Press research spends two card-stock items to deterministically
 	 * discover one still-locked rare card recipe. The host validates station
 	 * reach, ownership and revision using the configured station authorizer. */

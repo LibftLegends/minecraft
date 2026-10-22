@@ -16,6 +16,12 @@ const uint32_t RegenerationCardSession::CARD_EFFECT_EVENT_BASE = 0x4D430100U;
 const uint32_t RegenerationCardSession::EMPTY_DRAW_INTENT_TYPE_ID = 0x4D435245U;
 const uint32_t RegenerationCardSession::HAND_OVERFLOW_INTENT_TYPE_ID = 0x4D43524FU;
 
+static uint32_t regeneration_card_type_id(uint32_t type_base,
+	uint32_t card_definition_id) noexcept
+{
+	return (type_base + card_definition_id - 1U);
+}
+
 static void regeneration_payload_write_u32(uint8_t *payload,
 	uint32_t offset, uint32_t value) noexcept
 {
@@ -549,19 +555,34 @@ int32_t RegenerationCardSession::register_profile() noexcept
 	error_code = this->engine_.initialize(rules);
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
-	card_type.type_id = RegenerationCardSession::CARD_TYPE_ID;
 	card_type.allowed_zone_mask = (1U << RegenerationCardSession::DRAW_ZONE_ID)
 		| (1U << RegenerationCardSession::HAND_ZONE_ID)
 		| (1U << RegenerationCardSession::RESOLUTION_ZONE_ID)
 		| (1U << RegenerationCardSession::DISCARD_ZONE_ID)
 		| (1U << RegenerationCardSession::BURNED_ZONE_ID);
 	card_type.max_copies_per_player = 4U;
-	error_code = this->engine_.register_card_type(card_type);
+	error_code = FT_ERR_SUCCESS;
+	for (uint32_t definition_id = 1U;
+		definition_id
+			<= RegenerationCardSession::SPIDER_NEST_SEAL_CARD_DEFINITION_ID
+			&& error_code == FT_ERR_SUCCESS; ++definition_id)
+	{
+		card_type.type_id = regeneration_card_type_id(
+			RegenerationCardSession::CARD_TYPE_ID, definition_id);
+		error_code = this->engine_.register_card_type(card_type);
+	}
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
+	card_type.allowed_zone_mask = 0U;
+	for (uint32_t definition_id = 1U;
+		definition_id
+			<= RegenerationCardSession::SPIDER_NEST_SEAL_CARD_DEFINITION_ID;
+		++definition_id)
+		card_type.allowed_zone_mask |= 1U
+			<< regeneration_card_type_id(
+				RegenerationCardSession::CARD_TYPE_ID, definition_id);
 	zone.capacity = RegenerationCardSession::MAXIMUM_DECK_SIZE;
-	zone.allowed_card_type_mask = 1U
-		<< RegenerationCardSession::CARD_TYPE_ID;
+	zone.allowed_card_type_mask = card_type.allowed_zone_mask;
 	zone.owner_scoped = FT_TRUE;
 	zone.zone_id = RegenerationCardSession::DRAW_ZONE_ID;
 	error_code = this->engine_.register_zone(zone);
@@ -626,7 +647,7 @@ int32_t RegenerationCardSession::register_profile() noexcept
 		definition.health = 0;
 		definition.effect_id = CARD_GAME_NO_EFFECT;
 		error_code = this->engine_.register_card_with_type(definition,
-			RegenerationCardSession::CARD_TYPE_ID);
+			regeneration_card_type_id(RegenerationCardSession::CARD_TYPE_ID, definition.card_id));
 		if (error_code == FT_ERR_SUCCESS)
 			error_code = this->engine_.register_effect_callback(
 				&RegenerationCardSession::effect_callback, this,
@@ -644,7 +665,7 @@ int32_t RegenerationCardSession::register_profile() noexcept
 		definition.type = CARD_GAME_SPELL;
 		definition.effect_id = CARD_GAME_NO_EFFECT;
 		error_code = this->engine_.register_card_with_type(definition,
-			RegenerationCardSession::CARD_TYPE_ID);
+			regeneration_card_type_id(RegenerationCardSession::CARD_TYPE_ID, definition.card_id));
 		if (error_code == FT_ERR_SUCCESS)
 			error_code = this->engine_.register_effect_callback(
 				&RegenerationCardSession::effect_callback, this,
@@ -660,7 +681,7 @@ int32_t RegenerationCardSession::register_profile() noexcept
 		definition.type = CARD_GAME_SPELL;
 		definition.effect_id = CARD_GAME_NO_EFFECT;
 		error_code = this->engine_.register_card_with_type(definition,
-			RegenerationCardSession::CARD_TYPE_ID);
+			regeneration_card_type_id(RegenerationCardSession::CARD_TYPE_ID, definition.card_id));
 		if (error_code == FT_ERR_SUCCESS)
 			error_code = this->engine_.register_effect_callback(
 				&RegenerationCardSession::effect_callback, this,
@@ -677,7 +698,7 @@ int32_t RegenerationCardSession::register_profile() noexcept
 		definition.type = CARD_GAME_SPELL;
 		definition.effect_id = CARD_GAME_NO_EFFECT;
 		error_code = this->engine_.register_card_with_type(definition,
-			RegenerationCardSession::CARD_TYPE_ID);
+			regeneration_card_type_id(RegenerationCardSession::CARD_TYPE_ID, definition.card_id));
 		if (error_code == FT_ERR_SUCCESS)
 			error_code = this->engine_.register_effect_callback(
 				&RegenerationCardSession::effect_callback, this,
@@ -694,7 +715,7 @@ int32_t RegenerationCardSession::register_profile() noexcept
 		definition.type = CARD_GAME_SPELL;
 		definition.effect_id = CARD_GAME_NO_EFFECT;
 		error_code = this->engine_.register_card_with_type(definition,
-			RegenerationCardSession::CARD_TYPE_ID);
+			regeneration_card_type_id(RegenerationCardSession::CARD_TYPE_ID, definition.card_id));
 		if (error_code == FT_ERR_SUCCESS)
 			error_code = this->engine_.register_effect_callback(
 				&RegenerationCardSession::effect_callback, this,
@@ -711,7 +732,7 @@ int32_t RegenerationCardSession::register_profile() noexcept
 		definition.type = CARD_GAME_SPELL;
 		definition.effect_id = CARD_GAME_NO_EFFECT;
 		error_code = this->engine_.register_card_with_type(definition,
-			RegenerationCardSession::CARD_TYPE_ID);
+			regeneration_card_type_id(RegenerationCardSession::CARD_TYPE_ID, definition.card_id));
 		if (error_code == FT_ERR_SUCCESS)
 			error_code = this->engine_.register_effect_callback(
 				&RegenerationCardSession::effect_callback, this,
@@ -728,7 +749,7 @@ int32_t RegenerationCardSession::register_profile() noexcept
 		definition.type = CARD_GAME_SPELL;
 		definition.effect_id = CARD_GAME_NO_EFFECT;
 		error_code = this->engine_.register_card_with_type(definition,
-			RegenerationCardSession::CARD_TYPE_ID);
+			regeneration_card_type_id(RegenerationCardSession::CARD_TYPE_ID, definition.card_id));
 		if (error_code == FT_ERR_SUCCESS)
 			error_code = this->engine_.register_effect_callback(
 				&RegenerationCardSession::effect_callback, this,
@@ -745,7 +766,7 @@ int32_t RegenerationCardSession::register_profile() noexcept
 		definition.type = CARD_GAME_SPELL;
 		definition.effect_id = CARD_GAME_NO_EFFECT;
 		error_code = this->engine_.register_card_with_type(definition,
-			RegenerationCardSession::CARD_TYPE_ID);
+			regeneration_card_type_id(RegenerationCardSession::CARD_TYPE_ID, definition.card_id));
 		if (error_code == FT_ERR_SUCCESS)
 			error_code = this->engine_.register_effect_callback(
 				&RegenerationCardSession::effect_callback, this,
@@ -761,7 +782,7 @@ int32_t RegenerationCardSession::register_profile() noexcept
 		definition.type = CARD_GAME_SPELL;
 		definition.effect_id = CARD_GAME_NO_EFFECT;
 		error_code = this->engine_.register_card_with_type(definition,
-			RegenerationCardSession::CARD_TYPE_ID);
+			regeneration_card_type_id(RegenerationCardSession::CARD_TYPE_ID, definition.card_id));
 		if (error_code == FT_ERR_SUCCESS)
 			error_code = this->engine_.register_effect_callback(
 				&RegenerationCardSession::effect_callback, this,
@@ -784,7 +805,7 @@ int32_t RegenerationCardSession::register_profile() noexcept
 			definition.type = CARD_GAME_SPELL;
 			definition.effect_id = CARD_GAME_NO_EFFECT;
 			error_code = this->engine_.register_card_with_type(definition,
-				RegenerationCardSession::CARD_TYPE_ID);
+				regeneration_card_type_id(RegenerationCardSession::CARD_TYPE_ID, definition.card_id));
 			if (error_code == FT_ERR_SUCCESS)
 				error_code = this->engine_.register_effect_callback(
 					&RegenerationCardSession::effect_callback, this,

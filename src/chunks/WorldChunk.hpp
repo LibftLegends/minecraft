@@ -113,6 +113,11 @@ class WorldChunk
 	uint8_t get_boundary_source_light_max(uint8_t face) const noexcept;
 	bool boundary_has_transparent_target(uint8_t face) const noexcept;
 	int32_t publish_read_state() noexcept;
+	int32_t prepare_read_state_after_block_edit(int32_t local_x,
+		int32_t local_y, int32_t local_z, uint32_t block_id,
+		std::shared_ptr<WorldChunkReadState> &prepared_state) noexcept;
+	void commit_prepared_read_state_after_block_edit(
+		std::shared_ptr<WorldChunkReadState> &prepared_state) noexcept;
 	int32_t publish_read_state_after_block_edit(int32_t local_x,
 		int32_t local_y, int32_t local_z, uint32_t block_id) noexcept;
 	void set_pending_remesh_request(uint64_t request_id,

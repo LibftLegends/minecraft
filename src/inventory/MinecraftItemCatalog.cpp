@@ -492,6 +492,10 @@ int32_t MinecraftItemCatalog::initialize() noexcept
 	if (this->initialized_)
 		return (FT_ERR_INVALID_OPERATION);
 	error_code = this->definitions_.initialize();
+	if (error_code != FT_ERR_SUCCESS)
+		std::fprintf(stderr,
+			"item-catalog: definition registry initialization error=%d\n",
+			error_code);
 	if (error_code == FT_ERR_SUCCESS)
 		error_code = this->register_builtin_block_items();
 	if (error_code != FT_ERR_SUCCESS)
@@ -536,9 +540,19 @@ int32_t MinecraftItemCatalog::initialize() noexcept
 		uint32_t content_rule_count = 0U;
 		uint32_t equipment_rule_count = 0U;
 		error_code = this->validate_content_coverage(&content_rule_count);
+		if (error_code != FT_ERR_SUCCESS)
+			std::fprintf(stderr,
+				"item-catalog: content coverage validation error=%d\n",
+				error_code);
 		if (error_code == FT_ERR_SUCCESS)
+		{
 			error_code = this->validate_equipment_coverage(
 				&equipment_rule_count);
+			if (error_code != FT_ERR_SUCCESS)
+				std::fprintf(stderr,
+					"item-catalog: equipment coverage validation error=%d\n",
+					error_code);
+		}
 	}
 	if (error_code != FT_ERR_SUCCESS)
 	{

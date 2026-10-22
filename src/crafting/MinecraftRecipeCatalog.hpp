@@ -98,12 +98,18 @@ class MinecraftRecipeCatalog
 		uint32_t fuel_units_per_item, uint32_t ticks_per_item) noexcept;
 	int32_t destroy() noexcept;
 	bool is_initialized() const noexcept;
+	int32_t unlock_recipe_with_result(uint32_t recipe_id,
+		uint64_t source_event_id,
+		game_recipe_unlock_result *result_out) noexcept;
 	int32_t unlock_recipe(uint32_t recipe_id, uint64_t source_event_id,
 		ft_bool *newly_unlocked) noexcept;
 	/* Trusted content maps stable discovery source IDs to recipe IDs. Source
 	 * event IDs remain the idempotency key stored by the recipe book. */
 	int32_t register_discovery_source(uint32_t source_type_id,
 		uint32_t source_id, uint32_t recipe_id) noexcept;
+	int32_t grant_recipe_from_discovery_with_result(uint32_t source_type_id,
+		uint32_t source_id, uint64_t source_event_id,
+		game_recipe_unlock_result *result_out) noexcept;
 	int32_t grant_recipe_from_discovery(uint32_t source_type_id,
 		uint32_t source_id, uint64_t source_event_id,
 		ft_bool *newly_unlocked) noexcept;

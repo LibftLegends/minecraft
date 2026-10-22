@@ -528,30 +528,39 @@ int32_t WorldChunk::publish_read_state() noexcept
 	return (FT_ERR_SUCCESS);
 }
 
-int32_t WorldChunk::publish_read_state_after_block_edit(int32_t local_x,
-	int32_t local_y, int32_t local_z, uint32_t block_id) noexcept
+int32_t WorldChunk::prepare_read_state_after_block_edit(int32_t local_x,
+	int32_t local_y, int32_t local_z, uint32_t block_id,
+	std::shared_ptr<WorldChunkReadState> &prepared_state) noexcept
 {
 	const std::size_t full_size = static_cast<std::size_t>(
 		GAME_VOXEL_CHUNK_WIDTH) * static_cast<std::size_t>(
 		GAME_VOXEL_CHUNK_HEIGHT) * static_cast<std::size_t>(
 		GAME_VOXEL_CHUNK_DEPTH);
 	std::shared_ptr<WorldChunkReadState> next_state;
-	std::shared_ptr<const WorldChunkReadState> previous_state =
-		this->read_state;
+	std::shared_ptr<const WorldChunkReadState> previous_state;
 	std::size_t overlay_index;
 
+	prepared_state.reset();
 	if (local_x < 0 || local_x >= GAME_VOXEL_CHUNK_WIDTH
 		|| local_y < 0 || local_y >= GAME_VOXEL_CHUNK_HEIGHT
 		|| local_z < 0 || local_z >= GAME_VOXEL_CHUNK_DEPTH)
 		return (FT_ERR_INVALID_ARGUMENT);
+	previous_state = this->read_state;
 	/* A delta state is valid only when the previous immutable state describes
 	 * the same chunk.  Loader/recovery paths can publish without a parent, so
-	 * retain the complete publication as a safe fallback for those callers. */
+	 * publish a complete baseline before preparing the edit overlay.  This
+	 * happens before authoritative voxel mutation, so allocation failure is
+	 * still failure-atomic. */
 	if (previous_state == nullptr || previous_state->initialized == FT_FALSE
 		|| previous_state->chunk_x != this->chunk_x
 		|| previous_state->chunk_z != this->chunk_z
 		|| previous_state->light.size() != full_size)
-		return (this->publish_read_state());
+	{
+		const int32_t publish_error = this->publish_read_state();
+		if (publish_error != FT_ERR_SUCCESS)
+			return (publish_error);
+		previous_state = this->read_state;
+	}
 	try
 	{
 		next_state = std::make_shared<WorldChunkReadState>();
@@ -580,43 +589,69 @@ int32_t WorldChunk::publish_read_state_after_block_edit(int32_t local_x,
 		next_state->block_overlay_index = overlay_index;
 		next_state->block_overlay_value = block_id;
 		next_state->has_block_overlay = FT_TRUE;
-		/* The live light field is unchanged by a block edit.  Only the target
-		 * transparency summaries need to be rescanned, and that is four boundary
-		 * faces rather than the complete chunk. */
-		ft_memset(this->boundary_target_has_transparent, 0,
-			sizeof(this->boundary_target_has_transparent));
-		for (int32_t z = 0; z < GAME_VOXEL_CHUNK_DEPTH; ++z)
-			for (int32_t y = 0; y < GAME_VOXEL_CHUNK_HEIGHT; ++y)
-			{
-				uint32_t boundary_block;
-				if (this->chunk.read_block(0, y, z, &boundary_block)
-					== FT_ERR_SUCCESS
-					&& voxel_block_is_transparent(boundary_block) != FT_FALSE)
-					this->boundary_target_has_transparent[0] = true;
-				if (this->chunk.read_block(GAME_VOXEL_CHUNK_WIDTH - 1, y, z,
-					&boundary_block) == FT_ERR_SUCCESS
-					&& voxel_block_is_transparent(boundary_block) != FT_FALSE)
-					this->boundary_target_has_transparent[1] = true;
-			}
-		for (int32_t x = 0; x < GAME_VOXEL_CHUNK_WIDTH; ++x)
-			for (int32_t y = 0; y < GAME_VOXEL_CHUNK_HEIGHT; ++y)
-			{
-				uint32_t boundary_block;
-				if (this->chunk.read_block(x, y, 0, &boundary_block)
-					== FT_ERR_SUCCESS
-					&& voxel_block_is_transparent(boundary_block) != FT_FALSE)
-					this->boundary_target_has_transparent[2] = true;
-				if (this->chunk.read_block(x, y, GAME_VOXEL_CHUNK_DEPTH - 1,
-					&boundary_block) == FT_ERR_SUCCESS
-					&& voxel_block_is_transparent(boundary_block) != FT_FALSE)
-					this->boundary_target_has_transparent[3] = true;
-			}
-		this->read_state = std::move(next_state);
 	}
 	catch (...)
 	{
 		return (FT_ERR_NO_MEMORY);
 	}
+	prepared_state = std::move(next_state);
+	return (FT_ERR_SUCCESS);
+}
+
+void WorldChunk::commit_prepared_read_state_after_block_edit(
+	std::shared_ptr<WorldChunkReadState> &prepared_state) noexcept
+{
+	if (prepared_state == nullptr)
+		return ;
+	prepared_state->voxel_revision = this->voxel_revision;
+	prepared_state->light_revision = this->light_revision;
+	prepared_state->content_version = this->content_version;
+	prepared_state->light_input_version = this->light_input_version;
+	prepared_state->light_version = this->light_version;
+	prepared_state->computed_light_input_version =
+		this->computed_light_input_version;
+	prepared_state->light_valid = this->light_buffer_is_valid()
+		? FT_TRUE : FT_FALSE;
+	ft_memset(this->boundary_target_has_transparent, 0,
+		sizeof(this->boundary_target_has_transparent));
+	for (int32_t z = 0; z < GAME_VOXEL_CHUNK_DEPTH; ++z)
+		for (int32_t y = 0; y < GAME_VOXEL_CHUNK_HEIGHT; ++y)
+		{
+			uint32_t boundary_block;
+			if (this->chunk.read_block(0, y, z, &boundary_block)
+				== FT_ERR_SUCCESS
+				&& voxel_block_is_transparent(boundary_block) != FT_FALSE)
+				this->boundary_target_has_transparent[0] = true;
+			if (this->chunk.read_block(GAME_VOXEL_CHUNK_WIDTH - 1, y, z,
+				&boundary_block) == FT_ERR_SUCCESS
+				&& voxel_block_is_transparent(boundary_block) != FT_FALSE)
+				this->boundary_target_has_transparent[1] = true;
+		}
+	for (int32_t x = 0; x < GAME_VOXEL_CHUNK_WIDTH; ++x)
+		for (int32_t y = 0; y < GAME_VOXEL_CHUNK_HEIGHT; ++y)
+		{
+			uint32_t boundary_block;
+			if (this->chunk.read_block(x, y, 0, &boundary_block)
+				== FT_ERR_SUCCESS
+				&& voxel_block_is_transparent(boundary_block) != FT_FALSE)
+				this->boundary_target_has_transparent[2] = true;
+			if (this->chunk.read_block(x, y, GAME_VOXEL_CHUNK_DEPTH - 1,
+				&boundary_block) == FT_ERR_SUCCESS
+				&& voxel_block_is_transparent(boundary_block) != FT_FALSE)
+				this->boundary_target_has_transparent[3] = true;
+		}
+	this->read_state = std::move(prepared_state);
+}
+
+int32_t WorldChunk::publish_read_state_after_block_edit(int32_t local_x,
+	int32_t local_y, int32_t local_z, uint32_t block_id) noexcept
+{
+	std::shared_ptr<WorldChunkReadState> prepared_state;
+	int32_t error_code = this->prepare_read_state_after_block_edit(local_x,
+		local_y, local_z, block_id, prepared_state);
+	if (error_code != FT_ERR_SUCCESS)
+		return (error_code);
+	this->commit_prepared_read_state_after_block_edit(prepared_state);
 	return (FT_ERR_SUCCESS);
 }
 

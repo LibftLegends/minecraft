@@ -1103,6 +1103,10 @@ int32_t MinecraftRecipeCatalog::query_recipes(const game_inventory &inventory,
 		return (FT_ERR_NOT_FOUND);
 	try
 	{
+		game_inventory_snapshot inventory_snapshot = {};
+		int32_t snapshot_result = inventory.get_snapshot(inventory_snapshot);
+		if (snapshot_result != FT_ERR_SUCCESS)
+			return (snapshot_result);
 		staged_entries.reserve(recipe_id_filter == 0U
 			? this->registered_recipe_ids_.size() : 1U);
 		for (uint32_t recipe_id : this->registered_recipe_ids_)
@@ -1114,11 +1118,16 @@ int32_t MinecraftRecipeCatalog::query_recipes(const game_inventory &inventory,
 			game_crafting_query_result status = {};
 			ft_bool known = FT_FALSE;
 			if (result == FT_ERR_SUCCESS)
-				result = this->query_recipe_at_station(inventory, recipe_id,
-					station_id, &status, &missing_groups);
+				result = this->recipe_book_.is_recipe_known(recipe_id, &known);
+			if (result == FT_ERR_SUCCESS)
+				result = this->crafting_.query_recipe_at_station_snapshot(
+					static_cast<int32_t>(recipe_id), inventory_snapshot,
+					static_cast<int32_t>(station_id), &status, &missing_groups);
 			if (result == FT_ERR_SUCCESS)
 			{
-				known = status.known;
+				status.known = known;
+				if (known != FT_TRUE)
+					status.craftable = FT_FALSE;
 				staged_entries.push_back({recipe_id, known, status});
 				for (ft_size_t index = 0U; index < missing_groups.size(); ++index)
 					staged_missing.push_back({recipe_id, missing_groups[index]});
@@ -2188,21 +2197,24 @@ bool MinecraftRecipeCatalog::is_initialized() const noexcept
 	return (this->initialized_);
 }
 
-int32_t MinecraftRecipeCatalog::unlock_recipe(uint32_t recipe_id,
-	uint64_t source_event_id, ft_bool *newly_unlocked) noexcept
+int32_t MinecraftRecipeCatalog::unlock_recipe_with_result(
+	uint32_t recipe_id, uint64_t source_event_id,
+	game_recipe_unlock_result *result_out) noexcept
 {
 	std::vector<uint8_t> book_before;
 	int32_t error_code;
 
-	if (!this->initialized_ || newly_unlocked == nullptr)
+	if (!this->initialized_ || result_out == nullptr)
 		return (FT_ERR_INVALID_STATE);
-	*newly_unlocked = FT_FALSE;
+	result_out->event_newly_recorded = FT_FALSE;
+	result_out->recipe_newly_known = FT_FALSE;
 	error_code = this->serialize_recipe_book(book_before);
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
-	error_code = this->recipe_book_.unlock_recipe(recipe_id,
-		source_event_id, newly_unlocked);
-	if (error_code == FT_ERR_SUCCESS && *newly_unlocked == FT_TRUE)
+	error_code = this->recipe_book_.unlock_recipe_with_result(recipe_id,
+		source_event_id, result_out);
+	if (error_code == FT_ERR_SUCCESS
+		&& result_out->recipe_newly_known == FT_TRUE)
 		error_code = this->crafting_.unlock_recipe(
 			static_cast<int32_t>(recipe_id));
 	if (error_code != FT_ERR_SUCCESS)
@@ -2210,9 +2222,30 @@ int32_t MinecraftRecipeCatalog::unlock_recipe(uint32_t recipe_id,
 		const int32_t restore_result = this->restore_recipe_book(
 			book_before.data(), book_before.size());
 		if (restore_result != FT_ERR_SUCCESS)
+		{
+			result_out->event_newly_recorded = FT_FALSE;
+			result_out->recipe_newly_known = FT_FALSE;
 			return (FT_ERR_INVALID_STATE);
-		*newly_unlocked = FT_FALSE;
+		}
+		result_out->event_newly_recorded = FT_FALSE;
+		result_out->recipe_newly_known = FT_FALSE;
 	}
+	return (error_code);
+}
+
+int32_t MinecraftRecipeCatalog::unlock_recipe(uint32_t recipe_id,
+	uint64_t source_event_id, ft_bool *newly_unlocked) noexcept
+{
+	game_recipe_unlock_result unlock_result = {};
+	int32_t error_code;
+
+	if (newly_unlocked == nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
+	*newly_unlocked = FT_FALSE;
+	error_code = this->unlock_recipe_with_result(recipe_id, source_event_id,
+		&unlock_result);
+	if (error_code == FT_ERR_SUCCESS)
+		*newly_unlocked = unlock_result.recipe_newly_known;
 	return (error_code);
 }
 
@@ -2252,19 +2285,37 @@ int32_t MinecraftRecipeCatalog::grant_recipe_from_discovery(
 	uint32_t source_type_id, uint32_t source_id, uint64_t source_event_id,
 	ft_bool *newly_unlocked) noexcept
 {
+	game_recipe_unlock_result unlock_result = {};
+	int32_t error_code;
+
+	if (newly_unlocked == nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
+	*newly_unlocked = FT_FALSE;
+	error_code = this->grant_recipe_from_discovery_with_result(
+		source_type_id, source_id, source_event_id, &unlock_result);
+	if (error_code == FT_ERR_SUCCESS)
+		*newly_unlocked = unlock_result.recipe_newly_known;
+	return (error_code);
+}
+
+int32_t MinecraftRecipeCatalog::grant_recipe_from_discovery_with_result(
+	uint32_t source_type_id, uint32_t source_id, uint64_t source_event_id,
+	game_recipe_unlock_result *result_out) noexcept
+{
 	const uint64_t source_key = (static_cast<uint64_t>(source_type_id) << 32U)
 		| static_cast<uint64_t>(source_id);
 	std::map<uint64_t, uint32_t>::const_iterator source;
 
 	if (!this->initialized_ || source_type_id == 0U || source_id == 0U
-		|| source_event_id == 0U || newly_unlocked == nullptr)
+		|| source_event_id == 0U || result_out == nullptr)
 		return (FT_ERR_INVALID_ARGUMENT);
-	*newly_unlocked = FT_FALSE;
+	result_out->event_newly_recorded = FT_FALSE;
+	result_out->recipe_newly_known = FT_FALSE;
 	source = this->discovery_sources_.find(source_key);
 	if (source == this->discovery_sources_.end())
 		return (FT_ERR_NOT_FOUND);
-	return (this->unlock_recipe(source->second, source_event_id,
-		newly_unlocked));
+	return (this->unlock_recipe_with_result(source->second, source_event_id,
+		result_out));
 }
 
 int32_t MinecraftRecipeCatalog::is_recipe_known(uint32_t recipe_id,

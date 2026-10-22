@@ -218,7 +218,7 @@ namespace
 				"policy=%u item=%d result=%d expected-after=%u actual-after=%u\n",
 				mined_block_id, static_cast<unsigned int>(rule.policy),
 				rule.item_id, result, expected_block_after,
-				static_cast<unsigned int>(block_after));
+				block_after);
 		return (result);
 	}
 
@@ -1138,8 +1138,26 @@ int BlockEditValidator::verify_delete_block(World &world, int32_t x, int32_t y,
 		|| chunk->last_incremental_light_voxel_revision
 		!= chunk->voxel_revision)
 	{
+		const World::StreamDiagnostics diagnostics = world.stream_diagnostics();
 		std::fprintf(stderr,
-			"block-edit: deletion unexpectedly used a full light rebuild\n");
+			"block-edit: deletion unexpectedly used a full light rebuild "
+			"chunk=(%d,%d) marker=%d marker_content=%u content=%u "
+			"marker_voxel=%llu voxel=%llu light_current=%d mesh=%llu "
+			"incremental=%llu full=%llu stale=%zu\n",
+			chunk->chunk_x, chunk->chunk_z,
+			chunk->last_light_remesh_incremental != FT_FALSE ? 1 : 0,
+			static_cast<unsigned int>(
+				chunk->last_incremental_light_content_version),
+			static_cast<unsigned int>(chunk->content_version),
+			static_cast<unsigned long long>(
+				chunk->last_incremental_light_voxel_revision),
+			static_cast<unsigned long long>(chunk->voxel_revision),
+			chunk->light_is_current() ? 1 : 0,
+			static_cast<unsigned long long>(chunk->mesh_revision),
+			static_cast<unsigned long long>(
+				diagnostics.remesh_incremental_completed_count),
+			static_cast<unsigned long long>(diagnostics.remesh_full_completed_count),
+			diagnostics.stale_remesh_result_count);
 		return (1);
 	}
 	mesh_after = mesh_index_count_for_block(world, x, z);

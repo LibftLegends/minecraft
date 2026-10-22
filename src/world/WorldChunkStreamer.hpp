@@ -183,6 +183,7 @@ class WorldChunkStreamer
 		uint64_t light_revision;
 		uint16_t content_version;
 		uint16_t light_input_version;
+		uint16_t light_dependency_mask;
 		ft_bool interactive;
 		bool geometry_only;
 		ft_bool incremental_additive_light;

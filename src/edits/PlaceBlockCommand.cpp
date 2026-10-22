@@ -48,6 +48,7 @@ int32_t PlaceBlockCommand::execute(World &world) const
 	int32_t remesh_error;
 	ft_bool incremental_removal_light;
 	uint8_t existing_light;
+	std::shared_ptr<WorldChunkReadState> prepared_read_state;
 	WorldChunk *wc = resolve_chunk(world, world_x, world_y, world_z, cx, cz, lx,
 			lz);
 	if (!wc)
@@ -59,13 +60,15 @@ int32_t PlaceBlockCommand::execute(World &world) const
 	if (current_block_id != GAME_VOXEL_AIR_BLOCK)
 		return (FT_ERR_ALREADY_EXISTS);
 	existing_light = wc->light.get(lx, world_y, lz);
+	err = wc->prepare_read_state_after_block_edit(lx, world_y, lz, block_id,
+		prepared_read_state);
+	if (err != FT_ERR_SUCCESS)
+		return (err);
 	err = wc->chunk.write_block(lx, world_y, lz, block_id);
 	if (err != FT_ERR_SUCCESS)
 		return (err);
 	wc->mark_content_changed();
-	err = wc->publish_read_state_after_block_edit(lx, world_y, lz, block_id);
-	if (err != FT_ERR_SUCCESS)
-		return (err);
+	wc->commit_prepared_read_state_after_block_edit(prepared_read_state);
 	world.mark_geometry_changed();
 	world.chunk_streamer.mark_remesh_dirty(*wc);
 	wc->cancel_remesh_work();

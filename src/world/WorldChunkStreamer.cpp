@@ -295,6 +295,22 @@ void WorldChunkStreamer::run_remesh_capture_worker() noexcept
 				task.read_states[3], task.read_states[4], task.read_states[5],
 				task.read_states[6], task.read_states[7], task.read_states[8],
 				snapshot);
+		if (error_code == FT_ERR_SUCCESS
+			&& task.light_dependency_mask != 0U)
+		{
+			/* Version counters alone cannot identify a neighbour whose published
+			 * light is intentionally retained while it waits for this source.
+			 * Such a field is immutable but not a valid source for relighting. */
+			snapshot.lighting_halo_blocked = FT_TRUE;
+			snapshot.lighting_halo_valid = FT_FALSE;
+			for (int32_t source_index = 1; source_index < 9; ++source_index)
+			{
+				if ((task.light_dependency_mask
+						& static_cast<uint16_t>(1U << source_index)) != 0U
+					&& source_index <= 4)
+					snapshot.lighting_cardinal_halo_valid = FT_FALSE;
+			}
+		}
 		if (!stale_capture)
 		{
 			const uint64_t capture_duration = static_cast<uint64_t>(
@@ -786,10 +802,12 @@ int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk,
 		|| incremental_removal_light != FT_FALSE
 		|| (incremental_light_seeds != nullptr
 			&& !incremental_light_seeds->empty());
-	if (!explicit_incremental_metadata && matching_priority != nullptr
-		&& (matching_priority->incremental_additive_light != FT_FALSE
-			|| matching_priority->incremental_removal_light != FT_FALSE
-			|| !matching_priority->incremental_light_seeds.empty()))
+	if (matching_priority != nullptr
+		&& (matching_priority->interactive
+			|| (!explicit_incremental_metadata
+				&& (matching_priority->incremental_additive_light != FT_FALSE
+					|| matching_priority->incremental_removal_light != FT_FALSE
+					|| !matching_priority->incremental_light_seeds.empty()))))
 	{
 		incremental_additive_light =
 			matching_priority->incremental_additive_light;
@@ -914,6 +932,11 @@ int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk,
 		&& chunk.light_is_current()
 		&& chunk.light_ready_for_render)
 		geometry_only = true;
+	/* A stale or never-published light field can never back a newly committed
+	 * mesh.  Priority records may outlive the condition that originally marked
+	 * them geometry-only, so revalidate that optimization at submission time. */
+	if (!chunk.light_is_current() || !chunk.light_ready_for_render)
+		geometry_only = false;
 	if (chunk.remesh_cancellation_token == nullptr)
 		return (FT_ERR_INVALID_STATE);
 	interactive_request = false;
@@ -987,6 +1010,7 @@ int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk,
 	task.light_revision = chunk.light_revision;
 	task.content_version = chunk.content_version;
 	task.light_input_version = chunk.light_input_version;
+	task.light_dependency_mask = 0U;
 	task.interactive = interactive_request ? FT_TRUE : FT_FALSE;
 	task.geometry_only = geometry_only;
 	task.incremental_additive_light = incremental_additive_light;
@@ -1037,7 +1061,12 @@ int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk,
 				chunk.chunk_x + offsets[index][0],
 				chunk.chunk_z + offsets[index][1]);
 			if (source != nullptr)
+			{
 				task.read_states[index] = source->read_state;
+				if (index != 0 && source->waits_for_neighbor_light)
+					task.light_dependency_mask |= static_cast<uint16_t>(
+						1U << index);
+			}
 		}
 	}
 	try

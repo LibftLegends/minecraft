@@ -221,7 +221,7 @@ static int32_t world_item_validator_entity_store_roundtrip() noexcept
 			legacy_bytes[15] = 0U;
 			for (std::size_t index = 0U; index < 3U; ++index)
 			{
-				const std::size_t offset = 16U + index * 104U;
+				const std::size_t offset = 16U + index * 112U;
 				legacy_bytes.insert(legacy_bytes.end(), bytes.begin() + offset,
 					bytes.begin() + offset + 96U);
 			}
@@ -725,7 +725,7 @@ static int32_t world_item_validator_spawner_lifecycle() noexcept
 				&& result == FT_ERR_SUCCESS; ++animal_index)
 		{
 			const uint64_t spawn_tick = 100U
-				+ static_cast<uint64_t>(animal_index) * 10U;
+				+ ft_platform_cast<uint64_t>(animal_index) * 10U;
 			definition.entity_type = animal_types[animal_index];
 			definition.loot_table_id = animal_loot_tables[animal_index];
 			result = restored.add(definition, spawn_tick, &spawner_id);
@@ -1637,6 +1637,7 @@ int WorldItemStoreValidator::validate() const
 	ft_sharedptr<game_item> processing_recovery_fuel;
 	WorldItemSnapshot snapshot = {};
 	std::vector<WorldItemSnapshot> nearby;
+	std::vector<uint64_t> query_stress_entity_ids;
 	std::vector<uint8_t> snapshot_bytes;
 	std::vector<uint8_t> duplicate_id_save_sentinel = {
 		'P', 'R', 'E', 'S', 'E', 'R', 'V', 'E'};
@@ -1913,11 +1914,24 @@ int WorldItemStoreValidator::validate() const
 		std::fprintf(stderr, "world-items: stage=merge error=%d\n", error_code);
 	if (error_code == FT_ERR_SUCCESS)
 		error_code = make_world_item(95, 1, 1, &query_limit_item);
+	if (error_code == FT_ERR_SUCCESS)
+	{
+		try
+		{
+			query_stress_entity_ids.reserve(1282U);
+		}
+		catch (const std::bad_alloc &)
+		{
+			error_code = FT_ERR_NO_MEMORY;
+		}
+	}
 	for (int32_t index = 0; error_code == FT_ERR_SUCCESS && index < 257; ++index)
 	{
 		uint64_t query_entity_id = 0U;
 		error_code = store.spawn(query_limit_item, 100.0, 0.0, 100.0, 0U,
 			0U, 0U, &query_entity_id);
+		if (error_code == FT_ERR_SUCCESS)
+			query_stress_entity_ids.push_back(query_entity_id);
 	}
 	if (error_code == FT_ERR_SUCCESS)
 	{
@@ -1939,6 +1953,8 @@ int WorldItemStoreValidator::validate() const
 		uint64_t query_entity_id = 0U;
 		error_code = store.spawn(query_scan_item, 101.5, 0.0, 100.0, 0U,
 			0U, 0U, &query_entity_id);
+		if (error_code == FT_ERR_SUCCESS)
+			query_stress_entity_ids.push_back(query_entity_id);
 	}
 	if (error_code == FT_ERR_SUCCESS)
 	{
@@ -1953,6 +1969,13 @@ int WorldItemStoreValidator::validate() const
 	}
 	if (error_code != FT_ERR_SUCCESS)
 		std::fprintf(stderr, "world-items: stage=query-scan error=%d\n", error_code);
+	/* The query ceilings have been exercised; remove those stress-only entities
+	 * before the many persistence compatibility round trips below. */
+	for (uint64_t entity_id : query_stress_entity_ids)
+	{
+		if (error_code == FT_ERR_SUCCESS)
+			error_code = store.despawn(entity_id, 1U);
+	}
 	if (error_code == FT_ERR_SUCCESS)
 		error_code = make_world_item(97, 2, 8, &staged_drop_item);
 	if (error_code == FT_ERR_SUCCESS)
@@ -2558,10 +2581,10 @@ int WorldItemStoreValidator::validate() const
 			else
 			{
 				recipe_offset = 56U
-					+ static_cast<std::size_t>(character_size)
-					+ static_cast<std::size_t>(item_size);
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(character_size)
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(item_size);
 				corrupted[recipe_offset
-					+ static_cast<std::size_t>(recipe_size) - 1U] ^= 0x01U;
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(recipe_size) - 1U] ^= 0x01U;
 				checksum = session_snapshot_checksum(corrupted.data(),
 					corrupted.size() - 8U);
 				uint32_t shift = 0U;
@@ -2639,11 +2662,11 @@ int WorldItemStoreValidator::validate() const
 			else
 			{
 				action_cache_offset = 56U
-					+ static_cast<std::size_t>(character_size)
-					+ static_cast<std::size_t>(item_size)
-					+ static_cast<std::size_t>(recipe_size);
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(character_size)
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(item_size)
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(recipe_size);
 				corrupted[action_cache_offset
-					+ static_cast<std::size_t>(action_cache_size) - 1U] ^= 0x01U;
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(action_cache_size) - 1U] ^= 0x01U;
 				checksum = session_snapshot_checksum(corrupted.data(),
 					corrupted.size() - 8U);
 				for (uint32_t shift = 0U; shift < 64U; shift += 8U)
@@ -2710,9 +2733,9 @@ int WorldItemStoreValidator::validate() const
 				error_code = FT_ERR_INVALID_ARGUMENT;
 			if (error_code == FT_ERR_SUCCESS)
 				action_cache_offset = 56U
-					+ static_cast<std::size_t>(character_size)
-					+ static_cast<std::size_t>(item_size)
-					+ static_cast<std::size_t>(recipe_size);
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(character_size)
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(item_size)
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(recipe_size);
 		if (error_code == FT_ERR_SUCCESS && (action_cache_size < 28U
 			|| processing_size < 32U
 			|| action_cache_offset > version_five.size() - 8U
@@ -3367,11 +3390,11 @@ int WorldItemStoreValidator::validate() const
 				error_code = FT_ERR_INVALID_ARGUMENT;
 			else
 			{
-				journal_offset = 64U + static_cast<std::size_t>(character_size)
-					+ static_cast<std::size_t>(item_size)
-					+ static_cast<std::size_t>(recipe_size)
-					+ static_cast<std::size_t>(cache_size)
-					+ static_cast<std::size_t>(processing_size);
+				journal_offset = 64U + FT_UINT64_TO_NATIVE_SIZE_CAST(character_size)
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(item_size)
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(recipe_size)
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(cache_size)
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(processing_size);
 				corrupted[journal_offset + 4U] ^= 0x01U;
 				checksum = session_snapshot_checksum(corrupted.data(),
 					corrupted.size() - 8U);

@@ -115,10 +115,13 @@ script-effect content. Equivalent content fingerprints match and content
 changes alter the result; session import enforcement and Minecraft host-schema
 and policy inclusion remain open. Minecraft-owned revisioned chunk
 selection, start-cost quoting, and 4–7-card opening-deal pricing are specified
-in the linked Libft integration design; none of those World Loom APIs or UI are
-implemented by this Libft work. Minecraft instability amounts,
-mandatory-discard obligations, the 20-card deck/content adapter, and the World
-Loom multiplayer card session remain unimplemented.
+in the linked Libft integration design; World Loom APIs belong to Minecraft,
+not this Libft work. The older statement that instability, mandatory discard,
+the 20-card deck/content adapter, and World Loom card-session foundations were
+unimplemented is superseded by the current source checkpoint below: these
+foundations are now present in Minecraft, while complete card content,
+production multiplayer integration, crash-safe recovery, and end-to-end
+validation remain open.
 
 Respect these current API boundaries when planning integration:
 
@@ -313,7 +316,7 @@ and selected count. The request cache retains that state snapshot for exact
 retries; the network API also supports owner-bound draft cancellation. Validator
 source checks the repeated begin response and cancellation replay.
 
-The Libft inventory now keeps its mutable item map private in production builds. Persistence and reset paths use revisioned `clear_items()`, and the inventory regression suite passes 13/13 when isolated. The full Libft test link still has unrelated GPU/render platform symbol failures; production and analytics dependency builds should be rerun with the complete platform linker configuration.
+The Libft inventory keeps its mutable item map private in production builds. Persistence and reset paths use revisioned `clear_items()`. The current Libft worktree's full test executable passes 6,505/6,505 on Linux (localhost-dependent network cases require execution outside the sandbox). This supersedes the older report of unrelated GPU/render symbol failures for the Libft test link. Minecraft `make test` has not reached its validators in this checkpoint: building the `ft_vox` prerequisite failed while recursively producing `ft_vox_analytics` (`[Minecraft][Analytics] output missing`), so production/analytics dependency and validator runs still need to be completed.
 
 ### 4.2 Multiplayer regeneration reservation and card window
 
@@ -527,6 +530,24 @@ allowlist/approval, fresh-character-only worlds, incompatible versions,
 capacity overflow, duplicate join requests, disconnect recovery, leases, and
 preservation of world IDs, character modes, policies, revisions, edits,
 entities, inventories, and regeneration sessions.
+
+The admission matrix must also cover subsystem ownership explicitly: physical
+World Loom card/deck instances, ordinary inventory/equipment, and recipe-book
+grants with character/world scope and source-event identity. Verify that active
+regeneration sessions never cross worlds; destination policy filters portable
+grants without deleting source-world state; legacy records without scope follow
+a versioned migration rule rather than becoming implicitly portable; and
+prepare/commit retries, crash recovery, backup/restore, and concurrent joins
+cannot duplicate a physical item/card ID or unlock entitlement.
+
+World Loom lifecycle acceptance must test the exact irreversible boundary:
+draft cancellation succeeds without spending, but cancellation and selection
+edits fail after the committed start even while the card decision window is
+open. Restart/retry must preserve the original deadline and committed card,
+resource, barrier, and rules state. The current `GameSession` source always
+applies a five-minute deadline; the product requirement specifies this window
+for multiplayer, so solo behavior must be explicitly selected by policy and
+tested rather than inheriting that timer accidentally.
 
 ## 7. Map, selection, and preview
 
@@ -1505,38 +1526,55 @@ UI remains a recipe book and never becomes an ingredient grid.
 
 ### 8.8 Libft CardGame adapter and World Loom integration
 
-**Implementation checkpoint (2026-10-02):** the linked Libft design document
-now has an implementation ledger for the current uncommitted worktree. Libft
-foundations for typed host intents, in-memory snapshot/delta preservation,
-basic script-to-intent bridging, a sequenced/replayable physical-instance
-discard command and policy-aware draw/overflow foundations, a persistent
-recipe-book with configured default unlocks, a read-only recipe-availability
-query, prepared all-or-nothing crafting, and all-or-nothing single-inventory
-item addition have started, but these are not yet an integrated Minecraft
-World Loom feature. Keep this roadmap item open until the
-Minecraft-owned action/session adapter, card catalogue, persistence,
-multiplayer lifecycle, and end-to-end validators below are implemented.
+**Implementation checkpoint (refreshed 2026-10-22; source inspection only):**
+the linked Libft design ledger now references the fetched branches. Libft
+contains typed host intents, snapshot/delta/replay support, session-scoped
+request-idempotent actions, policy-aware draw and mandatory discard, the
+script bridge, revisioned inventory and recipe-book APIs, and prepared craft
+transactions. Minecraft source contains the 20-card starter adapter, typed
+card choices/effects, a `GameSession::commit_regeneration_start` path for
+actor/Loom/request-scoped quote validation, resource debit, opening deal,
+selected-chunk reservation, barriers, and a persisted decision deadline, plus
+recipe query/discovery/crafting entry points. These are implementation
+foundations, not proof that every card/content rule or the durable multiplayer
+flow is complete.
 
-The Minecraft worktree also has a partial, UI-independent World Loom API:
-explicit select/unselect calls, loaded-chunk and selection-cap checks on the
-revisioned selection path, compare-and-set selection revisions, and a
-read-only quote for selected-chunk currency plus a four-to-seven-card opening
-deal with doubling price steps. Protection changes invalidate stale quotes.
-`./ft_vox_analytics --validate-world-revision` now passes for this API slice.
-Pricing policy is still supplied by the caller; there is no actor/session identity, request-ID
-idempotency, occupancy/exclusion-ring validation, authoritative balance/debit,
-atomic CardGame startup, reservation/barrier commit, or multiplayer session
-yet. This defines backend API only, not UI, and is not a completed
-regeneration-start transaction.
+The current worktree also distinguishes a newly recorded recipe-discovery
+event from a recipe becoming newly known. Minecraft checkpoints a distinct
+event receipt even for an already-known recipe, skips checkpointing an exact
+retry, and rolls the recipe-book state back if saving fails. The full Libft
+suite passes 6,505/6,505; `ItemCatalogValidator` source contains the Minecraft
+checkpoint/retry cases, but they have not executed on this worktree. Minecraft
+runtime validation remains open because its `make test` prerequisite build did
+not produce `ft_vox_analytics`.
+
+Earlier `--validate-world-revision` success records apply to the lower-level
+selection/quote and queue-admission slices. A later directly linked runtime
+validation was reported to fail with Windows heap/stack corruption. The latest
+fetched branches were not built or run in this checkpoint, so neither result
+validates their current end-to-end behavior. Keep production authentication
+and access providers, live occupied-chunk refresh/exclusion rings, durable
+request and host-intent recovery, multiplayer reservations, crash-safe
+generation publication, complete card/content coverage, and end-to-end
+validators open. This remains backend work only; no UI is specified here.
+
+The linked backend design now defines the missing durable CardGame-to-world
+intent boundary as at-least-once delivery with stable identity, a prepared
+consumer journal, atomic participant checkpoint, then producer acknowledgement.
+Its crash matrix and replay tests are design requirements, not evidence that
+this protocol is implemented. Keep World Loom/card actions pending until their
+effects are durably committed; do not expose them as successful based solely on
+the Libft action/outbox commit. See [Durable action-to-host-intent
+protocol](../Libft/Docs/card_game_scripting_inventory_crafting_integration_design.md#durable-action-to-host-intent-protocol).
 
 Use the checked-out Libft `CardGame` module as the rules-neutral runtime for
 card identity, ordered zones, draws/shuffles, effect dispatch, choices,
 usage limits, and match/session state. Minecraft owns the world-specific
-meaning of cards and every world mutation. Implement one thin
-`MinecraftCardGameAdapter` boundary that translates versioned Minecraft
-content into Libft definitions and translates validated engine results back
-into Minecraft-owned intents. Do not build a second card-game runtime in
-Minecraft.
+meaning of cards and every world mutation. The existing
+`RegenerationCardSession` is the Minecraft adapter boundary: it maps versioned
+Minecraft card content to Libft definitions and turns validated engine results
+into Minecraft-owned intents. Keep that boundary thin and versioned; do not add
+a parallel `MinecraftCardGameAdapter` or second card-game runtime.
 
 Use distinct engine profiles/instances for these contexts:
 
@@ -2654,6 +2692,14 @@ needed for this milestone and can later be adapted to the full item economy.
    persistent item/world interactions.
 4. Establish configurable inventory capacity and transactional item transfers.
 
+Backend API checkpoint (2026-10-22, source inspection only): Libft now has
+revisioned inventory snapshots and staged add/transfer/craft transactions;
+Minecraft has session-owned inventory, ground-item persistence/replication,
+and request/revision-keyed craft actions. These are implemented foundations,
+not completion of this phase. The world-wide physical-ID authority, complete
+item acquisition policy, live interaction coverage, and supported-platform
+runtime validation remain open.
+
 Progress update (2026-10-10): The Minecraft item catalogue validates all 64
 built-in block policies, the currently registered runtime rules, and 99
 content definitions. World-item and session codecs persist physical item IDs;
@@ -2681,6 +2727,15 @@ deltas and reconnect/revision race validation remain open.
    independently configurable.
 4. Add the initial tools, armor, weapons, shields, staffs, and combat/magic
    rules, with balance and performance tests.
+
+Backend API checkpoint (2026-10-22, source inspection only): recipe-book query,
+discovery-grant, hand-craft, and station-craft entry points now exist in the
+Minecraft session/catalogue path, backed by Libft recipe-book and prepared
+craft transactions. Do not mark recipe-book crafting or station checks done
+until the complete recipe/content set, placed-station ownership/reach rules,
+save/recovery behavior, and runtime validators pass. Keep this backend progress
+separate from the still-open farming, food, equipment, combat, and balance
+deliverables above.
 
 Combat integration status (2026-10-14): Journalled melee attacks now use the
 catalog-resolved equipped main-hand rule through an identity-and-durability
@@ -2742,7 +2797,10 @@ Before calling any later Game 1.0 phase complete:
    approval-required, and fresh-character-only worlds, with clear UI previews
    and transactional join/leave behavior.
 4. Pass the save, reload, duplicate-join, policy, migration, and no-duplication
-   validators in section 6.5 before enabling public multiplayer worlds.
+   validators in section 6.5 before enabling public multiplayer worlds. Include
+   the card-deck, inventory, recipe-unlock, active World Loom session, and
+   legacy-scope cases; a session lease alone is not proof of durable
+   no-duplication across restore/rollback.
 
 ### Phase 6 – Game 1.0 player avatars and customization
 
@@ -3036,6 +3094,25 @@ move insertion now grow only when the map is full. Libft character saves now
 serialize inventory from a locked, value-only snapshot, including physical
 item IDs and item modifiers; older saves without instance IDs load with ID 0. The Libft inventory transfer API now offers a transaction-ID overload with an explicit scope and a bounded, volatile 4,096-entry replay cache; the compatibility overload has no deduplication contract. Focused transfer regressions pass 12/12, including scoped-ID isolation and fail-closed capacity behavior. `WorldItemStore::pickup` now uses the scoped transfer API for each exact quantity attempt, while its actor/request cache handles pickup retries. Both caches are process-local, and the pickup cache evicts old request IDs. Saved-world integration still needs durable inventory recovery and atomic coordination with mining/drop transactions. `GameSession` now exposes hand-only recipe query/craft actions through `MinecraftRecipeCatalog`; actions require the expected inventory revision and use a bounded 4,096-result session request cache whose high-water mark rejects evicted IDs. The item-catalog validator passes a successful craft, exact retry, changed-payload rejection, and stale-revision retry through this API. The hand-craft cache is stored in combined session snapshot version 5 alongside processing-job state; versions 1–4 remain readable, with older files loading empty action/job caches. Hand crafting still uses station 0. Furnace jobs use the timed queue and save codec, but placed-furnace ownership/reach checks, station UI/network transport and crash-safe resource coordination remain open. Durable mining/drop transactions, the broader recipe action surface, and content-specific runtime policies also remain open.
 
+Backend caller-API follow-up (2026-10-22; design only): the current GameSession
+recipe query/craft endpoints require an expected inventory revision, but the
+query result does not include that revision, and GameSession has no public
+immutable inventory-view/list-query API. The combined
+`MinecraftRecipeCatalog::query_recipes` already exists internally, but returns
+no inventory/catalogue revision and reads the live inventory once per recipe.
+Libft's `game_crafting` currently has no snapshot query overload. Add an
+actor-scoped value inventory snapshot and a generic snapshot-based crafting
+query, then expose the existing catalog aggregation through an authorized
+GameSession call. All result rows must use one inventory snapshot and report
+the scoped revision tuple: world/session epoch, inventory revision,
+character-state revision, catalogue revision, and station identity/revision
+when applicable. Zero is invalid; revisions must not wrap or be compared
+across epochs. A query that cannot hold one coherent tuple returns stale state
+with no partial rows, and the mutation revalidates the tuple at commit. Craft
+mutations bind the request ID and exact revisions, return structured results,
+replay exact retries and reject changed-payload ID reuse. This is a backend API
+requirement, not a UI task; see the [Libft integration design](../Libft/Docs/card_game_scripting_inventory_crafting_integration_design.md#9-recipe-book-api-and-unlocks).
+
 Define an immutable item definition with a stable `item_definition_id`,
 display/localization key, icon/model key, stack limit, category/tags, weight
 (optional metadata only; not a mandatory carrying mechanic), and relevant
@@ -3328,7 +3405,8 @@ balance values–not hard-coded assumptions in the inventory or recipe engine.
 | Mining and metal progression | Coal, iron, gold, copper, diamond, and emerald ore-block items matching the existing blocks; smelted iron/gold/copper bars (only where a recipe is defined); configured crystals/gems; pickaxes, axes, swords, and their recipe components. Ore-block items remain collectible even if a required tool tier controls whether they can be mined. |
 | Farming and food | Grain/wheat item, seed item, bread, apple, pear, raw and cooked beef, raw and cooked pork, raw and cooked chicken, raw and cooked mutton, and any configured animal feed. Each edible definition declares hunger and saturation values; no food behavior is inferred from its display name. |
 | Animal materials | Wool, leather, feathers, eggs, and species-specific raw meat items from configured sheep/cow/pig/chicken drop tables. Death/drop generation is one authoritative transaction; breeding consumes configured feed and produces an entity, not a duplicated inventory item. |
-| Tools, weapons, and armor | Pickaxe, axe, sword, bow, arrows, shield, staff, and cloth/leather/iron armor pieces for each configured equipment slot. Definitions carry mining tier, durability, attack/defense/style values, and stack/instance rules. Unique or durable equipment uses item instances. |
+| Hostile mob loot | Rotten flesh, bones, gunpowder, string, and spider eyes from configured zombie/skeleton/creeper/spider tables. Each table defines bounded chance and quantity ranges and uses the persisted death-event identity for deterministic, exactly-once delivery. |
+| Tools, weapons, and armor | Wooden hoe; pickaxe, axe, sword, bow, arrows, shield, staff, and cloth/leather/iron armor pieces for each configured equipment slot. Definitions carry mining tier, durability, attack/defense/style values, and stack/instance rules. Unique or durable equipment uses item instances; hoe use is validated by the farmland-tilling action. |
 | Regeneration cards | The starter and later card definitions from Section 8 as unique card items. A card is an item while carried and transfers transactionally into or out of the separate World Loom deck; deck membership is not another copy. |
 | Consumables and progression | Configured health-recovery and future focus consumables only when recipes and balance define them. Do not add placeholder items that have no gameplay use merely to pad the catalog. |
 
@@ -5196,3 +5274,15 @@ v3 records its physical identity and uses the same equipped instance during
 prepared-action recovery; compatibility callers retain the inventory-tool v2
 path. This enforces the roadmap rule that a stronger tool in inventory cannot
 authorize mining. Source-only; testing and builds remain deferred.
+
+Recipe catalogue snapshot query (2026-10-22): `MinecraftRecipeCatalog::query_recipes`
+now captures one Libft inventory snapshot and evaluates every requested recipe
+against that same inventory revision. Libft owns the reusable
+`game_crafting::query_recipe_at_station_snapshot` matcher and validates the
+snapshot's stack and aggregate invariants. The ItemCatalog validator checks a
+craftable filtered query; normal and analytics builds and both
+`--validate-item-catalog` runs pass. Broader catalogue/recipe-book revision
+consistency is still open. The attempted `make validate-all` does not pass yet:
+it times out during emissive block-delete convergence with the target chunk
+still dirty and a remesh in flight. That lighting/remesh scheduling failure
+is separate from the recipe query and remains an active backend issue.

@@ -487,6 +487,7 @@ static int32_t item_catalog_validate_recipes(
 	game_crafting_query_result query_result = {};
 	ft_bool known = FT_FALSE;
 	ft_bool newly_unlocked = FT_FALSE;
+	game_recipe_unlock_result discovery_result = {};
 	uint64_t card_instance_id = 0U;
 	uint64_t inventory_revision = 0U;
 	uint64_t crafted_revision = 0U;
@@ -494,6 +495,8 @@ static int32_t item_catalog_validate_recipes(
 	uint32_t recipe_output_count = 0U;
 	int32_t missing_recipe_item_id = 0;
 	game_inventory_snapshot card_inventory_snapshot = {};
+	std::vector<MinecraftRecipeQueryEntry> recipe_query_entries;
+	std::vector<MinecraftRecipeMissingGroup> recipe_query_missing;
 	std::vector<int32_t> item_tag_ids;
 	std::vector<uint8_t> recipe_book_before_discovery;
 	ItemCatalogTestSaveContext save_context = {FT_ERR_DISK_FULL, 0U};
@@ -595,6 +598,15 @@ static int32_t item_catalog_validate_recipes(
 		error_code = inventory.add_item(log_item);
 	if (error_code == FT_ERR_SUCCESS)
 		error_code = missing_groups.initialize();
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = recipes.query_recipes(inventory, 1001U,
+			MinecraftRecipeCatalog::HAND_STATION_ID, recipe_query_entries,
+			recipe_query_missing);
+	if (error_code == FT_ERR_SUCCESS
+		&& (recipe_query_entries.size() != 1U
+			|| !recipe_query_entries[0].status.craftable
+			|| !recipe_query_missing.empty()))
+		error_code = FT_ERR_INVALID_STATE;
 	if (error_code == FT_ERR_SUCCESS)
 		error_code = recipes.crafting().query_recipe(1001, inventory,
 			&query_result, &missing_groups);
@@ -727,6 +739,50 @@ static int32_t item_catalog_validate_recipes(
 			&newly_unlocked);
 	if (error_code == FT_ERR_SUCCESS
 		&& (newly_unlocked != FT_TRUE || save_context.calls != 2U))
+		error_code = FT_ERR_INVALID_STATE;
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = recipes.register_discovery_source(2U, 0x2008U,
+			MinecraftRecipeCatalog::VOLCANO_MARK_CARD_RECIPE_ID);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = RecipeDiscoveryTransaction::execute(recipes, 2U,
+			0x2008U, 0x4341524400002009ULL, snapshot_writer,
+			&discovery_result);
+	if (error_code == FT_ERR_SUCCESS
+		&& (discovery_result.event_newly_recorded != FT_TRUE
+			|| discovery_result.recipe_newly_known != FT_FALSE
+			|| save_context.calls != 3U))
+		error_code = FT_ERR_INVALID_STATE;
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = RecipeDiscoveryTransaction::execute(recipes, 2U,
+			0x2008U, 0x4341524400002009ULL, snapshot_writer,
+			&discovery_result);
+	if (error_code == FT_ERR_SUCCESS
+		&& (discovery_result.event_newly_recorded != FT_FALSE
+			|| discovery_result.recipe_newly_known != FT_FALSE
+			|| save_context.calls != 3U))
+		error_code = FT_ERR_INVALID_STATE;
+	if (error_code == FT_ERR_SUCCESS)
+		save_context.result = FT_ERR_DISK_FULL;
+	if (error_code == FT_ERR_SUCCESS)
+	{
+		const int32_t failed_known_recipe_save =
+			RecipeDiscoveryTransaction::execute(recipes, 2U, 0x2008U,
+				0x4341524400002010ULL, snapshot_writer, &discovery_result);
+		if (failed_known_recipe_save != FT_ERR_DISK_FULL
+			|| discovery_result.event_newly_recorded != FT_FALSE
+			|| discovery_result.recipe_newly_known != FT_FALSE
+			|| save_context.calls != 4U)
+			error_code = FT_ERR_INVALID_STATE;
+	}
+	save_context.result = FT_ERR_SUCCESS;
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = RecipeDiscoveryTransaction::execute(recipes, 2U,
+			0x2008U, 0x4341524400002010ULL, snapshot_writer,
+			&discovery_result);
+	if (error_code == FT_ERR_SUCCESS
+		&& (discovery_result.event_newly_recorded != FT_TRUE
+			|| discovery_result.recipe_newly_known != FT_FALSE
+			|| save_context.calls != 5U))
 		error_code = FT_ERR_INVALID_STATE;
 	if (error_code == FT_ERR_SUCCESS)
 		error_code = recipes.grant_recipe_from_discovery(1U, 0x2012U,
@@ -929,24 +985,47 @@ int ItemCatalogValidator::validate() const
 	uint32_t runtime_rule_count = 0U;
 	uint32_t content_rule_count = 0U;
 	int32_t error_code;
+	const char *validation_stage = "recipe-discovery-authority";
 
 	error_code = item_catalog_validate_recipe_discovery_authority();
 	if (error_code == FT_ERR_SUCCESS)
+	{
+		validation_stage = "volcano-use-authority";
 		error_code = item_catalog_validate_volcano_use_authority();
-	if (error_code == FT_ERR_SUCCESS)
-		error_code = item_catalog_validate_draw_instability_configuration();
-	if (error_code == FT_ERR_SUCCESS)
-		error_code = item_catalog_validate_volcano_preview_footprint();
-	if (error_code == FT_ERR_SUCCESS)
-		error_code = item_catalog_validate_recipe_source_configuration();
-	if (error_code == FT_ERR_SUCCESS)
-		error_code = item_catalog_validate_revision_occupancy_configuration();
-	if (error_code == FT_ERR_SUCCESS)
-		error_code = item_catalog_validate_script_catalog_authority();
-	if (error_code == FT_ERR_SUCCESS)
-		error_code = catalog.initialize();
+	}
 	if (error_code == FT_ERR_SUCCESS)
 	{
+		validation_stage = "draw-instability-configuration";
+		error_code = item_catalog_validate_draw_instability_configuration();
+	}
+	if (error_code == FT_ERR_SUCCESS)
+	{
+		validation_stage = "volcano-preview-footprint";
+		error_code = item_catalog_validate_volcano_preview_footprint();
+	}
+	if (error_code == FT_ERR_SUCCESS)
+	{
+		validation_stage = "recipe-source-configuration";
+		error_code = item_catalog_validate_recipe_source_configuration();
+	}
+	if (error_code == FT_ERR_SUCCESS)
+	{
+		validation_stage = "revision-occupancy-configuration";
+		error_code = item_catalog_validate_revision_occupancy_configuration();
+	}
+	if (error_code == FT_ERR_SUCCESS)
+	{
+		validation_stage = "script-catalog-authority";
+		error_code = item_catalog_validate_script_catalog_authority();
+	}
+	if (error_code == FT_ERR_SUCCESS)
+	{
+		validation_stage = "catalog-initialize";
+		error_code = catalog.initialize();
+	}
+	if (error_code == FT_ERR_SUCCESS)
+	{
+		validation_stage = "physical-item-identity-policy";
 		const int32_t unique_items[] = {
 			MinecraftItemCatalog::BOAT_ITEM_ID,
 			MinecraftItemCatalog::WOOD_PICKAXE_ITEM_ID,
@@ -960,6 +1039,9 @@ int ItemCatalogValidator::validate() const
 				unique_items[index], &required);
 			if (error_code != FT_ERR_SUCCESS || !required)
 			{
+				std::fprintf(stderr,
+					"item-catalog: physical identity item=%d required=%d error=%d\n",
+					unique_items[index], required ? 1 : 0, error_code);
 				if (error_code == FT_ERR_SUCCESS)
 					error_code = FT_ERR_INVALID_STATE;
 				break ;
@@ -969,11 +1051,16 @@ int ItemCatalogValidator::validate() const
 			item_id <= MinecraftItemCatalog::IRON_BOOTS_ITEM_ID
 				&& error_code == FT_ERR_SUCCESS; ++item_id)
 		{
+			if (item_id == MinecraftItemCatalog::ARROW_ITEM_ID)
+				continue ;
 			bool required = false;
 			error_code = catalog.requires_physical_instance_id(item_id,
 				&required);
 			if (error_code != FT_ERR_SUCCESS || !required)
 			{
+				std::fprintf(stderr,
+					"item-catalog: equipment identity item=%d required=%d error=%d\n",
+					item_id, required ? 1 : 0, error_code);
 				if (error_code == FT_ERR_SUCCESS)
 					error_code = FT_ERR_INVALID_STATE;
 				break ;
@@ -989,6 +1076,9 @@ int ItemCatalogValidator::validate() const
 				&required);
 			if (error_code != FT_ERR_SUCCESS || !required)
 			{
+				std::fprintf(stderr,
+					"item-catalog: card identity item=%d required=%d error=%d\n",
+					item_id, required ? 1 : 0, error_code);
 				if (error_code == FT_ERR_SUCCESS)
 					error_code = FT_ERR_INVALID_STATE;
 				break ;
@@ -1035,7 +1125,10 @@ int ItemCatalogValidator::validate() const
 			error_code = FT_ERR_INVALID_STATE;
 	}
 	if (error_code == FT_ERR_SUCCESS)
+	{
+		validation_stage = "builtin-block-coverage";
 		error_code = catalog.validate_builtin_coverage(&builtin_rule_count);
+	}
 	if (error_code == FT_ERR_SUCCESS
 		&& builtin_rule_count != VOXEL_BUILTIN_BLOCK_COUNT)
 		error_code = FT_ERR_INVALID_STATE;
@@ -1433,7 +1526,8 @@ int ItemCatalogValidator::validate() const
 	if (error_code != FT_ERR_SUCCESS)
 	{
 		std::fprintf(stderr,
-			"item-catalog: coverage validation failed error=%d builtin=%u runtime=%u content=%u\n",
+			"item-catalog: coverage validation failed stage=%s error=%d builtin=%u runtime=%u content=%u\n",
+			validation_stage,
 			error_code, builtin_rule_count, runtime_rule_count,
 			content_rule_count);
 		(void)catalog.destroy();

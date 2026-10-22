@@ -115,7 +115,7 @@ namespace
 		{
 			try
 			{
-				bytes.resize(static_cast<std::size_t>(file_size));
+				bytes.resize(FT_UINT64_TO_NATIVE_SIZE_CAST(file_size));
 			}
 			catch (const std::bad_alloc &)
 			{
@@ -769,128 +769,128 @@ static int32_t game_session_persistence_load_file(const char *file_path,
 			&& fluid_state == nullptr)
 		|| character_size > reader.size - reader.offset
 		|| item_size > reader.size - reader.offset
-			- static_cast<std::size_t>(character_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(character_size)
 		|| recipe_size > reader.size - reader.offset
-			- static_cast<std::size_t>(character_size)
-			- static_cast<std::size_t>(item_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(character_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(item_size)
 		|| craft_action_cache_size > reader.size - reader.offset
-			- static_cast<std::size_t>(character_size)
-			- static_cast<std::size_t>(item_size)
-			- static_cast<std::size_t>(recipe_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(character_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(item_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(recipe_size)
 		|| processing_state_size > reader.size - reader.offset
-			- static_cast<std::size_t>(character_size)
-			- static_cast<std::size_t>(item_size)
-			- static_cast<std::size_t>(recipe_size)
-			- static_cast<std::size_t>(craft_action_cache_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(character_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(item_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(recipe_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(craft_action_cache_size)
 		|| transaction_journal_size > reader.size - reader.offset
-			- static_cast<std::size_t>(character_size)
-			- static_cast<std::size_t>(item_size)
-			- static_cast<std::size_t>(recipe_size)
-			- static_cast<std::size_t>(craft_action_cache_size)
-			- static_cast<std::size_t>(processing_state_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(character_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(item_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(recipe_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(craft_action_cache_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(processing_state_size)
 		|| card_session_size > reader.size - reader.offset
-			- static_cast<std::size_t>(character_size)
-			- static_cast<std::size_t>(item_size)
-			- static_cast<std::size_t>(recipe_size)
-			- static_cast<std::size_t>(craft_action_cache_size)
-			- static_cast<std::size_t>(processing_state_size)
-			- static_cast<std::size_t>(transaction_journal_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(character_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(item_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(recipe_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(craft_action_cache_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(processing_state_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(transaction_journal_size)
 		|| regeneration_rules_size > reader.size - reader.offset
-			- static_cast<std::size_t>(character_size)
-			- static_cast<std::size_t>(item_size)
-			- static_cast<std::size_t>(recipe_size)
-			- static_cast<std::size_t>(craft_action_cache_size)
-			- static_cast<std::size_t>(processing_state_size)
-			- static_cast<std::size_t>(transaction_journal_size)
-			- static_cast<std::size_t>(card_session_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(character_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(item_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(recipe_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(craft_action_cache_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(processing_state_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(transaction_journal_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(card_session_size)
 		|| chunk_instability_size > reader.size - reader.offset
-			- static_cast<std::size_t>(character_size)
-			- static_cast<std::size_t>(item_size)
-			- static_cast<std::size_t>(recipe_size)
-			- static_cast<std::size_t>(craft_action_cache_size)
-			- static_cast<std::size_t>(processing_state_size)
-			- static_cast<std::size_t>(transaction_journal_size)
-			- static_cast<std::size_t>(card_session_size)
-			- static_cast<std::size_t>(regeneration_rules_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(character_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(item_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(recipe_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(craft_action_cache_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(processing_state_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(transaction_journal_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(card_session_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(regeneration_rules_size)
 		|| revision_metadata_size > reader.size - reader.offset
-			- static_cast<std::size_t>(character_size)
-			- static_cast<std::size_t>(item_size)
-			- static_cast<std::size_t>(recipe_size)
-			- static_cast<std::size_t>(craft_action_cache_size)
-			- static_cast<std::size_t>(processing_state_size)
-			- static_cast<std::size_t>(transaction_journal_size)
-			- static_cast<std::size_t>(card_session_size)
-			- static_cast<std::size_t>(regeneration_rules_size)
-			- static_cast<std::size_t>(chunk_instability_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(character_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(item_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(recipe_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(craft_action_cache_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(processing_state_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(transaction_journal_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(card_session_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(regeneration_rules_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(chunk_instability_size)
 		|| fluid_state_size > reader.size - reader.offset
-			- static_cast<std::size_t>(character_size)
-			- static_cast<std::size_t>(item_size)
-			- static_cast<std::size_t>(recipe_size)
-			- static_cast<std::size_t>(craft_action_cache_size)
-			- static_cast<std::size_t>(processing_state_size)
-			- static_cast<std::size_t>(transaction_journal_size)
-			- static_cast<std::size_t>(card_session_size)
-			- static_cast<std::size_t>(regeneration_rules_size)
-			- static_cast<std::size_t>(chunk_instability_size)
-			- static_cast<std::size_t>(revision_metadata_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(character_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(item_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(recipe_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(craft_action_cache_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(processing_state_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(transaction_journal_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(card_session_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(regeneration_rules_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(chunk_instability_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(revision_metadata_size)
 		|| entity_state_size > reader.size - reader.offset
-			- static_cast<std::size_t>(character_size)
-			- static_cast<std::size_t>(item_size)
-			- static_cast<std::size_t>(recipe_size)
-			- static_cast<std::size_t>(craft_action_cache_size)
-			- static_cast<std::size_t>(processing_state_size)
-			- static_cast<std::size_t>(transaction_journal_size)
-			- static_cast<std::size_t>(card_session_size)
-			- static_cast<std::size_t>(regeneration_rules_size)
-			- static_cast<std::size_t>(chunk_instability_size)
-			- static_cast<std::size_t>(revision_metadata_size)
-			- static_cast<std::size_t>(fluid_state_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(character_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(item_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(recipe_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(craft_action_cache_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(processing_state_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(transaction_journal_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(card_session_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(regeneration_rules_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(chunk_instability_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(revision_metadata_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(fluid_state_size)
 		|| crop_growth_policy_size > reader.size - reader.offset
-			- static_cast<std::size_t>(character_size)
-			- static_cast<std::size_t>(item_size)
-			- static_cast<std::size_t>(recipe_size)
-			- static_cast<std::size_t>(craft_action_cache_size)
-			- static_cast<std::size_t>(processing_state_size)
-			- static_cast<std::size_t>(transaction_journal_size)
-			- static_cast<std::size_t>(card_session_size)
-			- static_cast<std::size_t>(regeneration_rules_size)
-			- static_cast<std::size_t>(chunk_instability_size)
-			- static_cast<std::size_t>(revision_metadata_size)
-			- static_cast<std::size_t>(fluid_state_size)
-			- static_cast<std::size_t>(entity_state_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(character_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(item_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(recipe_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(craft_action_cache_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(processing_state_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(transaction_journal_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(card_session_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(regeneration_rules_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(chunk_instability_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(revision_metadata_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(fluid_state_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(entity_state_size)
 		|| revision_server_state_size > reader.size - reader.offset
-			- static_cast<std::size_t>(character_size)
-			- static_cast<std::size_t>(item_size)
-			- static_cast<std::size_t>(recipe_size)
-			- static_cast<std::size_t>(craft_action_cache_size)
-			- static_cast<std::size_t>(processing_state_size)
-			- static_cast<std::size_t>(transaction_journal_size)
-			- static_cast<std::size_t>(card_session_size)
-			- static_cast<std::size_t>(regeneration_rules_size)
-			- static_cast<std::size_t>(chunk_instability_size)
-			- static_cast<std::size_t>(revision_metadata_size)
-			- static_cast<std::size_t>(fluid_state_size)
-			- static_cast<std::size_t>(entity_state_size)
-			- static_cast<std::size_t>(crop_growth_policy_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(character_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(item_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(recipe_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(craft_action_cache_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(processing_state_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(transaction_journal_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(card_session_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(regeneration_rules_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(chunk_instability_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(revision_metadata_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(fluid_state_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(entity_state_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(crop_growth_policy_size)
 			- (version >= SESSION_SNAPSHOT_VERSION_WITH_OUTPUT_SESSION_ID
 				? 8U : 0U))
 		return (FT_ERR_INVALID_ARGUMENT);
-	payload_end = reader.offset + static_cast<std::size_t>(character_size)
-		+ static_cast<std::size_t>(item_size)
-		+ static_cast<std::size_t>(recipe_size)
-		+ static_cast<std::size_t>(craft_action_cache_size)
-		+ static_cast<std::size_t>(processing_state_size)
-		+ static_cast<std::size_t>(transaction_journal_size)
-		+ static_cast<std::size_t>(card_session_size)
-		+ static_cast<std::size_t>(regeneration_rules_size)
-		+ static_cast<std::size_t>(chunk_instability_size);
-	payload_end += static_cast<std::size_t>(revision_metadata_size);
-	payload_end += static_cast<std::size_t>(fluid_state_size);
-	if (payload_end + static_cast<std::size_t>(entity_state_size)
-		+ static_cast<std::size_t>(crop_growth_policy_size)
+	payload_end = reader.offset + FT_UINT64_TO_NATIVE_SIZE_CAST(character_size)
+		+ FT_UINT64_TO_NATIVE_SIZE_CAST(item_size)
+		+ FT_UINT64_TO_NATIVE_SIZE_CAST(recipe_size)
+		+ FT_UINT64_TO_NATIVE_SIZE_CAST(craft_action_cache_size)
+		+ FT_UINT64_TO_NATIVE_SIZE_CAST(processing_state_size)
+		+ FT_UINT64_TO_NATIVE_SIZE_CAST(transaction_journal_size)
+		+ FT_UINT64_TO_NATIVE_SIZE_CAST(card_session_size)
+		+ FT_UINT64_TO_NATIVE_SIZE_CAST(regeneration_rules_size)
+		+ FT_UINT64_TO_NATIVE_SIZE_CAST(chunk_instability_size);
+	payload_end += FT_UINT64_TO_NATIVE_SIZE_CAST(revision_metadata_size);
+	payload_end += FT_UINT64_TO_NATIVE_SIZE_CAST(fluid_state_size);
+	if (payload_end + FT_UINT64_TO_NATIVE_SIZE_CAST(entity_state_size)
+		+ FT_UINT64_TO_NATIVE_SIZE_CAST(crop_growth_policy_size)
 		+ (version >= SESSION_SNAPSHOT_VERSION_WITH_OUTPUT_SESSION_ID
 			? 8U : 0U)
-		+ static_cast<std::size_t>(revision_server_state_size)
+		+ FT_UINT64_TO_NATIVE_SIZE_CAST(revision_server_state_size)
 		!= reader.size)
 		return (FT_ERR_INVALID_ARGUMENT);
 	if (version >= SESSION_SNAPSHOT_VERSION_WITH_OUTPUT_SESSION_ID)
@@ -898,8 +898,8 @@ static int32_t game_session_persistence_load_file(const char *file_path,
 		session_id_reader.bytes = bytes.data();
 		session_id_reader.size = reader.size;
 		session_id_reader.offset = payload_end
-			+ static_cast<std::size_t>(entity_state_size)
-			+ static_cast<std::size_t>(crop_growth_policy_size);
+			+ FT_UINT64_TO_NATIVE_SIZE_CAST(entity_state_size)
+			+ FT_UINT64_TO_NATIVE_SIZE_CAST(crop_growth_policy_size);
 		if (!session_id_reader.read_u64(&restored_output_session_id))
 			return (FT_ERR_INVALID_ARGUMENT);
 	}
@@ -909,7 +909,7 @@ static int32_t game_session_persistence_load_file(const char *file_path,
 		{
 			staged_entity_state.assign(bytes.begin() + payload_end,
 				bytes.begin() + payload_end
-					+ static_cast<std::size_t>(entity_state_size));
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(entity_state_size));
 		}
 		catch (const std::bad_alloc &)
 		{
@@ -922,10 +922,10 @@ static int32_t game_session_persistence_load_file(const char *file_path,
 		{
 			staged_crop_growth_policy_state.assign(
 				bytes.begin() + payload_end
-					+ static_cast<std::size_t>(entity_state_size),
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(entity_state_size),
 				bytes.begin() + payload_end
-					+ static_cast<std::size_t>(entity_state_size)
-					+ static_cast<std::size_t>(crop_growth_policy_size));
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(entity_state_size)
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(crop_growth_policy_size));
 		}
 		catch (const std::bad_alloc &)
 		{
@@ -938,7 +938,7 @@ static int32_t game_session_persistence_load_file(const char *file_path,
 		{
 			staged_revision_server_state.assign(
 				bytes.begin() + reader.size
-					- static_cast<std::size_t>(revision_server_state_size),
+					- FT_UINT64_TO_NATIVE_SIZE_CAST(revision_server_state_size),
 				bytes.begin() + reader.size);
 		}
 		catch (const std::bad_alloc &)
@@ -948,13 +948,13 @@ static int32_t game_session_persistence_load_file(const char *file_path,
 	}
 	if (version >= SESSION_SNAPSHOT_VERSION_WITH_SPAWNERS)
 		result = GameSessionEntityState::validate(bytes.data() + payload_end,
-			static_cast<std::size_t>(entity_state_size));
+			FT_UINT64_TO_NATIVE_SIZE_CAST(entity_state_size));
 	else if (version >= SESSION_SNAPSHOT_VERSION_WITH_ENTITIES)
 	{
 		result = staged_entities.initialize();
 		if (result == FT_ERR_SUCCESS)
 			result = staged_entities.deserialize(bytes.data() + payload_end,
-				static_cast<std::size_t>(entity_state_size));
+				FT_UINT64_TO_NATIVE_SIZE_CAST(entity_state_size));
 	}
 	if (result != FT_ERR_SUCCESS)
 		return (result);
@@ -962,7 +962,7 @@ static int32_t game_session_persistence_load_file(const char *file_path,
 	{
 		character_json.assign(
 			reinterpret_cast<const char *>(bytes.data() + reader.offset),
-			static_cast<std::size_t>(character_size));
+			FT_UINT64_TO_NATIVE_SIZE_CAST(character_size));
 	}
 	catch (const std::bad_alloc &)
 	{
@@ -970,14 +970,14 @@ static int32_t game_session_persistence_load_file(const char *file_path,
 	}
 	if (character_json.find('\0') != std::string::npos)
 		return (FT_ERR_INVALID_ARGUMENT);
-	reader.offset += static_cast<std::size_t>(character_size);
+	reader.offset += FT_UINT64_TO_NATIVE_SIZE_CAST(character_size);
 	result = staged_items.initialize();
 	if (result == FT_ERR_SUCCESS && transaction_journal != nullptr)
 		result = staged_transaction_journal.initialize();
 	if (result == FT_ERR_SUCCESS)
 	{
 		result = staged_items.deserialize(bytes.data() + reader.offset,
-			static_cast<std::size_t>(item_size));
+			FT_UINT64_TO_NATIVE_SIZE_CAST(item_size));
 	}
 	if (result != FT_ERR_SUCCESS)
 		return (result);
@@ -985,33 +985,33 @@ static int32_t game_session_persistence_load_file(const char *file_path,
 		&& version >= SESSION_SNAPSHOT_VERSION_WITH_JOURNAL)
 	{
 		const std::size_t journal_offset = payload_end
-			- static_cast<std::size_t>(fluid_state_size)
-			- static_cast<std::size_t>(revision_metadata_size)
-			- static_cast<std::size_t>(chunk_instability_size)
-			- static_cast<std::size_t>(regeneration_rules_size)
-			- static_cast<std::size_t>(card_session_size)
-			- static_cast<std::size_t>(transaction_journal_size);
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(fluid_state_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(revision_metadata_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(chunk_instability_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(regeneration_rules_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(card_session_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(transaction_journal_size);
 
 		result = staged_transaction_journal.deserialize(
 			bytes.data() + journal_offset,
-			static_cast<std::size_t>(transaction_journal_size));
+			FT_UINT64_TO_NATIVE_SIZE_CAST(transaction_journal_size));
 		if (result != FT_ERR_SUCCESS)
 			return (result);
 	}
 	if (card_session_size > 0U)
 	{
 		const std::size_t card_offset = payload_end
-			- static_cast<std::size_t>(fluid_state_size)
-			- static_cast<std::size_t>(revision_metadata_size)
-			- static_cast<std::size_t>(chunk_instability_size)
-			- static_cast<std::size_t>(regeneration_rules_size)
-			- static_cast<std::size_t>(card_session_size);
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(fluid_state_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(revision_metadata_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(chunk_instability_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(regeneration_rules_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(card_session_size);
 
 		try
 		{
 			staged_card_session_state.assign(bytes.begin() + card_offset,
 				bytes.begin() + card_offset
-					+ static_cast<std::size_t>(card_session_size));
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(card_session_size));
 		}
 		catch (const std::bad_alloc &)
 		{
@@ -1021,16 +1021,16 @@ static int32_t game_session_persistence_load_file(const char *file_path,
 	if (regeneration_rules_size > 0U)
 	{
 		const std::size_t rules_offset = payload_end
-			- static_cast<std::size_t>(fluid_state_size)
-			- static_cast<std::size_t>(revision_metadata_size)
-			- static_cast<std::size_t>(chunk_instability_size)
-			- static_cast<std::size_t>(regeneration_rules_size);
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(fluid_state_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(revision_metadata_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(chunk_instability_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(regeneration_rules_size);
 
 		try
 		{
 			staged_regeneration_rules_state.assign(bytes.begin() + rules_offset,
 				bytes.begin() + rules_offset
-					+ static_cast<std::size_t>(regeneration_rules_size));
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(regeneration_rules_size));
 		}
 		catch (const std::bad_alloc &)
 		{
@@ -1040,15 +1040,15 @@ static int32_t game_session_persistence_load_file(const char *file_path,
 	if (chunk_instability_size > 0U && chunk_instability_state != nullptr)
 	{
 		const std::size_t instability_offset = payload_end
-			- static_cast<std::size_t>(fluid_state_size)
-			- static_cast<std::size_t>(revision_metadata_size)
-			- static_cast<std::size_t>(chunk_instability_size);
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(fluid_state_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(revision_metadata_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(chunk_instability_size);
 		try
 		{
 			staged_chunk_instability_state.assign(
 				bytes.begin() + instability_offset,
 				bytes.begin() + instability_offset
-					+ static_cast<std::size_t>(chunk_instability_size));
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(chunk_instability_size));
 		}
 		catch (const std::bad_alloc &)
 		{
@@ -1058,10 +1058,10 @@ static int32_t game_session_persistence_load_file(const char *file_path,
 	if (revision_metadata_size > 0U && revision_metadata_state != nullptr)
 	{
 		const std::size_t metadata_offset = payload_end
-			- static_cast<std::size_t>(fluid_state_size)
-			- static_cast<std::size_t>(revision_metadata_size);
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(fluid_state_size)
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(revision_metadata_size);
 		const std::size_t metadata_end = metadata_offset
-			+ static_cast<std::size_t>(revision_metadata_size);
+			+ FT_UINT64_TO_NATIVE_SIZE_CAST(revision_metadata_size);
 		try
 		{
 			staged_revision_metadata_state.assign(
@@ -1075,7 +1075,7 @@ static int32_t game_session_persistence_load_file(const char *file_path,
 	if (fluid_state_size > 0U && fluid_state != nullptr)
 	{
 		const std::size_t fluid_offset = payload_end
-			- static_cast<std::size_t>(fluid_state_size);
+			- FT_UINT64_TO_NATIVE_SIZE_CAST(fluid_state_size);
 
 		try
 		{
@@ -1133,22 +1133,22 @@ static int32_t game_session_persistence_load_file(const char *file_path,
 		if (version >= 4U)
 			result = recipe_catalog->validate_craft_action_cache(
 				bytes.data() + reader.offset
-					+ static_cast<std::size_t>(item_size)
-					+ static_cast<std::size_t>(recipe_size),
-				static_cast<std::size_t>(craft_action_cache_size));
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(item_size)
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(recipe_size),
+				FT_UINT64_TO_NATIVE_SIZE_CAST(craft_action_cache_size));
 		if (result == FT_ERR_SUCCESS && version >= 5U)
 			result = recipe_catalog->validate_processing_state(
 				bytes.data() + reader.offset
-					+ static_cast<std::size_t>(item_size)
-					+ static_cast<std::size_t>(recipe_size)
-					+ static_cast<std::size_t>(craft_action_cache_size),
-				static_cast<std::size_t>(processing_state_size));
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(item_size)
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(recipe_size)
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(craft_action_cache_size),
+				FT_UINT64_TO_NATIVE_SIZE_CAST(processing_state_size));
 		if (result == FT_ERR_SUCCESS)
 			result = recipe_buffer.initialize();
 		if (result == FT_ERR_SUCCESS)
 			result = recipe_buffer.append(
-				bytes.data() + reader.offset + static_cast<std::size_t>(item_size),
-				static_cast<ft_size_t>(recipe_size));
+				bytes.data() + reader.offset + FT_UINT64_TO_NATIVE_SIZE_CAST(item_size),
+				recipe_size);
 		if (result == FT_ERR_SUCCESS)
 		{
 			result = recipe_catalog->import_book(recipe_buffer);
@@ -1159,16 +1159,16 @@ static int32_t game_session_persistence_load_file(const char *file_path,
 		if (result == FT_ERR_SUCCESS && version >= 4U)
 			result = recipe_catalog->restore_craft_action_cache(
 				bytes.data() + reader.offset
-					+ static_cast<std::size_t>(item_size)
-					+ static_cast<std::size_t>(recipe_size),
-				static_cast<std::size_t>(craft_action_cache_size));
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(item_size)
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(recipe_size),
+				FT_UINT64_TO_NATIVE_SIZE_CAST(craft_action_cache_size));
 		if (result == FT_ERR_SUCCESS && version >= 5U)
 			result = recipe_catalog->restore_processing_state(
 				bytes.data() + reader.offset
-					+ static_cast<std::size_t>(item_size)
-					+ static_cast<std::size_t>(recipe_size)
-					+ static_cast<std::size_t>(craft_action_cache_size),
-				static_cast<std::size_t>(processing_state_size));
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(item_size)
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(recipe_size)
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(craft_action_cache_size),
+				FT_UINT64_TO_NATIVE_SIZE_CAST(processing_state_size));
 	}
 	if (result == FT_ERR_SUCCESS && recipe_catalog != nullptr
 		&& version < 4U)
@@ -1184,7 +1184,7 @@ static int32_t game_session_persistence_load_file(const char *file_path,
 	if (result == FT_ERR_SUCCESS)
 	{
 		result = world_items.deserialize(bytes.data() + reader.offset,
-			static_cast<std::size_t>(item_size));
+			FT_UINT64_TO_NATIVE_SIZE_CAST(item_size));
 	}
 	if (result == FT_ERR_SUCCESS && transaction_journal != nullptr)
 		result = transaction_journal->replace_from(staged_transaction_journal);
