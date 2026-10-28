@@ -12,8 +12,9 @@ namespace
 {
 	static const uint64_t LOADOUT_SCOPE = 0x45515549504C4F41ULL;
 	static const uint32_t LOADOUT_TYPE = 15U;
-	static const uint32_t LOADOUT_VERSION = 1U;
-	static const std::size_t LOADOUT_PAYLOAD_SIZE = 44U;
+	static const uint32_t LOADOUT_VERSION = 2U;
+	static const std::size_t LOADOUT_V1_PAYLOAD_SIZE = 44U;
+	static const std::size_t LOADOUT_PAYLOAD_SIZE = 52U;
 
 	static void append_u32(std::vector<uint8_t> &bytes, uint32_t value)
 	{
@@ -69,7 +70,8 @@ namespace
 		}
 	return (FT_ERR_SUCCESS);
 	}
-	static int32_t make_payload(uint64_t request_id, int32_t inventory_slot,
+	static int32_t make_payload(uint64_t request_id,
+		uint64_t authenticated_actor_id, int32_t inventory_slot,
 		uint64_t inventory_revision, uint32_t equipment_slot, int32_t item_id,
 		uint64_t instance_id, std::vector<uint8_t> &payload) noexcept
 	{
@@ -83,21 +85,26 @@ namespace
 			return (FT_ERR_INVALID_ARGUMENT);
 		try
 		{
-			payload.reserve(LOADOUT_PAYLOAD_SIZE);
+			payload.reserve(authenticated_actor_id == 0U
+				? LOADOUT_V1_PAYLOAD_SIZE : LOADOUT_PAYLOAD_SIZE);
 			payload.insert(payload.end(), {'G', 'L', 'E', 'Q'});
-			append_u32(payload, LOADOUT_VERSION);
+			append_u32(payload, authenticated_actor_id == 0U ? 1U
+				: LOADOUT_VERSION);
 			append_u64(payload, request_id);
 			append_u32(payload, static_cast<uint32_t>(inventory_slot));
 			append_u64(payload, inventory_revision);
 			append_u32(payload, equipment_slot);
 			append_u32(payload, static_cast<uint32_t>(item_id));
 			append_u64(payload, instance_id);
+			if (authenticated_actor_id != 0U)
+				append_u64(payload, authenticated_actor_id);
 		}
 		catch (...)
 		{
 			return (FT_ERR_NO_MEMORY);
 		}
-		return (payload.size() == LOADOUT_PAYLOAD_SIZE
+		return (payload.size() == (authenticated_actor_id == 0U
+			? LOADOUT_V1_PAYLOAD_SIZE : LOADOUT_PAYLOAD_SIZE)
 			? FT_ERR_SUCCESS : FT_ERR_INVALID_STATE);
 	}
 	static int32_t validate_record(const GameTransactionJournal::Record &record)
@@ -105,10 +112,17 @@ namespace
 		int32_t character_equipment_slot = 0;
 		if (record.scope_id != LOADOUT_SCOPE
 			|| record.transaction_type != LOADOUT_TYPE || record.request_id == 0U
-			|| record.payload.size() != LOADOUT_PAYLOAD_SIZE
+			|| (record.payload.size() != LOADOUT_V1_PAYLOAD_SIZE
+				&& record.payload.size() != LOADOUT_PAYLOAD_SIZE)
 			|| record.payload[0] != 'G' || record.payload[1] != 'L'
 			|| record.payload[2] != 'E' || record.payload[3] != 'Q'
-			|| read_u32(record.payload, 4U) != LOADOUT_VERSION
+			|| (read_u32(record.payload, 4U) != 1U
+				&& read_u32(record.payload, 4U) != LOADOUT_VERSION)
+			|| (read_u32(record.payload, 4U) == 1U
+				&& record.payload.size() != LOADOUT_V1_PAYLOAD_SIZE)
+			|| (read_u32(record.payload, 4U) == LOADOUT_VERSION
+				&& (record.payload.size() != LOADOUT_PAYLOAD_SIZE
+					|| read_u64(record.payload, 44U) == 0U))
 			|| read_u64(record.payload, 8U) != record.request_id
 			|| (read_u32(record.payload, 16U) > INT32_MAX
 				&& read_u32(record.payload, 16U) != UINT32_MAX)
@@ -132,6 +146,23 @@ namespace
 		item = nullptr;
 		return ;
 	}
+	struct PreparedRecoveryAuthorization
+	{
+		bool (*actor_authorizer)(uint64_t, void *) noexcept;
+		void *user_data;
+	};
+	static bool authorize_prepared_recovery(uint64_t authenticated_actor_id,
+		void *user_data) noexcept
+	{
+		if (user_data == nullptr)
+			return (false);
+		PreparedRecoveryAuthorization *authorization =
+			static_cast<PreparedRecoveryAuthorization *>(user_data);
+		return (authenticated_actor_id != 0U
+			&& authorization->actor_authorizer != nullptr
+			&& authorization->actor_authorizer(authenticated_actor_id,
+				authorization->user_data));
+	}
 }
 
 uint64_t WorldEquipmentLoadoutTransaction::journal_scope() noexcept
@@ -150,6 +181,22 @@ int32_t WorldEquipmentLoadoutTransaction::equip(const char *snapshot_path,
 		int32_t inventory_slot, uint64_t expected_inventory_revision,
 	uint32_t equipment_slot,
 	const GameSessionSnapshotWriter *snapshot_writer) noexcept
+{
+	return (WorldEquipmentLoadoutTransaction::equip(snapshot_path, character,
+		catalog, journal, request_id, 0U, inventory_slot,
+		expected_inventory_revision, equipment_slot, snapshot_writer,
+		nullptr, nullptr));
+}
+
+int32_t WorldEquipmentLoadoutTransaction::equip(const char *snapshot_path,
+	game_character &character, MinecraftItemCatalog &catalog,
+	GameTransactionJournal &journal, uint64_t request_id,
+	uint64_t authenticated_actor_id, int32_t inventory_slot,
+	uint64_t expected_inventory_revision, uint32_t equipment_slot,
+	const GameSessionSnapshotWriter *snapshot_writer,
+	bool (*precommit_authorizer)(uint64_t authenticated_actor_id,
+		void *user_data) noexcept,
+	void *precommit_authorizer_user_data) noexcept
 {
 	game_inventory &inventory = character.get_inventory();
 	game_inventory_snapshot inventory_before = {};
@@ -178,19 +225,29 @@ int32_t WorldEquipmentLoadoutTransaction::equip(const char *snapshot_path,
 	if (snapshot_path == nullptr || snapshot_path[0] == '\0'
 		|| snapshot_writer == nullptr || request_id == 0U || inventory_slot < -1
 		|| expected_inventory_revision == 0U
+		|| (authenticated_actor_id != 0U && precommit_authorizer == nullptr)
 		|| character_slot(equipment_slot, &game_slot) != FT_ERR_SUCCESS)
 		return (FT_ERR_INVALID_ARGUMENT);
 	result = journal.find(LOADOUT_SCOPE, request_id, &existing);
 	if (result == FT_ERR_SUCCESS)
 	{
 		if (validate_record(existing) != FT_ERR_SUCCESS
+			|| (read_u32(existing.payload, 4U) == LOADOUT_VERSION
+				? read_u64(existing.payload, 44U) != authenticated_actor_id
+				: authenticated_actor_id != 0U)
 			|| read_u32(existing.payload, 16U)
 				!= static_cast<uint32_t>(inventory_slot)
 			|| read_u64(existing.payload, 20U) != expected_inventory_revision
 			|| read_u32(existing.payload, 28U) != equipment_slot)
 			return (FT_ERR_INVALID_ARGUMENT);
 		if (existing.state == GameTransactionJournal::COMMITTED)
+		{
+			if (authenticated_actor_id != 0U
+				&& !precommit_authorizer(authenticated_actor_id,
+					precommit_authorizer_user_data))
+				return (FT_ERR_PERMISSION_DENIED);
 			return (FT_ERR_SUCCESS);
+		}
 		if (existing.state != GameTransactionJournal::PREPARED)
 			return (FT_ERR_INVALID_STATE);
 		try
@@ -204,6 +261,15 @@ int32_t WorldEquipmentLoadoutTransaction::equip(const char *snapshot_path,
 	}
 	else if (result != FT_ERR_NOT_FOUND)
 		return (result);
+	else
+	{
+		GameTransactionJournal::Record latest = {};
+		result = journal.latest(LOADOUT_SCOPE, LOADOUT_TYPE, &latest);
+		if (result == FT_ERR_SUCCESS && request_id <= latest.request_id)
+			return (FT_ERR_NOT_FOUND);
+		if (result != FT_ERR_SUCCESS && result != FT_ERR_NOT_FOUND)
+			return (result);
+	}
 	result = inventory.get_snapshot(inventory_before);
 	if (result != FT_ERR_SUCCESS)
 		return (result);
@@ -235,7 +301,8 @@ int32_t WorldEquipmentLoadoutTransaction::equip(const char *snapshot_path,
 	}
 	if (existing.sequence == 0U)
 	{
-		result = make_payload(request_id, inventory_slot,
+		result = make_payload(request_id, authenticated_actor_id,
+			inventory_slot,
 			expected_inventory_revision, equipment_slot, requested_item_id,
 			requested_instance_id, payload);
 		if (result != FT_ERR_SUCCESS)
@@ -285,10 +352,28 @@ int32_t WorldEquipmentLoadoutTransaction::equip(const char *snapshot_path,
 	if (result != FT_ERR_SUCCESS)
 	{
 		if (!journal_before.empty())
-			(void)journal.deserialize(journal_before.data(), journal_before.size());
+		{
+			const int32_t rollback_result = journal.deserialize(
+				journal_before.data(), journal_before.size());
+			if (rollback_result != FT_ERR_SUCCESS)
+				result = FT_ERR_INVALID_STATE;
+		}
 		release_item_handle(new_item);
 		release_item_handle(old_item);
 		return (result);
+	}
+	if (authenticated_actor_id != 0U
+		&& !precommit_authorizer(authenticated_actor_id,
+			precommit_authorizer_user_data))
+	{
+		const int32_t abort_result = journal.mark_aborted(LOADOUT_SCOPE,
+			request_id);
+		const int32_t checkpoint_result = abort_result == FT_ERR_SUCCESS
+			? snapshot_writer->save() : abort_result;
+		release_item_handle(new_item);
+		release_item_handle(old_item);
+		return (checkpoint_result == FT_ERR_SUCCESS
+			? FT_ERR_PERMISSION_DENIED : checkpoint_result);
 	}
 	if (result == FT_ERR_SUCCESS && inventory_slot >= 0)
 		result = inventory.remove_item_instance(inventory_slot,
@@ -311,6 +396,8 @@ int32_t WorldEquipmentLoadoutTransaction::equip(const char *snapshot_path,
 	}
 	if (result == FT_ERR_SUCCESS)
 		result = journal.mark_committed(LOADOUT_SCOPE, request_id);
+	if (result == FT_ERR_SUCCESS)
+		result = journal.prune_terminal_scope(LOADOUT_SCOPE, request_id);
 	if (result == FT_ERR_SUCCESS)
 		result = snapshot_writer->save();
 	if (result == FT_ERR_SUCCESS)
@@ -360,14 +447,33 @@ int32_t WorldEquipmentLoadoutTransaction::unequip(const char *snapshot_path,
 	const GameSessionSnapshotWriter *snapshot_writer) noexcept
 {
 	return (WorldEquipmentLoadoutTransaction::equip(snapshot_path, character,
-		catalog, journal, request_id, -1, expected_inventory_revision,
-		equipment_slot, snapshot_writer));
+		catalog, journal, request_id, 0U, -1, expected_inventory_revision,
+		equipment_slot, snapshot_writer, nullptr, nullptr));
+}
+
+int32_t WorldEquipmentLoadoutTransaction::unequip(const char *snapshot_path,
+	game_character &character, MinecraftItemCatalog &catalog,
+	GameTransactionJournal &journal, uint64_t request_id,
+	uint64_t authenticated_actor_id,
+	uint64_t expected_inventory_revision, uint32_t equipment_slot,
+	const GameSessionSnapshotWriter *snapshot_writer,
+	bool (*precommit_authorizer)(uint64_t authenticated_actor_id,
+		void *user_data) noexcept,
+	void *precommit_authorizer_user_data) noexcept
+{
+	return (WorldEquipmentLoadoutTransaction::equip(snapshot_path, character,
+		catalog, journal, request_id, authenticated_actor_id, -1,
+		expected_inventory_revision, equipment_slot, snapshot_writer,
+		precommit_authorizer, precommit_authorizer_user_data));
 }
 
 int32_t WorldEquipmentLoadoutTransaction::recover_pending(
 	const char *snapshot_path, game_character &character,
 	MinecraftItemCatalog &catalog, GameTransactionJournal &journal,
-	const GameSessionSnapshotWriter *snapshot_writer) noexcept
+	const GameSessionSnapshotWriter *snapshot_writer,
+	bool (*actor_authorizer)(uint64_t authenticated_actor_id,
+		void *user_data) noexcept,
+	void *actor_authorizer_user_data) noexcept
 {
 	std::vector<GameTransactionJournal::Record> pending;
 	int32_t result = journal.pending_records(pending);
@@ -381,16 +487,34 @@ int32_t WorldEquipmentLoadoutTransaction::recover_pending(
 		if (result != FT_ERR_SUCCESS
 			|| record.state != GameTransactionJournal::PREPARED)
 			return (FT_ERR_INVALID_ARGUMENT);
+		const uint64_t actor_id = read_u32(record.payload, 4U)
+			== LOADOUT_VERSION ? read_u64(record.payload, 44U) : 0U;
+		if (actor_id != 0U && (actor_authorizer == nullptr
+			|| !actor_authorizer(actor_id, actor_authorizer_user_data)))
+		{
+			if (snapshot_writer == nullptr)
+				return (FT_ERR_INVALID_ARGUMENT);
+			result = journal.mark_aborted(LOADOUT_SCOPE, record.request_id);
+			if (result == FT_ERR_SUCCESS)
+				result = snapshot_writer->save();
+			if (result != FT_ERR_SUCCESS)
+				return (result);
+			continue ;
+		}
 		int32_t inventory_slot = -1;
 		if (read_u32(record.payload, 16U) != UINT32_MAX)
 			inventory_slot = static_cast<int32_t>(
 				read_u32(record.payload, 16U));
+		PreparedRecoveryAuthorization authorization = {
+			actor_authorizer, actor_authorizer_user_data};
 		result = WorldEquipmentLoadoutTransaction::equip(snapshot_path,
 			character, catalog, journal, record.request_id,
-			inventory_slot,
+			read_u32(record.payload, 4U) == LOADOUT_VERSION
+				? read_u64(record.payload, 44U) : 0U, inventory_slot,
 			read_u64(record.payload, 20U), read_u32(record.payload, 28U),
-			snapshot_writer);
-		if (result != FT_ERR_SUCCESS)
+			snapshot_writer, &authorize_prepared_recovery, &authorization);
+		if (result != FT_ERR_SUCCESS
+			&& result != FT_ERR_PERMISSION_DENIED)
 			return (result);
 	}
 	return (FT_ERR_SUCCESS);

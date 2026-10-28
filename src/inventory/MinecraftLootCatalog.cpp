@@ -1,5 +1,6 @@
 #include "MinecraftLootCatalog.hpp"
 #include "MinecraftItemCatalog.hpp"
+#include "../entities/EntityState.hpp"
 #include "../crafting/MinecraftRecipeCatalog.hpp"
 #include "../../Libft/Modules/Voxel/voxel_types.hpp"
 #include "../../Libft/Modules/Errno/errno.hpp"
@@ -118,6 +119,45 @@ namespace
 		hash ^= hash >> 16U;
 		return (hash);
 	}
+}
+
+int32_t MinecraftLootCatalog::resolve_entity_loot_table(
+	uint32_t entity_type, uint32_t *loot_table_id_out) noexcept
+{
+	if (loot_table_id_out == nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
+	uint32_t loot_table_id = 0U;
+	switch (static_cast<EntityState::Kind>(entity_type))
+	{
+		case EntityState::Kind::ZOMBIE:
+			loot_table_id = MINECRAFT_LOOT_ZOMBIE;
+			break ;
+		case EntityState::Kind::CREEPER:
+			loot_table_id = MINECRAFT_LOOT_CREEPER;
+			break ;
+		case EntityState::Kind::SKELETON:
+			loot_table_id = MINECRAFT_LOOT_SKELETON;
+			break ;
+		case EntityState::Kind::COW:
+			loot_table_id = MINECRAFT_LOOT_COW;
+			break ;
+		case EntityState::Kind::PIG:
+			loot_table_id = MINECRAFT_LOOT_PIG;
+			break ;
+		case EntityState::Kind::CHICKEN:
+			loot_table_id = MINECRAFT_LOOT_CHICKEN;
+			break ;
+		case EntityState::Kind::SHEEP:
+			loot_table_id = MINECRAFT_LOOT_SHEEP;
+			break ;
+		case EntityState::Kind::SPIDER:
+			loot_table_id = MINECRAFT_LOOT_SPIDER;
+			break ;
+		default:
+			return (FT_ERR_NOT_FOUND);
+	}
+	*loot_table_id_out = loot_table_id;
+	return (FT_ERR_SUCCESS);
 }
 
 int32_t MinecraftLootCatalog::resolve(uint32_t loot_table_id,

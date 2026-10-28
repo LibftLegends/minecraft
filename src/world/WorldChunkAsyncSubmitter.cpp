@@ -90,14 +90,27 @@ bool WorldChunkAsyncSubmitter::submit_async_candidate(WorldChunkStreamer &stream
 {
 	uint64_t request_id;
 	int32_t error_code;
+	std::vector<WorldGenerationPipeline::GenerationFeaturePlan>
+		completed_feature_plans;
 
 	request_id = streamer.next_request_id_++;
+	error_code = streamer.world_.revision_manager.copy_completed_chunk_feature_plans(
+		chunk_x, chunk_z, completed_feature_plans);
+	if (error_code != FT_ERR_SUCCESS)
+	{
+		candidate.state = WorldChunkStreamer::CANDIDATE_FAILED_RETRYABLE;
+		candidate.last_error = error_code;
+		candidate.retry_frames = 1;
+		return (false);
+	}
 	error_code = streamer.generation_pipeline_.submit_generation(request_id,
 			streamer.world_epoch_, streamer.stream_relevance_epoch_,
 			streamer.generation_revision_, chunk_x, chunk_z,
 			streamer.world_.seed, streamer.world_.voxel_context.config(),
 			VOXEL_STAGE_BASE_TERRAIN | VOXEL_STAGE_CAVES | VOXEL_STAGE_FLUIDS | VOXEL_STAGE_DECORATION | VOXEL_STAGE_STRUCTURES | VOXEL_STAGE_ORES,
-			WorldGenerationPipeline::WorldGenerationOperation::STREAM);
+			WorldGenerationPipeline::WorldGenerationOperation::STREAM,
+		nullptr, completed_feature_plans.empty()
+			? nullptr : &completed_feature_plans);
 	if (error_code == FT_ERR_FULL)
 		return (true);
 	if (error_code != FT_ERR_SUCCESS)
@@ -140,6 +153,37 @@ bool WorldChunkAsyncSubmitter::process_async_candidate(WorldChunkStreamer &strea
 	{
 		candidate.state = WorldChunkStreamer::CANDIDATE_READY;
 		return (false);
+	}
+	if (streamer.world_.terrain_chunk_store().is_initialized())
+	{
+		bool saved_chunk_exists = false;
+		int32_t store_error = streamer.world_.terrain_chunk_store().has_chunk(
+			chunk_x, chunk_z, &saved_chunk_exists);
+		if (store_error != FT_ERR_SUCCESS)
+		{
+			candidate.state = WorldChunkStreamer::CANDIDATE_FAILED_RETRYABLE;
+			candidate.last_error = store_error;
+			candidate.retry_frames = 1;
+			return (false);
+		}
+		if (saved_chunk_exists)
+		{
+			store_error = WorldChunkCandidateScanner::try_load_chunk_at(
+				streamer, chunk_x, chunk_z);
+			if (store_error < 0)
+			{
+				candidate.state = WorldChunkStreamer::CANDIDATE_FAILED_RETRYABLE;
+				candidate.last_error = store_error;
+				candidate.retry_frames = 1;
+				return (false);
+			}
+			if (store_error > 0)
+			{
+				candidate.state = WorldChunkStreamer::CANDIDATE_READY;
+				candidate.last_error = FT_ERR_SUCCESS;
+				return (false);
+			}
+		}
 	}
 	return (WorldChunkAsyncSubmitter::submit_async_candidate(streamer,
 			candidate, chunk_x, chunk_z, submitted, budget));

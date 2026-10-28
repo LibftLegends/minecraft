@@ -120,6 +120,7 @@ namespace
 		const GameSessionSnapshotWriter *snapshot_writer) noexcept
 	{
 		std::vector<uint8_t> payload;
+		std::vector<uint8_t> journal_before;
 		uint64_t sequence;
 		bool replayed;
 		int32_t result;
@@ -149,6 +150,9 @@ namespace
 		}
 		if (payload.size() != CARD_TRANSFER_PAYLOAD_SIZE)
 			return (FT_ERR_INVALID_STATE);
+		result = journal.serialize(journal_before);
+		if (result != FT_ERR_SUCCESS)
+			return (result);
 		result = journal.prepare(CARD_TRANSFER_SCOPE, request_id,
 			CARD_TRANSFER_TYPE, payload.data(),
 			static_cast<uint32_t>(payload.size()), &sequence, &replayed);
@@ -166,6 +170,13 @@ namespace
 		}
 		result = save_checkpoint(snapshot_path, character, world_items,
 			recipe_catalog, journal, snapshot_writer);
+		if (result != FT_ERR_SUCCESS && !replayed)
+		{
+			const int32_t rollback_result = journal.deserialize(
+				journal_before.data(), journal_before.size());
+			if (rollback_result != FT_ERR_SUCCESS)
+				return (FT_ERR_INVALID_STATE);
+		}
 		return (result);
 	}
 
@@ -289,6 +300,8 @@ namespace
 		if (record.state != GameTransactionJournal::COMMITTED
 			&& record.state != GameTransactionJournal::ABORTED)
 			return (FT_ERR_INVALID_STATE);
+		if (record.state == GameTransactionJournal::ABORTED)
+			return (FT_ERR_INVALID_OPERATION);
 		CardTransferAction stored_action = {};
 		if (decode(record, &stored_action) != FT_ERR_SUCCESS
 			|| operation != stored_action.operation

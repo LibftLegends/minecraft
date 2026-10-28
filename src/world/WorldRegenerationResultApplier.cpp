@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <memory>
 
 class WorldRegenerationLootStaging
 {
@@ -148,6 +149,24 @@ static bool world_regeneration_outputs_already_committed(
 	return (true);
 }
 
+static bool world_regeneration_feature_outcomes_match(
+	const WorldChunkInstabilityRecord &record,
+	const std::vector<WorldChunkInstabilityRecord::VersionedId> &outcomes) noexcept
+{
+	for (const auto &expected : outcomes)
+	{
+		const bool found = std::any_of(record.feature_outcomes.begin(),
+			record.feature_outcomes.end(), [&expected](const auto &stored)
+			{
+				return (stored.id == expected.id
+					&& stored.version == expected.version);
+			});
+		if (!found)
+			return (false);
+	}
+	return (true);
+}
+
 static int32_t world_regeneration_stage_spawners(
 	const WorldGenerationPipeline::Result &result, World &world,
 	std::vector<WorldSpawnerDefinition> &definitions_out,
@@ -240,15 +259,71 @@ void WorldRegenerationResultApplier::apply_chunk(WorldChunkStreamer &streamer,
 	std::vector<WorldChunkInstabilityRecord::VersionedId> feature_outcomes;
 	std::vector<WorldSpawnerDefinition> feature_spawners;
 	std::vector<uint32_t> published_spawner_ids;
+	std::shared_ptr<const WorldChunkReadState> prepared_read_state;
+	uint8_t prepared_boundary_source_light_max[4] = {};
+	bool prepared_boundary_target_has_transparent[4] = {};
 	WorldRegenerationLootStaging loot_staging(world.item_store());
 	uint64_t first_spawn_tick = 0U;
 	int32_t transfer_error = FT_ERR_SUCCESS;
 	bool outputs_already_committed = false;
+	bool publication_receipt_added = false;
+	bool publication_receipt_preexisting = false;
+	bool instability_record_changed = false;
+	bool terrain_chunk_replaced = false;
+	auto record_error = [&world, &result](int32_t error_code)
+	{
+		world.revision_manager.record_regeneration_chunk_error(
+			result.chunk_x, result.chunk_z, error_code);
+	};
+	auto record_skipped = [&world, &result]()
+	{
+		world.revision_manager.record_regeneration_chunk_skipped(
+			result.chunk_x, result.chunk_z);
+	};
+	auto restore_terrain_chunk = [&world, &previous_chunk, &result,
+		&terrain_chunk_replaced]() noexcept
+	{
+		if (!terrain_chunk_replaced)
+			return (FT_ERR_SUCCESS);
+		const int32_t restore_error = world.terrain_chunk_store().save_chunk(
+			result.chunk_x, result.chunk_z, previous_chunk.chunk);
+		if (restore_error == FT_ERR_SUCCESS)
+			terrain_chunk_replaced = false;
+		return (restore_error);
+	};
 
 	chunk = world.find_chunk_mutable(result.chunk_x, result.chunk_z);
 	if (chunk == nullptr || !chunk->initialized)
 	{
-		world.revision_manager.record_regeneration_skipped();
+		record_skipped();
+		return ;
+	}
+	if (chunk->mesh_revision == UINT64_MAX
+		|| chunk->voxel_revision == UINT64_MAX
+		|| chunk->light_revision == UINT64_MAX)
+	{
+		record_error(FT_ERR_OUT_OF_RANGE);
+		return ;
+	}
+	/* Reserve the deferred-edit destination before publishing any world or
+	 * store changes. The commit path is noexcept, so a vector growth failure
+	 * after the durable checkpoint would otherwise terminate the process with
+	 * a partially published regeneration. */
+	if (result.deferred_edits.size()
+		> streamer.deferred_edits_.max_size()
+			- streamer.deferred_edits_.size())
+	{
+		record_error(FT_ERR_OUT_OF_RANGE);
+		return ;
+	}
+	try
+	{
+		streamer.deferred_edits_.reserve(streamer.deferred_edits_.size()
+			+ result.deferred_edits.size());
+	}
+	catch (...)
+	{
+		record_error(FT_ERR_NO_MEMORY);
 		return ;
 	}
 	try
@@ -274,7 +349,7 @@ void WorldRegenerationResultApplier::apply_chunk(WorldChunkStreamer &streamer,
 				&& plan.kind
 					!= WorldGenerationPipeline::GenerationFeaturePlan::INSTABILITY_OVERLAY)
 			{
-				world.revision_manager.record_regeneration_error(
+				record_error(
 					FT_ERR_INVALID_ARGUMENT);
 				return ;
 			}
@@ -294,9 +369,13 @@ void WorldRegenerationResultApplier::apply_chunk(WorldChunkStreamer &streamer,
 	}
 	catch (...)
 	{
-		world.revision_manager.record_regeneration_error(FT_ERR_NO_MEMORY);
+		record_error(FT_ERR_NO_MEMORY);
 		return ;
 	}
+	publication_receipt_preexisting =
+		world.revision_manager.has_published_chunk(result.chunk_x,
+			result.chunk_z);
+	outputs_already_committed = publication_receipt_preexisting;
 	if (world.is_chunk_instability_configured())
 	{
 		transfer_error = world.get_chunk_instability(result.chunk_x,
@@ -307,13 +386,24 @@ void WorldRegenerationResultApplier::apply_chunk(WorldChunkStreamer &streamer,
 			|| instability_record.record_revision == UINT64_MAX
 			|| instability_record.generation_revision == UINT64_MAX)
 		{
-			world.revision_manager.record_regeneration_error(
+			record_error(
 				transfer_error == FT_ERR_SUCCESS ? FT_ERR_OUT_OF_RANGE
 					: transfer_error);
 			return ;
 		}
-		outputs_already_committed =
-			world_regeneration_outputs_already_committed(instability_record,
+		if (publication_receipt_preexisting
+			&& (instability_record.generation_revision == 0U
+				|| instability_record.rules_hash
+					!= world.revision_manager.rules_hash()
+				|| !world_regeneration_feature_outcomes_match(
+					instability_record, feature_outcomes)))
+		{
+			record_error(
+				FT_ERR_CONFIGURATION);
+			return ;
+		}
+		outputs_already_committed = outputs_already_committed
+			|| world_regeneration_outputs_already_committed(instability_record,
 				feature_outcomes, result.relevance_epoch,
 				world.revision_manager.rules_hash());
 	}
@@ -323,13 +413,13 @@ void WorldRegenerationResultApplier::apply_chunk(WorldChunkStreamer &streamer,
 			feature_spawners, &first_spawn_tick);
 		if (transfer_error != FT_ERR_SUCCESS)
 		{
-			world.revision_manager.record_regeneration_error(transfer_error);
+			record_error(transfer_error);
 			return ;
 		}
 		transfer_error = loot_staging.stage(result, world);
 		if (transfer_error != FT_ERR_SUCCESS)
 		{
-			world.revision_manager.record_regeneration_error(transfer_error);
+			record_error(transfer_error);
 			return ;
 		}
 	}
@@ -348,7 +438,7 @@ void WorldRegenerationResultApplier::apply_chunk(WorldChunkStreamer &streamer,
 	if (transfer_error != FT_ERR_SUCCESS)
 	{
 		replacement.destroy();
-		world.revision_manager.record_regeneration_error(FT_ERR_NO_MEMORY);
+		record_error(FT_ERR_NO_MEMORY);
 		return ;
 	}
 	replacement.chunk_x = result.chunk_x;
@@ -356,6 +446,33 @@ void WorldRegenerationResultApplier::apply_chunk(WorldChunkStreamer &streamer,
 	replacement.world_x = result.chunk_x * GAME_VOXEL_CHUNK_WIDTH;
 	replacement.world_z = result.chunk_z * GAME_VOXEL_CHUNK_DEPTH;
 	replacement.initialized = true;
+	replacement.mesh_revision = chunk->mesh_revision + 1U;
+	replacement.voxel_revision = chunk->voxel_revision + 1U;
+	replacement.light_revision = chunk->light_revision + 1U;
+	replacement.content_version = 1U;
+	replacement.light_version = 1U;
+	replacement.light_input_version = 1U;
+	replacement.computed_light_input_version = 1U;
+	replacement.light_ready_for_render = result.chunk->light_ready_for_render;
+	replacement.last_light_remesh_incremental = FT_FALSE;
+	replacement.last_incremental_light_content_version = 0U;
+	replacement.last_incremental_light_voxel_revision = 0U;
+	replacement.clear_pending_remesh_request();
+	replacement.mesh_dirty = true;
+	transfer_error = replacement.publish_read_state();
+	if (transfer_error != FT_ERR_SUCCESS)
+	{
+		replacement.destroy();
+		record_error(transfer_error);
+		return ;
+	}
+	prepared_read_state = replacement.read_state;
+	ft_memcpy(prepared_boundary_source_light_max,
+		replacement.boundary_source_light_max,
+		sizeof(prepared_boundary_source_light_max));
+	ft_memcpy(prepared_boundary_target_has_transparent,
+		replacement.boundary_target_has_transparent,
+		sizeof(prepared_boundary_target_has_transparent));
 	/* The final ownership transfer is now the only operation that can replace
 	 * the live chunk.  All worker-owned payloads have already been validated and
 	 * transferred into a complete replacement. */
@@ -366,50 +483,40 @@ void WorldRegenerationResultApplier::apply_chunk(WorldChunkStreamer &streamer,
 	if (chunk->move(previous_chunk) != FT_ERR_SUCCESS)
 	{
 		replacement.destroy();
-		world.revision_manager.record_regeneration_error(FT_ERR_NO_MEMORY);
+		record_error(FT_ERR_NO_MEMORY);
 		return ;
 	}
 	if (chunk->move(replacement) != FT_ERR_SUCCESS)
 	{
 		if (chunk->move(previous_chunk) != FT_ERR_SUCCESS)
-			world.revision_manager.record_regeneration_error(
+			record_error(
 				FT_ERR_INVALID_STATE);
 		else
-			world.revision_manager.record_regeneration_error(FT_ERR_NO_MEMORY);
+			record_error(FT_ERR_NO_MEMORY);
 		replacement.destroy();
 		return ;
 	}
-	chunk->chunk_x = result.chunk_x;
-	chunk->chunk_z = result.chunk_z;
-	chunk->world_x = result.chunk_x * GAME_VOXEL_CHUNK_WIDTH;
-	chunk->world_z = result.chunk_z * GAME_VOXEL_CHUNK_DEPTH;
-	chunk->initialized = true;
-	chunk->mesh_revision += 1U;
-	chunk->voxel_revision += 1U;
-	chunk->light_revision += 1U;
-	chunk->content_version = 1U;
-	/* The regeneration worker publishes a mesh paired with a complete local
-	 * light field.  Keep that field authoritative immediately; invalidating it
-	 * here made the renderer treat a valid regenerated chunk as black until a
-	 * second remesh happened to complete. */
-	chunk->light_version = 1U;
-	chunk->light_input_version = 1U;
-	chunk->computed_light_input_version = 1U;
-	chunk->light_ready_for_render = result.chunk->light_ready_for_render;
-	chunk->last_light_remesh_incremental = FT_FALSE;
-	chunk->last_incremental_light_content_version = 0U;
-	chunk->last_incremental_light_voxel_revision = 0U;
-	chunk->clear_pending_remesh_request();
-	chunk->mesh_dirty = true;
-	if (chunk->publish_read_state() != FT_ERR_SUCCESS)
+	/* Keep readers on the previous immutable image until the related loot,
+	 * spawner, instability, and save checkpoint are committed. */
+	chunk->read_state = previous_chunk.read_state;
+	ft_memcpy(chunk->boundary_source_light_max,
+		previous_chunk.boundary_source_light_max,
+		sizeof(chunk->boundary_source_light_max));
+	ft_memcpy(chunk->boundary_target_has_transparent,
+		previous_chunk.boundary_target_has_transparent,
+		sizeof(chunk->boundary_target_has_transparent));
+	if (world.terrain_chunk_store().is_initialized())
 	{
-		const int32_t loot_rollback = loot_staging.rollback();
-		const int32_t restore_result = chunk->move(previous_chunk);
-		world.revision_manager.record_regeneration_error(
-			restore_result == FT_ERR_SUCCESS
-				&& loot_rollback == FT_ERR_SUCCESS ? FT_ERR_NO_MEMORY
+		transfer_error = world.terrain_chunk_store().save_chunk(
+			result.chunk_x, result.chunk_z, chunk->chunk);
+		if (transfer_error != FT_ERR_SUCCESS)
+		{
+			const int32_t restore_result = chunk->move(previous_chunk);
+			record_error(restore_result == FT_ERR_SUCCESS ? transfer_error
 				: FT_ERR_INVALID_STATE);
-		return ;
+			return ;
+		}
+		terrain_chunk_replaced = true;
 	}
 	if (!outputs_already_committed && !feature_spawners.empty())
 	{
@@ -418,10 +525,12 @@ void WorldRegenerationResultApplier::apply_chunk(WorldChunkStreamer &streamer,
 		if (transfer_error != FT_ERR_SUCCESS)
 		{
 			const int32_t loot_rollback = loot_staging.rollback();
+			const int32_t terrain_rollback = restore_terrain_chunk();
 			const int32_t restore_result = chunk->move(previous_chunk);
-			world.revision_manager.record_regeneration_error(
+			record_error(
 				restore_result == FT_ERR_SUCCESS
-					&& loot_rollback == FT_ERR_SUCCESS ? transfer_error
+					&& loot_rollback == FT_ERR_SUCCESS
+					&& terrain_rollback == FT_ERR_SUCCESS ? transfer_error
 					: FT_ERR_INVALID_STATE);
 			return ;
 		}
@@ -431,18 +540,21 @@ void WorldRegenerationResultApplier::apply_chunk(WorldChunkStreamer &streamer,
 	if (!outputs_already_committed && transfer_error != FT_ERR_SUCCESS)
 	{
 		const int32_t loot_rollback = loot_staging.rollback();
+		const int32_t terrain_rollback = restore_terrain_chunk();
 		const int32_t spawner_rollback = published_spawner_ids.empty()
 			? FT_ERR_SUCCESS
 			: world.spawner_store()->remove_batch(published_spawner_ids);
 		const int32_t restore_result = chunk->move(previous_chunk);
-		world.revision_manager.record_regeneration_error(
+		record_error(
 			restore_result == FT_ERR_SUCCESS
 				&& spawner_rollback == FT_ERR_SUCCESS
-				&& loot_rollback == FT_ERR_SUCCESS ? transfer_error
+				&& loot_rollback == FT_ERR_SUCCESS
+				&& terrain_rollback == FT_ERR_SUCCESS ? transfer_error
 				: FT_ERR_INVALID_STATE);
 		return ;
 	}
-	if (world.is_chunk_instability_configured())
+	if (world.is_chunk_instability_configured()
+		&& !outputs_already_committed)
 	{
 		uint64_t generation_revision = result.relevance_epoch;
 		if (generation_revision <= instability_record.generation_revision)
@@ -455,39 +567,65 @@ void WorldRegenerationResultApplier::apply_chunk(WorldChunkStreamer &streamer,
 		if (transfer_error != FT_ERR_SUCCESS)
 		{
 			const int32_t loot_rollback = loot_staging.rollback();
+			const int32_t terrain_rollback = restore_terrain_chunk();
 			const int32_t spawner_rollback = published_spawner_ids.empty()
 				? FT_ERR_SUCCESS
 				: world.spawner_store()->remove_batch(published_spawner_ids);
 			const int32_t restore_result = chunk->move(previous_chunk);
-			world.revision_manager.record_regeneration_error(
+			record_error(
 				restore_result == FT_ERR_SUCCESS
 					&& spawner_rollback == FT_ERR_SUCCESS
-					&& loot_rollback == FT_ERR_SUCCESS ? transfer_error
+					&& loot_rollback == FT_ERR_SUCCESS
+					&& terrain_rollback == FT_ERR_SUCCESS ? transfer_error
 					: FT_ERR_INVALID_STATE);
 			return ;
 		}
+		instability_record_changed = true;
 	}
-	transfer_error = world.checkpoint_generation_commit();
+	if (world.revision_manager.barriers_active())
+	{
+		transfer_error = world.revision_manager.set_chunk_published(
+			result.chunk_x, result.chunk_z, true);
+		publication_receipt_added = transfer_error == FT_ERR_SUCCESS
+			&& !publication_receipt_preexisting;
+	}
+	if (transfer_error == FT_ERR_SUCCESS)
+		transfer_error = world.checkpoint_generation_commit();
 	if (transfer_error != FT_ERR_SUCCESS)
 	{
+		int32_t publication_receipt_rollback = FT_ERR_SUCCESS;
+		if (publication_receipt_added)
+			publication_receipt_rollback =
+				world.revision_manager.set_chunk_published(result.chunk_x,
+					result.chunk_z, false);
 		const int32_t loot_rollback = loot_staging.rollback();
+		const int32_t terrain_rollback = restore_terrain_chunk();
 		const int32_t spawner_rollback = published_spawner_ids.empty()
 			? FT_ERR_SUCCESS
 			: world.spawner_store()->remove_batch(published_spawner_ids);
 		int32_t instability_rollback = FT_ERR_SUCCESS;
-		if (world.is_chunk_instability_configured())
+		if (instability_record_changed)
 			instability_rollback = world.restore_chunk_instability_record(
 				committed_instability_record.record_revision,
 				instability_record);
 		const int32_t chunk_restore = chunk->move(previous_chunk);
-		world.revision_manager.record_regeneration_error(
-			spawner_rollback == FT_ERR_SUCCESS
+		record_error(
+			publication_receipt_rollback == FT_ERR_SUCCESS
+				&& spawner_rollback == FT_ERR_SUCCESS
 				&& loot_rollback == FT_ERR_SUCCESS
+				&& terrain_rollback == FT_ERR_SUCCESS
 				&& instability_rollback == FT_ERR_SUCCESS
 				&& chunk_restore == FT_ERR_SUCCESS
 				? transfer_error : FT_ERR_INVALID_STATE);
 		return ;
 	}
+	chunk->read_state = std::move(prepared_read_state);
+	ft_memcpy(chunk->boundary_source_light_max,
+		prepared_boundary_source_light_max,
+		sizeof(chunk->boundary_source_light_max));
+	ft_memcpy(chunk->boundary_target_has_transparent,
+		prepared_boundary_target_has_transparent,
+		sizeof(chunk->boundary_target_has_transparent));
 	loot_staging.commit();
 	world.mark_geometry_changed();
 	world.revision_manager.record_regeneration_success();
@@ -520,11 +658,23 @@ int32_t WorldRegenerationResultApplier::commit(WorldChunkStreamer &streamer,
 			result.chunk == nullptr ? "false" : "true",
 			static_cast<unsigned long long>(result.relevance_epoch));
 	#endif
-		world.revision_manager.record_regeneration_error(result.error_code);
+		world.revision_manager.record_regeneration_chunk_error(result.chunk_x, result.chunk_z, result.error_code);
 	}
 	else
 		WorldRegenerationResultApplier::apply_chunk(streamer, world, result);
 	if (world.revision_manager.all_regeneration_jobs_done())
-		return (world.revision_manager.finish_regeneration());
+	{
+		const int32_t finish_result =
+			world.revision_manager.finish_regeneration();
+		const int32_t checkpoint_result =
+			world.checkpoint_generation_commit();
+		if (checkpoint_result != FT_ERR_SUCCESS)
+		{
+			if (finish_result == FT_ERR_SUCCESS)
+				world.revision_manager.rollback_failed_regeneration_checkpoint();
+			return (checkpoint_result);
+		}
+		return (finish_result);
+	}
 	return (FT_ERR_SUCCESS);
 }

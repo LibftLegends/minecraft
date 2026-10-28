@@ -11,6 +11,25 @@ namespace
 {
 	static constexpr uint32_t FIRST_PROCESSING_RECIPE_ID = 1029U;
 	static constexpr uint32_t LAST_PROCESSING_RECIPE_ID = 1035U;
+	static void minecraft_recipe_hash_u32(uint64_t &hash,
+		uint32_t value) noexcept
+	{
+		for (uint32_t shift = 0U; shift < 32U; shift += 8U)
+		{
+			hash ^= static_cast<uint8_t>(value >> shift);
+			hash *= 1099511628211ULL;
+		}
+	}
+
+	static void minecraft_recipe_hash_u64(uint64_t &hash,
+		uint64_t value) noexcept
+	{
+		for (uint32_t shift = 0U; shift < 64U; shift += 8U)
+		{
+			hash ^= static_cast<uint8_t>(value >> shift);
+			hash *= 1099511628211ULL;
+		}
+	}
 
 	static void minecraft_recipe_cache_append_u32(
 		std::vector<uint8_t> &bytes, uint32_t value)
@@ -198,6 +217,7 @@ MinecraftRecipeCatalog::MinecraftRecipeCatalog()
 	  highest_processing_request_id_(0U),
 	  items_(nullptr),
 	  highest_craft_request_id_(0U),
+	  catalog_content_revision_(0U),
 	  next_output_instance_id_(1U), initialized_(false)
 {
 	for (uint32_t index = 0U; index < 7U; ++index)
@@ -279,6 +299,8 @@ int32_t MinecraftRecipeCatalog::register_bootstrap_recipes(
 	ft_vector<uint32_t> recipe_id_vector;
 	int32_t error_code = FT_ERR_SUCCESS;
 	uint64_t initial_event_id = 0x4D43520000000000ULL;
+	uint64_t catalog_hash = 14695981039346656037ULL;
+	minecraft_recipe_hash_u32(catalog_hash, 1U);
 
 	try
 	{
@@ -380,6 +402,71 @@ int32_t MinecraftRecipeCatalog::register_bootstrap_recipes(
 			if (known == FT_TRUE)
 				result = this->crafting_.unlock_recipe(
 					static_cast<int32_t>(recipe_id));
+		}
+		if (result == FT_ERR_SUCCESS)
+		{
+			minecraft_recipe_hash_u32(catalog_hash, recipe_id);
+			minecraft_recipe_hash_u32(catalog_hash,
+				static_cast<uint32_t>(output_item_id));
+			minecraft_recipe_hash_u32(catalog_hash,
+				static_cast<uint32_t>(output_quantity));
+			minecraft_recipe_hash_u32(catalog_hash,
+				static_cast<uint32_t>(station_id));
+			minecraft_recipe_hash_u32(catalog_hash,
+				static_cast<uint32_t>(known));
+			minecraft_recipe_hash_u32(catalog_hash, specification_count);
+			for (uint32_t index = 0U; index < specification_count; ++index)
+			{
+				const MinecraftRecipeIngredientSpec &specification =
+					specifications[index];
+				minecraft_recipe_hash_u32(catalog_hash,
+					static_cast<uint32_t>(specification.tag_id));
+				minecraft_recipe_hash_u32(catalog_hash,
+					static_cast<uint32_t>(specification.quantity));
+				minecraft_recipe_hash_u32(catalog_hash,
+					specification.item_id_count);
+				for (uint32_t item_index = 0U;
+					item_index < specification.item_id_count; ++item_index)
+					minecraft_recipe_hash_u32(catalog_hash,
+						static_cast<uint32_t>(
+							specification.item_ids[item_index]));
+			}
+			minecraft_recipe_hash_u32(catalog_hash,
+				static_cast<uint32_t>(returned_item_id));
+			minecraft_recipe_hash_u32(catalog_hash,
+				static_cast<uint32_t>(returned_quantity));
+			minecraft_recipe_hash_u32(catalog_hash,
+				static_cast<uint32_t>(output->get_max_stack()));
+			minecraft_recipe_hash_u32(catalog_hash,
+				static_cast<uint32_t>(output->get_rarity()));
+			minecraft_recipe_hash_u32(catalog_hash,
+				static_cast<uint32_t>(output->get_width()));
+			minecraft_recipe_hash_u32(catalog_hash,
+				static_cast<uint32_t>(output->get_height()));
+			minecraft_recipe_hash_u32(catalog_hash,
+				static_cast<uint32_t>(output->get_modifier1_id()));
+			minecraft_recipe_hash_u32(catalog_hash,
+				static_cast<uint32_t>(output->get_modifier1_value()));
+			minecraft_recipe_hash_u32(catalog_hash,
+				static_cast<uint32_t>(output->get_modifier2_id()));
+			minecraft_recipe_hash_u32(catalog_hash,
+				static_cast<uint32_t>(output->get_modifier2_value()));
+			minecraft_recipe_hash_u32(catalog_hash,
+				static_cast<uint32_t>(output->get_modifier3_id()));
+			minecraft_recipe_hash_u32(catalog_hash,
+				static_cast<uint32_t>(output->get_modifier3_value()));
+			minecraft_recipe_hash_u32(catalog_hash,
+				static_cast<uint32_t>(output->get_modifier4_id()));
+			minecraft_recipe_hash_u32(catalog_hash,
+				static_cast<uint32_t>(output->get_modifier4_value()));
+			minecraft_recipe_hash_u64(catalog_hash,
+				output->get_instance_id());
+			if (returned_item_id > 0)
+			{
+				minecraft_recipe_hash_u32(catalog_hash, 16U);
+				minecraft_recipe_hash_u32(catalog_hash, 1U);
+				minecraft_recipe_hash_u32(catalog_hash, 1U);
+			}
 		}
 		return (result);
 	};
@@ -1026,8 +1113,31 @@ int32_t MinecraftRecipeCatalog::register_bootstrap_recipes(
 		initial_unlocks.data(), static_cast<uint32_t>(initial_unlocks.size()));
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
+	for (uint32_t index = 0U; index < 7U; ++index)
+	{
+		minecraft_recipe_hash_u32(catalog_hash, static_cast<uint32_t>(
+			this->processing_fuel_item_ids_[index]));
+		minecraft_recipe_hash_u32(catalog_hash,
+			this->processing_fuel_units_per_item_[index]);
+		minecraft_recipe_hash_u32(catalog_hash,
+			this->processing_ticks_per_item_[index]);
+	}
+	const std::vector<int32_t> *catalogue_tags[] = {
+		&log_ids, &plank_ids, &crystal_sample_ids, &ore_sample_ids,
+		&flower_pigment_ids};
+	for (uint32_t tag_index = 0U; tag_index < 5U; ++tag_index)
+	{
+		const std::vector<int32_t> &members = *catalogue_tags[tag_index];
+		minecraft_recipe_hash_u32(catalog_hash, tag_index + 1U);
+		minecraft_recipe_hash_u32(catalog_hash,
+			static_cast<uint32_t>(members.size()));
+		for (int32_t item_id : members)
+			minecraft_recipe_hash_u32(catalog_hash,
+				static_cast<uint32_t>(item_id));
+	}
 	this->registered_recipe_ids_.swap(recipe_ids);
 	this->recipe_output_item_ids_.swap(recipe_output_item_ids);
+	this->catalog_content_revision_ = catalog_hash == 0U ? 1U : catalog_hash;
 	return (error_code);
 }
 
@@ -1045,6 +1155,7 @@ int32_t MinecraftRecipeCatalog::destroy() noexcept
 	this->highest_processing_request_id_ = 0U;
 	this->items_ = nullptr;
 	this->highest_craft_request_id_ = 0U;
+	this->catalog_content_revision_ = 0U;
 	this->next_output_instance_id_ = 1U;
 	this->initialized_ = false;
 	return (book_error != FT_ERR_SUCCESS ? book_error : crafting_error);
@@ -1091,9 +1202,19 @@ int32_t MinecraftRecipeCatalog::query_recipes(const game_inventory &inventory,
 	std::vector<MinecraftRecipeQueryEntry> &entries_out,
 	std::vector<MinecraftRecipeMissingGroup> &missing_out) const noexcept
 {
+	return (this->query_recipes(inventory, recipe_id_filter, station_id, 1,
+		entries_out, missing_out));
+}
+
+int32_t MinecraftRecipeCatalog::query_recipes(const game_inventory &inventory,
+	uint32_t recipe_id_filter, StationId station_id, int32_t batch_count,
+	std::vector<MinecraftRecipeQueryEntry> &entries_out,
+	std::vector<MinecraftRecipeMissingGroup> &missing_out) const noexcept
+{
 	std::vector<MinecraftRecipeQueryEntry> staged_entries;
 	std::vector<MinecraftRecipeMissingGroup> staged_missing;
-	if (!this->initialized_ || station_id < HAND_STATION_ID
+	if (!this->initialized_ || batch_count <= 0
+		|| station_id < HAND_STATION_ID
 		|| station_id > FURNACE_STATION_ID)
 		return (FT_ERR_INVALID_ARGUMENT);
 	if (recipe_id_filter != 0U
@@ -1104,7 +1225,18 @@ int32_t MinecraftRecipeCatalog::query_recipes(const game_inventory &inventory,
 	try
 	{
 		game_inventory_snapshot inventory_snapshot = {};
+		uint64_t catalog_revision = 0U;
+	uint64_t catalog_revision_after = 0U;
+		uint64_t recipe_book_revision = 0U;
+		uint64_t recipe_book_revision_after = 0U;
 		int32_t snapshot_result = inventory.get_snapshot(inventory_snapshot);
+		if (snapshot_result != FT_ERR_SUCCESS)
+			return (snapshot_result);
+		snapshot_result = this->get_catalog_revision(&catalog_revision);
+		if (snapshot_result != FT_ERR_SUCCESS)
+			return (snapshot_result);
+		snapshot_result = this->recipe_book_.get_revision(
+			&recipe_book_revision);
 		if (snapshot_result != FT_ERR_SUCCESS)
 			return (snapshot_result);
 		staged_entries.reserve(recipe_id_filter == 0U
@@ -1116,19 +1248,28 @@ int32_t MinecraftRecipeCatalog::query_recipes(const game_inventory &inventory,
 			ft_vector<game_crafting_missing_ingredient> missing_groups;
 			int32_t result = missing_groups.initialize();
 			game_crafting_query_result status = {};
+			game_crafting_output_snapshot output = {};
 			ft_bool known = FT_FALSE;
 			if (result == FT_ERR_SUCCESS)
 				result = this->recipe_book_.is_recipe_known(recipe_id, &known);
 			if (result == FT_ERR_SUCCESS)
 				result = this->crafting_.query_recipe_at_station_snapshot(
 					static_cast<int32_t>(recipe_id), inventory_snapshot,
-					static_cast<int32_t>(station_id), &status, &missing_groups);
+					static_cast<int32_t>(station_id), batch_count, &status,
+					&missing_groups);
+			if (result == FT_ERR_SUCCESS)
+				result = this->crafting_.query_recipe_output_snapshot(
+					static_cast<int32_t>(recipe_id), batch_count, &output);
 			if (result == FT_ERR_SUCCESS)
 			{
 				status.known = known;
 				if (known != FT_TRUE)
 					status.craftable = FT_FALSE;
-				staged_entries.push_back({recipe_id, known, status});
+				staged_entries.push_back({recipe_id,
+					static_cast<uint32_t>(station_id), 0, 0, 0, 0U,
+					catalog_revision,
+					inventory_snapshot.revision, recipe_book_revision, known,
+					status, output, batch_count});
 				for (ft_size_t index = 0U; index < missing_groups.size(); ++index)
 					staged_missing.push_back({recipe_id, missing_groups[index]});
 			}
@@ -1138,6 +1279,16 @@ int32_t MinecraftRecipeCatalog::query_recipes(const game_inventory &inventory,
 			if (result != FT_ERR_SUCCESS)
 				return (result);
 		}
+		result = this->recipe_book_.get_revision(&recipe_book_revision_after);
+		if (result != FT_ERR_SUCCESS)
+			return (result);
+		if (recipe_book_revision_after != recipe_book_revision)
+			return (FT_ERR_INVALID_STATE);
+		result = this->get_catalog_revision(&catalog_revision_after);
+		if (result != FT_ERR_SUCCESS)
+			return (result);
+		if (catalog_revision_after != catalog_revision)
+			return (FT_ERR_INVALID_STATE);
 	}
 	catch (const std::bad_alloc &)
 	{
@@ -1153,14 +1304,54 @@ int32_t MinecraftRecipeCatalog::craft_hand_recipe(
 	int32_t batch_count, uint64_t expected_inventory_revision,
 	MinecraftCraftActionResult *result_out) noexcept
 {
+	uint64_t catalog_revision = 0U;
+	uint64_t recipe_book_revision = 0U;
+	int32_t result = this->get_catalog_revision(&catalog_revision);
+	if (result == FT_ERR_SUCCESS)
+		result = this->recipe_book_.get_revision(&recipe_book_revision);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	return (this->craft_hand_recipe(inventory, request_id, recipe_id,
+		batch_count, expected_inventory_revision, catalog_revision,
+		recipe_book_revision, result_out));
+}
+
+int32_t MinecraftRecipeCatalog::craft_hand_recipe(
+	game_inventory &inventory, uint64_t request_id, uint32_t recipe_id,
+	int32_t batch_count, uint64_t expected_inventory_revision,
+	uint64_t expected_catalog_revision, uint64_t expected_recipe_book_revision,
+	MinecraftCraftActionResult *result_out) noexcept
+{
 	return (this->craft_recipe_at_station_internal(inventory, request_id,
-		recipe_id, batch_count, expected_inventory_revision, HAND_STATION_ID,
-		0, 0, 0, 0U, result_out));
+		recipe_id, batch_count, expected_inventory_revision,
+		expected_catalog_revision, expected_recipe_book_revision,
+		HAND_STATION_ID, 0, 0, 0, 0U, result_out));
 }
 
 int32_t MinecraftRecipeCatalog::craft_recipe_at_station(
 	game_inventory &inventory, uint64_t request_id, uint32_t recipe_id,
 	int32_t batch_count, uint64_t expected_inventory_revision,
+	StationId station_id, int32_t station_x, int32_t station_y,
+	int32_t station_z, uint64_t expected_station_revision,
+	MinecraftCraftActionResult *result_out) noexcept
+{
+	uint64_t catalog_revision = 0U;
+	uint64_t recipe_book_revision = 0U;
+	int32_t result = this->get_catalog_revision(&catalog_revision);
+	if (result == FT_ERR_SUCCESS)
+		result = this->recipe_book_.get_revision(&recipe_book_revision);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	return (this->craft_recipe_at_station(inventory, request_id, recipe_id,
+		batch_count, expected_inventory_revision, catalog_revision,
+		recipe_book_revision, station_id, station_x, station_y, station_z,
+		expected_station_revision, result_out));
+}
+
+int32_t MinecraftRecipeCatalog::craft_recipe_at_station(
+	game_inventory &inventory, uint64_t request_id, uint32_t recipe_id,
+	int32_t batch_count, uint64_t expected_inventory_revision,
+	uint64_t expected_catalog_revision, uint64_t expected_recipe_book_revision,
 	StationId station_id, int32_t station_x, int32_t station_y,
 	int32_t station_z, uint64_t expected_station_revision,
 	MinecraftCraftActionResult *result_out) noexcept
@@ -1173,14 +1364,18 @@ int32_t MinecraftRecipeCatalog::craft_recipe_at_station(
 			&& expected_station_revision == 0U))
 		return (FT_ERR_INVALID_ARGUMENT);
 	return (this->craft_recipe_at_station_internal(inventory, request_id,
-		recipe_id, batch_count, expected_inventory_revision, station_id,
-		station_x, station_y, station_z, expected_station_revision, result_out));
+		recipe_id, batch_count, expected_inventory_revision,
+		expected_catalog_revision, expected_recipe_book_revision,
+		station_id, station_x, station_y, station_z, expected_station_revision,
+		result_out));
 }
 
 int32_t MinecraftRecipeCatalog::craft_recipe_at_station_internal(
 	game_inventory &inventory, uint64_t request_id, uint32_t recipe_id,
 	int32_t batch_count, uint64_t expected_inventory_revision,
-	StationId station_id, int32_t station_x, int32_t station_y,
+	uint64_t expected_catalog_revision,
+	uint64_t expected_recipe_book_revision, StationId station_id,
+	int32_t station_x, int32_t station_y,
 	int32_t station_z, uint64_t expected_station_revision,
 	MinecraftCraftActionResult *result_out) noexcept
 {
@@ -1191,6 +1386,8 @@ int32_t MinecraftRecipeCatalog::craft_recipe_at_station_internal(
 	int32_t error_code;
 
 	if (!this->initialized_ || result_out == nullptr || request_id == 0U
+		|| expected_catalog_revision == 0U
+		|| expected_recipe_book_revision == 0U
 		|| recipe_id == 0U
 		|| recipe_id > static_cast<uint32_t>(
 			std::numeric_limits<int32_t>::max())
@@ -1203,6 +1400,12 @@ int32_t MinecraftRecipeCatalog::craft_recipe_at_station_internal(
 			|| cached->second.batch_count != batch_count
 			|| cached->second.expected_inventory_revision
 				!= expected_inventory_revision
+			|| (cached->second.expected_catalog_revision != 0U
+				&& cached->second.expected_catalog_revision
+					!= expected_catalog_revision)
+			|| (cached->second.expected_recipe_book_revision != 0U
+				&& cached->second.expected_recipe_book_revision
+					!= expected_recipe_book_revision)
 			|| cached->second.station_id != station_id
 			|| cached->second.station_x != station_x
 			|| cached->second.station_y != station_y
@@ -1219,6 +1422,8 @@ int32_t MinecraftRecipeCatalog::craft_recipe_at_station_internal(
 	pending.recipe_id = recipe_id;
 	pending.batch_count = batch_count;
 	pending.expected_inventory_revision = expected_inventory_revision;
+	pending.expected_catalog_revision = expected_catalog_revision;
+	pending.expected_recipe_book_revision = expected_recipe_book_revision;
 	pending.station_id = station_id;
 	pending.station_x = station_x;
 	pending.station_y = station_y;
@@ -1242,7 +1447,18 @@ int32_t MinecraftRecipeCatalog::craft_recipe_at_station_internal(
 	/* Furnace outputs must pass through the persisted timed-processing queue.
 	 * Retain the rejection in the action cache to preserve retry identity. */
 	ft_bool recipe_known = FT_FALSE;
-	error_code = this->recipe_book_.is_recipe_known(recipe_id,
+	uint64_t current_catalog_revision = 0U;
+	uint64_t current_recipe_book_revision = 0U;
+	error_code = this->get_catalog_revision(&current_catalog_revision);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = this->recipe_book_.get_revision(
+			&current_recipe_book_revision);
+	if (error_code == FT_ERR_SUCCESS
+		&& (current_catalog_revision != expected_catalog_revision
+			|| current_recipe_book_revision != expected_recipe_book_revision))
+		error_code = FT_ERR_INVALID_STATE;
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = this->recipe_book_.is_recipe_known(recipe_id,
 		&recipe_known);
 	if (error_code == FT_ERR_SUCCESS && recipe_known != FT_TRUE)
 		error_code = FT_ERR_PERMISSION_DENIED;
@@ -1288,6 +1504,51 @@ int32_t MinecraftRecipeCatalog::craft_recipe_at_station_internal(
 	return (error_code);
 }
 
+int32_t MinecraftRecipeCatalog::replay_craft_action(uint64_t request_id,
+	uint32_t recipe_id, int32_t batch_count,
+	uint64_t expected_inventory_revision,
+	uint64_t expected_catalog_revision,
+	uint64_t expected_recipe_book_revision, StationId station_id,
+	int32_t station_x, int32_t station_y, int32_t station_z,
+	uint64_t expected_station_revision,
+	MinecraftCraftActionResult *result_out) const noexcept
+{
+	if (!this->initialized_ || request_id == 0U || recipe_id == 0U
+		|| batch_count <= 0 || expected_catalog_revision == 0U
+		|| expected_recipe_book_revision == 0U || result_out == nullptr
+		|| station_id < HAND_STATION_ID || station_id > FURNACE_STATION_ID
+		|| (station_id == HAND_STATION_ID
+			&& (station_x != 0 || station_y != 0 || station_z != 0
+				|| expected_station_revision != 0U))
+		|| (station_id != HAND_STATION_ID
+			&& expected_station_revision == 0U))
+		return (FT_ERR_INVALID_ARGUMENT);
+	const std::map<uint64_t, CachedCraftAction>::const_iterator cached =
+		this->craft_action_cache_.find(request_id);
+	if (cached == this->craft_action_cache_.end())
+		return (FT_ERR_NOT_FOUND);
+	if (cached->second.recipe_id != recipe_id
+		|| cached->second.batch_count != batch_count
+		|| cached->second.expected_inventory_revision
+			!= expected_inventory_revision
+		|| (cached->second.expected_catalog_revision != 0U
+			&& cached->second.expected_catalog_revision
+				!= expected_catalog_revision)
+		|| (cached->second.expected_recipe_book_revision != 0U
+			&& cached->second.expected_recipe_book_revision
+				!= expected_recipe_book_revision)
+		|| cached->second.station_id != station_id
+		|| cached->second.station_x != station_x
+		|| cached->second.station_y != station_y
+		|| cached->second.station_z != station_z
+		|| cached->second.expected_station_revision
+			!= expected_station_revision)
+		return (FT_ERR_INVALID_ARGUMENT);
+	*result_out = cached->second.result;
+	result_out->replayed = true;
+	return (result_out->status);
+}
+
 int32_t MinecraftRecipeCatalog::serialize_craft_action_cache(
 	std::vector<uint8_t> &bytes_out) const noexcept
 {
@@ -1297,12 +1558,12 @@ int32_t MinecraftRecipeCatalog::serialize_craft_action_cache(
 		return (FT_ERR_INVALID_OPERATION);
 	try
 	{
-		staged.reserve(28U + this->craft_action_cache_.size() * 60U);
+		staged.reserve(28U + this->craft_action_cache_.size() * 76U);
 		staged.push_back('M');
 		staged.push_back('C');
 		staged.push_back('R');
 		staged.push_back('A');
-		minecraft_recipe_cache_append_u32(staged, 2U);
+		minecraft_recipe_cache_append_u32(staged, 3U);
 		minecraft_recipe_cache_append_u64(staged,
 			this->highest_craft_request_id_);
 		minecraft_recipe_cache_append_u32(staged, static_cast<uint32_t>(
@@ -1317,6 +1578,10 @@ int32_t MinecraftRecipeCatalog::serialize_craft_action_cache(
 				static_cast<uint32_t>(entry.second.batch_count));
 			minecraft_recipe_cache_append_u64(staged,
 				entry.second.expected_inventory_revision);
+			minecraft_recipe_cache_append_u64(staged,
+				entry.second.expected_catalog_revision);
+			minecraft_recipe_cache_append_u64(staged,
+				entry.second.expected_recipe_book_revision);
 			minecraft_recipe_cache_append_u32(staged,
 				static_cast<uint32_t>(entry.second.station_id));
 			minecraft_recipe_cache_append_u32(staged,
@@ -1366,17 +1631,17 @@ int32_t MinecraftRecipeCatalog::validate_craft_action_cache(
 		!= stored_checksum
 		|| !minecraft_recipe_cache_read_u32(bytes, byte_count - 8U,
 			&offset, &version)
-		|| (version != 1U && version != 2U)
+		|| (version != 1U && version != 2U && version != 3U)
 		|| !minecraft_recipe_cache_read_u64(bytes, byte_count - 8U,
 			&offset, &high_watermark)
 		|| !minecraft_recipe_cache_read_u32(bytes, byte_count - 8U,
 			&offset, &record_count)
 		|| record_count > 4096U
 		|| record_count > (std::numeric_limits<std::size_t>::max() - 28U)
-			/ (version == 1U ? 36U : 60U))
+			/ (version == 1U ? 36U : (version == 2U ? 60U : 76U)))
 		return (FT_ERR_INVALID_ARGUMENT);
 	expected_size = 28U + static_cast<std::size_t>(record_count)
-		* (version == 1U ? 36U : 60U);
+		* (version == 1U ? 36U : (version == 2U ? 60U : 76U));
 	if (byte_count != expected_size)
 		return (FT_ERR_INVALID_ARGUMENT);
 	for (uint32_t index = 0U; index < record_count; ++index)
@@ -1402,7 +1667,15 @@ int32_t MinecraftRecipeCatalog::validate_craft_action_cache(
 			|| !minecraft_recipe_cache_read_u64(bytes, byte_count - 8U,
 				&offset, &expected_revision))
 			return (FT_ERR_INVALID_ARGUMENT);
-		if (version == 2U
+		uint64_t expected_catalog_revision = 0U;
+		uint64_t expected_recipe_book_revision = 0U;
+		if (version >= 3U
+			&& (!minecraft_recipe_cache_read_u64(bytes, byte_count - 8U,
+					&offset, &expected_catalog_revision)
+				|| !minecraft_recipe_cache_read_u64(bytes, byte_count - 8U,
+					&offset, &expected_recipe_book_revision)))
+			return (FT_ERR_INVALID_ARGUMENT);
+		if (version >= 2U
 			&& (!minecraft_recipe_cache_read_u32(bytes, byte_count - 8U,
 					&offset, &station_id)
 				|| !minecraft_recipe_cache_read_u32(bytes, byte_count - 8U,
@@ -1434,7 +1707,9 @@ int32_t MinecraftRecipeCatalog::validate_craft_action_cache(
 				&& (station_x != 0U || station_y != 0U || station_z != 0U
 					|| expected_station_revision != 0U))
 			|| (station_id != static_cast<uint32_t>(HAND_STATION_ID)
-				&& expected_station_revision == 0U))
+				&& expected_station_revision == 0U)
+			|| (version >= 3U && (expected_catalog_revision == 0U
+				|| expected_recipe_book_revision == 0U)))
 			return (FT_ERR_INVALID_ARGUMENT);
 		previous_request_id = request_id;
 	}
@@ -1471,17 +1746,17 @@ int32_t MinecraftRecipeCatalog::restore_craft_action_cache(
 		!= stored_checksum
 		|| !minecraft_recipe_cache_read_u32(bytes, byte_count - 8U,
 			&offset, &version)
-		|| (version != 1U && version != 2U)
+		|| (version != 1U && version != 2U && version != 3U)
 		|| !minecraft_recipe_cache_read_u64(bytes, byte_count - 8U,
 			&offset, &high_watermark)
 		|| !minecraft_recipe_cache_read_u32(bytes, byte_count - 8U,
 			&offset, &record_count)
 		|| record_count > 4096U
 		|| record_count > (std::numeric_limits<std::size_t>::max() - 28U)
-			/ (version == 1U ? 36U : 60U))
+			/ (version == 1U ? 36U : (version == 2U ? 60U : 76U)))
 		return (FT_ERR_INVALID_ARGUMENT);
 	expected_size = 28U + static_cast<std::size_t>(record_count)
-		* (version == 1U ? 36U : 60U);
+		* (version == 1U ? 36U : (version == 2U ? 60U : 76U));
 	if (byte_count != expected_size)
 		return (FT_ERR_INVALID_ARGUMENT);
 	try
@@ -1501,6 +1776,12 @@ int32_t MinecraftRecipeCatalog::restore_craft_action_cache(
 					&offset, &batch_count)
 				|| !minecraft_recipe_cache_read_u64(bytes, byte_count - 8U,
 					&offset, &action.expected_inventory_revision))
+				return (FT_ERR_INVALID_ARGUMENT);
+			if (version >= 3U
+				&& (!minecraft_recipe_cache_read_u64(bytes, byte_count - 8U,
+						&offset, &action.expected_catalog_revision)
+					|| !minecraft_recipe_cache_read_u64(bytes, byte_count - 8U,
+						&offset, &action.expected_recipe_book_revision)))
 				return (FT_ERR_INVALID_ARGUMENT);
 			if (version >= 2U)
 			{
@@ -1575,6 +1856,20 @@ int32_t MinecraftRecipeCatalog::start_processing(game_inventory &inventory,
 	uint64_t expected_station_revision,
 	MinecraftProcessingActionResult *result_out) noexcept
 {
+	return (this->start_processing(inventory, request_id, recipe_id,
+		batch_count, expected_inventory_revision, 0U, 0U, station_x,
+		station_y, station_z, expected_station_revision, result_out));
+}
+
+int32_t MinecraftRecipeCatalog::start_processing(game_inventory &inventory,
+	uint64_t request_id, uint32_t recipe_id, int32_t batch_count,
+	uint64_t expected_inventory_revision,
+	uint64_t expected_catalog_revision,
+	uint64_t expected_recipe_book_revision,
+	int32_t station_x, int32_t station_y, int32_t station_z,
+	uint64_t expected_station_revision,
+	MinecraftProcessingActionResult *result_out) noexcept
+{
 	static const uint32_t MAX_BATCH = 32U;
 	const uint32_t processing_index = recipe_id
 		- FIRST_PROCESSING_RECIPE_ID;
@@ -1584,13 +1879,18 @@ int32_t MinecraftRecipeCatalog::start_processing(game_inventory &inventory,
 	ProcessingJob staged_job = {};
 	game_crafting_prepared prepared;
 	uint64_t revision = 0U;
+	uint64_t catalog_revision = 0U;
+	uint64_t recipe_book_revision = 0U;
 	int32_t error_code;
 
 	if (!this->initialized_ || this->items_ == nullptr || result_out == nullptr
 		|| request_id == 0U || recipe_id < FIRST_PROCESSING_RECIPE_ID
 		|| recipe_id > LAST_PROCESSING_RECIPE_ID
 		|| batch_count <= 0 || static_cast<uint32_t>(batch_count) > MAX_BATCH
-		|| expected_station_revision == 0U)
+		|| expected_inventory_revision == 0U
+		|| expected_station_revision == 0U
+		|| ((expected_catalog_revision == 0U)
+			!= (expected_recipe_book_revision == 0U)))
 		return (FT_ERR_INVALID_ARGUMENT);
 	cached = this->processing_action_cache_.find(request_id);
 	if (cached != this->processing_action_cache_.end())
@@ -1598,7 +1898,11 @@ int32_t MinecraftRecipeCatalog::start_processing(game_inventory &inventory,
 		if (cached->second.recipe_id != recipe_id
 			|| cached->second.batch_count != batch_count
 			|| cached->second.expected_inventory_revision
-				!= expected_inventory_revision)
+				!= expected_inventory_revision
+			|| cached->second.expected_catalog_revision
+				!= expected_catalog_revision
+			|| cached->second.expected_recipe_book_revision
+				!= expected_recipe_book_revision)
 			return (FT_ERR_INVALID_ARGUMENT);
 		*result_out = cached->second.result;
 		result_out->replayed = true;
@@ -1609,9 +1913,23 @@ int32_t MinecraftRecipeCatalog::start_processing(game_inventory &inventory,
 	if (this->processing_jobs_.size() >= 64U
 		|| this->processing_action_cache_.size() >= 4096U)
 		return (FT_ERR_FULL);
+	if (expected_catalog_revision != 0U)
+	{
+		error_code = this->get_catalog_revision(&catalog_revision);
+		if (error_code == FT_ERR_SUCCESS)
+			error_code = this->recipe_book_.get_revision(
+				&recipe_book_revision);
+		if (error_code != FT_ERR_SUCCESS)
+			return (error_code);
+		if (catalog_revision != expected_catalog_revision
+			|| recipe_book_revision != expected_recipe_book_revision)
+			return (FT_ERR_INVALID_STATE);
+	}
 	action.recipe_id = recipe_id;
 	action.batch_count = batch_count;
 	action.expected_inventory_revision = expected_inventory_revision;
+	action.expected_catalog_revision = expected_catalog_revision;
+	action.expected_recipe_book_revision = expected_recipe_book_revision;
 	action.result.request_id = request_id;
 	action.result.recipe_id = recipe_id;
 	action.result.batch_count = batch_count;
@@ -1656,6 +1974,17 @@ int32_t MinecraftRecipeCatalog::start_processing(game_inventory &inventory,
 	if (error_code == FT_ERR_SUCCESS
 		&& revision != expected_inventory_revision)
 		error_code = FT_ERR_INVALID_STATE;
+	if (error_code == FT_ERR_SUCCESS && expected_catalog_revision != 0U)
+	{
+		error_code = this->get_catalog_revision(&catalog_revision);
+		if (error_code == FT_ERR_SUCCESS)
+			error_code = this->recipe_book_.get_revision(
+				&recipe_book_revision);
+		if (error_code == FT_ERR_SUCCESS
+			&& (catalog_revision != expected_catalog_revision
+				|| recipe_book_revision != expected_recipe_book_revision))
+			error_code = FT_ERR_INVALID_STATE;
+	}
 	if (error_code == FT_ERR_SUCCESS)
 		error_code = this->crafting_.commit_processing_inputs(inventory, &prepared);
 	(void)prepared.destroy();
@@ -1675,18 +2004,54 @@ int32_t MinecraftRecipeCatalog::advance_processing(game_inventory &inventory,
 	uint32_t server_ticks, uint32_t job_budget, uint32_t *completed_out,
 	uint32_t *pending_output_out) noexcept
 {
+	std::vector<ProcessingStationContext> contexts;
+	std::vector<uint64_t> request_ids;
+	int32_t result = this->get_processing_station_contexts(contexts);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	try
+	{
+		request_ids.reserve(contexts.size());
+		for (const ProcessingStationContext &context : contexts)
+			request_ids.push_back(context.request_id);
+	}
+	catch (const std::bad_alloc &)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	return (this->advance_processing(inventory, server_ticks, request_ids,
+		job_budget, completed_out, pending_output_out));
+}
+
+int32_t MinecraftRecipeCatalog::advance_processing(game_inventory &inventory,
+	uint32_t server_ticks,
+	const std::vector<uint64_t> &authorized_request_ids,
+	uint32_t job_budget, uint32_t *completed_out,
+	uint32_t *pending_output_out) noexcept
+{
 	uint32_t completed = 0U;
 	uint32_t pending = 0U;
 	uint32_t visited = 0U;
 	if (!this->initialized_ || completed_out == nullptr
 		|| pending_output_out == nullptr || server_ticks > 1200U
-		|| job_budget > 64U)
+		|| job_budget > 64U || authorized_request_ids.size() > 64U)
 		return (FT_ERR_INVALID_ARGUMENT);
+	for (std::size_t index = 0U; index < authorized_request_ids.size(); ++index)
+		if (authorized_request_ids[index] == 0U
+			|| (index != 0U && authorized_request_ids[index - 1U]
+				>= authorized_request_ids[index]))
+			return (FT_ERR_INVALID_ARGUMENT);
 	std::map<uint64_t, ProcessingJob>::iterator iterator =
 		this->processing_jobs_.begin();
 	while (iterator != this->processing_jobs_.end() && visited < job_budget)
 	{
 		const uint64_t request_id = iterator->first;
+		if (!std::binary_search(authorized_request_ids.begin(),
+			authorized_request_ids.end(), request_id))
+		{
+			++iterator;
+			continue ;
+		}
 		ProcessingJob &job = iterator->second;
 		if (job.ticks_remaining > server_ticks)
 			job.ticks_remaining -= server_ticks;
@@ -1790,11 +2155,11 @@ int32_t MinecraftRecipeCatalog::serialize_processing_state(
 	std::vector<uint8_t> staged;
 	try
 	{
-		staged.reserve(32U + this->processing_action_cache_.size() * 40U
+		staged.reserve(32U + this->processing_action_cache_.size() * 56U
 			+ this->processing_jobs_.size() * 128U);
 		staged.push_back('M'); staged.push_back('C');
 		staged.push_back('P'); staged.push_back('J');
-		minecraft_recipe_cache_append_u32(staged, 4U);
+		minecraft_recipe_cache_append_u32(staged, 5U);
 		for (uint32_t index = 0U; index < 7U; ++index)
 		{
 			minecraft_recipe_cache_append_u32(staged,
@@ -1819,6 +2184,10 @@ int32_t MinecraftRecipeCatalog::serialize_processing_state(
 				static_cast<uint32_t>(action.batch_count));
 			minecraft_recipe_cache_append_u64(staged,
 				action.expected_inventory_revision);
+			minecraft_recipe_cache_append_u64(staged,
+				action.expected_catalog_revision);
+			minecraft_recipe_cache_append_u64(staged,
+				action.expected_recipe_book_revision);
 			minecraft_recipe_cache_append_u64(staged,
 				action.result.inventory_revision);
 			minecraft_recipe_cache_append_u32(staged,
@@ -1897,7 +2266,7 @@ int32_t MinecraftRecipeCatalog::validate_processing_state(
 	offset = 4U;
 	if (!minecraft_recipe_cache_read_u32(bytes, byte_count - 8U,
 			&offset, &version)
-		|| (version < 1U || version > 4U))
+		|| (version < 1U || version > 5U))
 		return (FT_ERR_INVALID_ARGUMENT);
 	if (version == 3U)
 	{
@@ -1918,7 +2287,7 @@ int32_t MinecraftRecipeCatalog::validate_processing_state(
 			ticks_per_item[index] = shared_ticks;
 		}
 	}
-	else if (version == 4U)
+	else if (version >= 4U)
 	{
 		for (uint32_t index = 0U; index < 7U; ++index)
 		{
@@ -1966,6 +2335,13 @@ int32_t MinecraftRecipeCatalog::validate_processing_state(
 					&offset, &batch)
 				|| !minecraft_recipe_cache_read_u64(bytes, byte_count - 8U,
 					&offset, &action.expected_inventory_revision)
+				|| (version >= 5U
+					&& (!minecraft_recipe_cache_read_u64(bytes,
+						byte_count - 8U, &offset,
+						&action.expected_catalog_revision)
+						|| !minecraft_recipe_cache_read_u64(bytes,
+							byte_count - 8U, &offset,
+							&action.expected_recipe_book_revision)))
 				|| !minecraft_recipe_cache_read_u64(bytes, byte_count - 8U,
 					&offset, &action.result.inventory_revision)
 				|| !minecraft_recipe_cache_read_u32(bytes, byte_count - 8U,
@@ -2092,7 +2468,7 @@ int32_t MinecraftRecipeCatalog::restore_processing_state(
 		&offset, &version);
 	if (version == 3U)
 		offset += 12U;
-	else if (version == 4U)
+	else if (version >= 4U)
 		offset += 84U;
 	(void)minecraft_recipe_cache_read_u64(bytes, byte_count - 8U,
 		&offset, &high_watermark);
@@ -2115,6 +2491,13 @@ int32_t MinecraftRecipeCatalog::restore_processing_state(
 				&offset, &batch);
 			(void)minecraft_recipe_cache_read_u64(bytes, byte_count - 8U,
 				&offset, &action.expected_inventory_revision);
+			if (version >= 5U)
+			{
+				(void)minecraft_recipe_cache_read_u64(bytes, byte_count - 8U,
+					&offset, &action.expected_catalog_revision);
+				(void)minecraft_recipe_cache_read_u64(bytes, byte_count - 8U,
+					&offset, &action.expected_recipe_book_revision);
+			}
 			(void)minecraft_recipe_cache_read_u64(bytes, byte_count - 8U,
 				&offset, &action.result.inventory_revision);
 			(void)minecraft_recipe_cache_read_u32(bytes, byte_count - 8U,
@@ -2375,6 +2758,23 @@ int32_t MinecraftRecipeCatalog::serialize_recipe_book(
 	if (result == FT_ERR_SUCCESS && destroy_result != FT_ERR_SUCCESS)
 		result = destroy_result;
 	return (result);
+}
+
+int32_t MinecraftRecipeCatalog::get_catalog_revision(
+	uint64_t *revision_out) const noexcept
+{
+	if (!this->initialized_ || revision_out == nullptr
+		|| this->catalog_content_revision_ == 0U)
+		return (FT_ERR_INVALID_STATE);
+	uint64_t revision = this->catalog_content_revision_;
+	for (const std::pair<const uint64_t, uint32_t> &source
+		: this->discovery_sources_)
+	{
+		minecraft_recipe_hash_u64(revision, source.first);
+		minecraft_recipe_hash_u32(revision, source.second);
+	}
+	*revision_out = revision == 0U ? 1U : revision;
+	return (FT_ERR_SUCCESS);
 }
 
 int32_t MinecraftRecipeCatalog::restore_recipe_book(const uint8_t *bytes,

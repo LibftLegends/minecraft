@@ -1,4 +1,6 @@
 #include "../../src/spawn/PlayerSpawner.hpp"
+#include <cmath>
+#include <limits>
 
 PlayerSpawner::PlayerSpawner()
 {
@@ -23,6 +25,22 @@ bool PlayerSpawner::try_spawn_at(Camera *camera, const World &world,
 	double candidate_x, double candidate_z)
 {
 	double	ground_eye_y;
+	if (!std::isfinite(candidate_x) || !std::isfinite(candidate_z))
+		return (false);
+	if (world.revision_barriers_active())
+	{
+		const double chunk_x = std::floor(candidate_x
+			/ GAME_VOXEL_CHUNK_WIDTH);
+		const double chunk_z = std::floor(candidate_z
+			/ GAME_VOXEL_CHUNK_DEPTH);
+		if (chunk_x < std::numeric_limits<int32_t>::min()
+			|| chunk_x > std::numeric_limits<int32_t>::max()
+			|| chunk_z < std::numeric_limits<int32_t>::min()
+			|| chunk_z > std::numeric_limits<int32_t>::max()
+			|| world.revision_barrier_blocks_chunk(
+				static_cast<int32_t>(chunk_x), static_cast<int32_t>(chunk_z)))
+			return (false);
+	}
 
 	if (PlayerGround::ground_eye_y_at(world, candidate_x, candidate_z,
 			&ground_eye_y) == false)
@@ -75,8 +93,16 @@ void PlayerSpawner::spawn_player_on_ground(Camera *camera, const World &world)
 
 	if (camera == nullptr)
 		return ;
-	origin_x = static_cast<int32_t>(std::floor(camera->x));
-	origin_z = static_cast<int32_t>(std::floor(camera->z));
+	const double floor_x = std::floor(camera->x);
+	const double floor_z = std::floor(camera->z);
+	if (!std::isfinite(floor_x) || !std::isfinite(floor_z)
+		|| floor_x < std::numeric_limits<int32_t>::min() + 8.0
+		|| floor_x > std::numeric_limits<int32_t>::max() - 8.0
+		|| floor_z < std::numeric_limits<int32_t>::min() + 8.0
+		|| floor_z > std::numeric_limits<int32_t>::max() - 8.0)
+		return ;
+	origin_x = static_cast<int32_t>(floor_x);
+	origin_z = static_cast<int32_t>(floor_z);
 	radius = 0;
 	while (radius <= 8)
 	{

@@ -12,8 +12,9 @@ namespace
 {
 	static const uint64_t PROJECTILE_SCOPE_SALT = 0x4152524F574C4E43ULL;
 	static const uint32_t PROJECTILE_TRANSACTION_TYPE = 17U;
-	static const uint32_t PROJECTILE_PAYLOAD_VERSION = 1U;
-	static const std::size_t PROJECTILE_PAYLOAD_SIZE = 92U;
+	static const uint32_t PROJECTILE_PAYLOAD_VERSION = 2U;
+	static const std::size_t PROJECTILE_PAYLOAD_V1_SIZE = 92U;
+	static const std::size_t PROJECTILE_PAYLOAD_SIZE = 100U;
 	static const double PROJECTILE_SPEED = 1.25;
 	static const uint64_t PROJECTILE_COOLDOWN_TICKS = 10U;
 
@@ -57,11 +58,26 @@ namespace
 	}
 	static bool payload_is_valid(const GameTransactionJournal::Record &record)
 	{
+		const uint32_t version = record.payload.size() >= 8U
+			? read_u32(record.payload, 4U) : 0U;
+		uint64_t expected_scope = 0U;
+		const bool valid_size =
+			(version == 1U && record.payload.size() == PROJECTILE_PAYLOAD_V1_SIZE)
+			|| (version == PROJECTILE_PAYLOAD_VERSION
+				&& record.payload.size() == PROJECTILE_PAYLOAD_SIZE);
+		if (version == PROJECTILE_PAYLOAD_VERSION && valid_size)
+		{
+			expected_scope = PROJECTILE_SCOPE_SALT
+				^ read_u64(record.payload, 92U);
+			if (expected_scope == 0U)
+				expected_scope = PROJECTILE_SCOPE_SALT;
+		}
 		return (record.transaction_type == PROJECTILE_TRANSACTION_TYPE
-			&& record.payload.size() == PROJECTILE_PAYLOAD_SIZE
+			&& valid_size
+			&& (version != PROJECTILE_PAYLOAD_VERSION
+				|| record.scope_id == expected_scope)
 			&& record.payload[0] == 'G' && record.payload[1] == 'P'
 			&& record.payload[2] == 'R' && record.payload[3] == 'J'
-			&& read_u32(record.payload, 4U) == PROJECTILE_PAYLOAD_VERSION
 			&& read_u64(record.payload, 8U) == record.request_id
 			&& record.request_id != 0U && read_u64(record.payload, 16U) != 0U
 			&& read_u32(record.payload, 32U)
@@ -180,7 +196,9 @@ namespace
 			projectile.orientation_pitch = 0.0;
 			projectile.health = static_cast<int32_t>(bow_rule.attack_power);
 			projectile.tick = read_u64(record.payload, 24U);
-			result = entities.spawn(projectile, &spawned_id);
+			const uint64_t owner_actor_id = read_u32(record.payload, 4U) >= 2U
+				? read_u64(record.payload, 92U) : 0U;
+			result = entities.spawn(projectile, owner_actor_id, &spawned_id);
 		}
 		if (result == FT_ERR_SUCCESS)
 		{
@@ -242,7 +260,8 @@ namespace
 		return (result);
 	}
 	static int32_t make_payload(uint64_t request_id,
-		uint64_t inventory_revision, uint64_t server_tick, uint64_t bow_instance_id,
+		uint64_t inventory_revision, uint64_t server_tick,
+		uint64_t bow_instance_id, uint64_t actor_id,
 		double origin_x, double origin_y, double origin_z, double direction_x,
 		double direction_y, double direction_z,
 		std::vector<uint8_t> &payload) noexcept
@@ -270,6 +289,7 @@ namespace
 			append_double(payload, direction_x);
 			append_double(payload, direction_y);
 			append_double(payload, direction_z);
+			append_u64(payload, actor_id);
 		}
 		catch (...)
 		{
@@ -365,7 +385,7 @@ int32_t WorldProjectileLaunchTransaction::launch(const char *snapshot_path,
 	(void)bow->destroy();
 	delete bow;
 	result = make_payload(request_id,
-		expected_inventory_revision, server_tick, bow_instance_id, origin_x,
+		expected_inventory_revision, server_tick, bow_instance_id, actor_id, origin_x,
 		origin_y, origin_z, direction_x, direction_y, direction_z, payload);
 	if (result == FT_ERR_SUCCESS)
 		result = journal.serialize(journal_before);

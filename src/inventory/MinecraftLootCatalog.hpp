@@ -45,6 +45,8 @@ class MinecraftLootCatalog
   public:
 	static const std::size_t MAXIMUM_DROPS_PER_DEATH = 2U;
 	static const uint32_t MAXIMUM_CHANCE_BASIS_POINTS = 10000U;
+	static int32_t resolve_entity_loot_table(uint32_t entity_type,
+		uint32_t *loot_table_id_out) noexcept;
 	static int32_t resolve(uint32_t loot_table_id, uint32_t entity_id,
 		std::vector<MinecraftLootDrop> &drops_out) noexcept;
 	static int32_t resolve_recipe_discovery(uint32_t loot_table_id,

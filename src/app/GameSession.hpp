@@ -4,6 +4,8 @@
 #include "../ft_vox.hpp"
 #include "../../src/camera/Camera.hpp"
 #include "../../src/world/World.hpp"
+#include "../../src/world/WorldSaveCatalog.hpp"
+#include "../../src/world/WorldRevisionServer.hpp"
 #include "../../src/debug/RenderDebug.hpp"
 #include "../../src/diagnostics/SystemMemoryInfo.hpp"
 #include "../../src/platform/InputReader.hpp"
@@ -31,7 +33,6 @@
 #include <utility>
 #include <vector>
 
-class WorldRevisionServer;
 class ProtocolBoatMoveIntentMessage;
 class ProtocolBoatMoveResultMessage;
 class WorldRevisionValidator;
@@ -53,10 +54,18 @@ struct CropChunkGrowthDeadline
 	uint64_t next_growth_tick;
 };
 
+struct RuntimeBlockAcquisitionConfig
+{
+	uint32_t block_id;
+	MinecraftBlockAcquisitionPolicy policy;
+	int32_t item_id;
+};
+
 /* Stable host delivery envelope. The host supplies/persists session_id and
  * restores the same value before exposing outputs after a process restart. */
 struct RegenerationHostOutput
 {
+	uint8_t world_id[32];
 	uint64_t session_id;
 	card_game_host_intent_record record;
 };
@@ -82,6 +91,15 @@ struct MinecraftEquipmentRepairQuote
 	int32_t material_quantity_available;
 	uint64_t inventory_revision;
 	bool repairable;
+};
+
+struct MinecraftInventoryView
+{
+	game_inventory_snapshot inventory;
+	/* Equipment entries use game_equipment_slot values in item.slot. */
+	std::vector<game_inventory_item_snapshot> equipment;
+	/* Deterministic content revision for the copied equipment state. */
+	uint64_t character_state_revision;
 };
 
 struct MinecraftCombatActionResult
@@ -112,15 +130,19 @@ class GameSession
 		int32_t station_x, int32_t station_y, int32_t station_z,
 		uint64_t expected_station_revision, double player_x, double player_y,
 		double player_z, void *user_data) noexcept;
+	using ActorProcessingStationAuthorizer = bool (*)(
+		uint64_t authenticated_actor_id, uint32_t station_id,
+		int32_t station_x, int32_t station_y, int32_t station_z,
+		uint64_t expected_station_revision, void *user_data) noexcept;
 	using ProcessingStationContinuityValidator = bool (*)(
 		uint32_t station_id, int32_t station_x, int32_t station_y,
 		int32_t station_z, uint64_t expected_station_revision,
 		void *user_data) noexcept;
 	/* Supplies the authoritative occupied chunk for every connected player.
-	 * The callback replaces the single-player camera-derived occupancy path. */
+	 * The host must return one coordinate per active player and stamp it from
+	 * the configured authoritative epoch clock; stale/incomplete samples fail. */
 	using RevisionOccupancyProvider = int32_t (*)(
-		std::vector<World::RevisionChunkCoordinate> &chunks_out,
-		void *user_data) noexcept;
+		WorldRevisionOccupancySample &sample_out, void *user_data) noexcept;
 	/* Returns the host's restart-stable monotonic epoch in milliseconds. */
 	using RevisionClockProvider = int32_t (*)(uint64_t *epoch_ms_out,
 		void *user_data) noexcept;
@@ -132,18 +154,31 @@ class GameSession
 		void *user_data) noexcept;
 	using CombatActorAuthorizer = bool (*)(uint64_t authenticated_actor_id,
 		void *user_data) noexcept;
+	using AuthenticatedActorAuthorizer = bool (*)(
+		uint64_t authenticated_actor_id, void *user_data) noexcept;
 	using BoatNetworkActorResolver = bool (*)(
 		const uint8_t authenticated_public_key[32],
 		uint64_t *authenticated_actor_id_out, void *user_data) noexcept;
 	/* Host delivery callbacks must be idempotent and resumable by
-	 * (session_id, sequence). A replayed prepare must return the same durable
-	 * reservation, including after an earlier failed prepare was aborted. */
+	 * (world_id, session_id, action_request_id, sequence). A replayed prepare
+	 * must return the same durable reservation. Transient callback errors remain
+	 * PREPARED for automatic recovery. PERMISSION_DENIED, INVALID_ARGUMENT, and
+	 * CONFIGURATION from prepare or commit are durably aborted after abort
+	 * succeeds; a permanent commit error must mean the effect was not committed
+	 * and abort must release/undo its reservation. Such records require
+	 * retry_regeneration_host_output after the cause is repaired. */
 	using RegenerationHostOutputPrepare = int32_t (*)(
 		const RegenerationHostOutput &output, void *user_data) noexcept;
 	using RegenerationHostOutputCommit = int32_t (*)(
 		const RegenerationHostOutput &output, void *user_data) noexcept;
 	using RegenerationHostOutputAbort = int32_t (*)(
 		const RegenerationHostOutput &output, void *user_data) noexcept;
+	/* Legacy output payloads have no embedded world ID. A host may authorize
+	 * replay only when it can verify that the persisted output session belongs
+	 * to this world. New v3 outputs do not use this migration callback. */
+	using LegacyHostOutputWorldAuthorizer = bool (*)(
+		const uint8_t world_id[32], uint64_t session_id,
+		void *user_data) noexcept;
 	static bool authorize_recipe_discovery_event(
 		RecipeDiscoveryAuthorizer authorizer, uint32_t source_type_id,
 		uint32_t source_id, uint64_t source_event_id,
@@ -181,8 +216,44 @@ class GameSession
 
 	int start(const std::string &seed, ApplicationWindow &window,
 		VoxelRenderer &renderer);
+	/* Direct ID-based start has no authenticated admission context and fails
+	 * closed. Use start_from_catalog_admitted for catalog-managed worlds. */
+	int start_with_world_id(const std::string &seed,
+		const uint8_t world_id[32], ApplicationWindow &window,
+		VoxelRenderer &renderer);
+	/* Starts a catalog world only after reserving its admission slot using the
+	 * authenticated host identity. The catalog must outlive the session. */
+	int32_t start_from_catalog_admitted(WorldSaveCatalog &catalog,
+		const uint8_t world_id[32], uint64_t actor_id, uint64_t request_id,
+		bool host_reports_friend, const uint8_t character_id[32],
+		uint32_t character_mode, const uint8_t source_world_id[32],
+		bool character_is_new, ApplicationWindow &window,
+		VoxelRenderer &renderer);
+	/* Creates a catalog world and starts its owner's first world-bound
+	 * character through the same reserved admission path. If startup fails,
+	 * definition_out still identifies the created world for a later retry. */
+	int32_t create_and_start_catalog_world(WorldSaveCatalog &catalog,
+		const std::string &name, const std::string &seed,
+		uint64_t owner_actor_id, uint32_t difficulty,
+		uint32_t ownership_mode, uint32_t access_policy,
+		uint32_t spawn_policy, uint32_t character_admission,
+		uint32_t maximum_players, ApplicationWindow &window,
+		VoxelRenderer &renderer,
+		WorldSaveDefinition *definition_out) noexcept;
+	/* Legacy catalog start has no authenticated join context and therefore
+	 * fails closed. Use start_from_catalog_admitted for catalog worlds. */
+	int start_from_catalog(const WorldSaveCatalog &catalog,
+		const uint8_t world_id[32], ApplicationWindow &window,
+		VoxelRenderer &renderer);
+	/* Select a stable character identity and ownership mode before start. When
+	 * omitted, a new world-bound identity is generated and then persisted. */
+	int32_t configure_character_identity(const uint8_t character_id[32],
+		uint32_t character_mode) noexcept;
+	static bool is_world_active(const uint8_t world_id[32]) noexcept;
+	static int32_t acquire_world_maintenance(const uint8_t world_id[32]) noexcept;
+	static int32_t release_world_maintenance(const uint8_t world_id[32]) noexcept;
 	void set_voxel_generation_config(const voxel_generation_config &config);
-	void stop();
+	int32_t stop();
 	bool is_active() const;
 	bool is_ready_to_play() const;
 	void activate_configured_render_distance();
@@ -251,6 +322,10 @@ class GameSession
 	 * the authenticated actor is accepted by this callback. */
 	int32_t configure_combat_actor_authorizer(
 		CombatActorAuthorizer authorizer, void *user_data) noexcept;
+	/* Network hosts install this before start. Actor-scoped inventory and
+	 * catalog query overloads fail closed until accepted by this callback. */
+	int32_t configure_authenticated_actor_authorizer(
+		AuthenticatedActorAuthorizer authorizer, void *user_data) noexcept;
 	/* Sets the authoritative melee cooldown in simulation ticks before start. */
 	int32_t configure_melee_attack_interval(uint32_t interval_ticks) noexcept;
 	int32_t configure_boat_network_actor_resolver(
@@ -264,6 +339,14 @@ class GameSession
 	 * fail closed until a source event is approved by that authority. */
 	int32_t configure_recipe_discovery_authorizer(
 		RecipeDiscoveryAuthorizer authorizer, void *user_data) noexcept;
+	/* Supply policies for runtime Voxel blocks before start. Startup rejects
+	 * every registered runtime block without a matching policy. */
+	int32_t configure_runtime_block_acquisition_rules(
+		const RuntimeBlockAcquisitionConfig *rules,
+		uint32_t rule_count) noexcept;
+	/* Register the acquisition policy for a runtime block added during play. */
+	int32_t register_runtime_block_acquisition_rule(uint32_t block_id,
+		MinecraftBlockAcquisitionPolicy policy, int32_t item_id) noexcept;
 	/* Trusted host binds discovery evidence to a locked recipe before start. */
 	int32_t configure_recipe_discovery_source(uint32_t source_type_id,
 		uint32_t source_id, uint32_t recipe_id) noexcept;
@@ -277,6 +360,11 @@ class GameSession
 	 * session destruction. Processing fails closed until this is installed. */
 	int32_t configure_processing_station_authorizer(
 		ProcessingStationAuthorizer authorizer, void *user_data) noexcept;
+	/* Required for actor-scoped recipe and craft requests. The host resolves the
+	 * actor's live position, claims, and station ownership in this callback. */
+	int32_t configure_actor_processing_station_authorizer(
+		ActorProcessingStationAuthorizer authorizer,
+		void *user_data) noexcept;
 	/* This callback checks station existence and ongoing host access for queued
 	 * work; it must not require the player to stay within interaction range. */
 	int32_t configure_processing_station_continuity_validator(
@@ -292,22 +380,42 @@ class GameSession
 		RevisionOccupancyProvider provider, void *user_data) noexcept;
 	int32_t configure_revision_clock_provider(RevisionClockProvider provider,
 		void *user_data) noexcept;
+	/* Hosts choose the solo or multiplayer decision window before start.
+	 * The committed absolute deadline is persisted with the world revision. */
+	int32_t configure_revision_decision_timeout_ms(
+		uint64_t timeout_ms) noexcept;
+	/* Solo defaults to fifteen minutes; multiplayer defaults to five minutes.
+	 * The authoritative occupancy feed selects and persists the active policy. */
+	int32_t configure_revision_decision_timeouts_ms(
+		uint64_t solo_timeout_ms, uint64_t multiplayer_timeout_ms) noexcept;
 
 	int loading_tick(const RenderDistanceStrategy &strategy);
 	Action update(double delta_seconds, const RenderDistanceStrategy &strategy,
 		ApplicationWindow &window);
 	void render(ApplicationWindow &window, VoxelRenderer &renderer,
 		bool with_overlay);
-	MinecraftItemCatalog &item_catalog();
+	/* Catalog inspection is read-only after session ownership begins. Runtime
+	 * policy changes must use the configured GameSession APIs. */
+	const MinecraftItemCatalog &item_catalog() const;
 	const MinecraftRecipeCatalog &recipe_catalog() const;
-	WorldItemStore &world_items();
+	/* Store and journal mutation must pass through authoritative session actions
+	 * so identity, replay and checkpoint invariants cannot be bypassed. */
+	const WorldItemStore &world_items() const;
 	/* Entity inspection is read-only through GameSession. Mutations must use
 	 * authoritative session actions so ownership and regeneration barriers apply. */
 	const WorldEntityStore &world_entities() const;
-	WorldSpawnerStore &world_spawners();
-	GameTransactionJournal &transaction_journal();
+	const WorldSpawnerStore &world_spawners() const;
+	const GameTransactionJournal &transaction_journal() const;
 	const RegenerationCardSession &regeneration_cards() const;
+	/* Authenticated immutable view used by the World Loom owner to build
+	 * subsequent play and required-discard requests. */
+	int32_t query_regeneration_card_hand(uint64_t authenticated_actor_id,
+		RegenerationCardHandView &view_out) const noexcept;
 	const RegenerationWorldRules &regeneration_world_rules() const;
+	int32_t play_regeneration_card(uint64_t authenticated_actor_id,
+		uint64_t request_id, uint32_t card_instance_id,
+		const RegenerationCardChoice &choice,
+		RegenerationPolicyIntent *intent_out) noexcept;
 	int32_t play_regeneration_card(uint64_t request_id,
 		uint32_t card_instance_id, const RegenerationCardChoice &choice,
 		RegenerationPolicyIntent *intent_out) noexcept;
@@ -332,7 +440,15 @@ class GameSession
 		uint64_t source_host_intent_sequence, uint32_t draw_count,
 		uint32_t required_discard_count,
 		RegenerationCardActionResult *result_out) noexcept;
+	int32_t draw_regeneration_cards(uint64_t authenticated_actor_id,
+		uint64_t request_id, uint64_t source_host_intent_sequence,
+		uint32_t draw_count, uint32_t required_discard_count,
+		RegenerationCardActionResult *result_out) noexcept;
 	int32_t discard_regeneration_hand_card(uint64_t request_id,
+		uint64_t source_draw_request_id, uint32_t card_instance_id,
+		RegenerationCardActionResult *result_out) noexcept;
+	int32_t discard_regeneration_hand_card(
+		uint64_t authenticated_actor_id, uint64_t request_id,
 		uint64_t source_draw_request_id, uint32_t card_instance_id,
 		RegenerationCardActionResult *result_out) noexcept;
 	int32_t import_regeneration_card_item_to_deck(int32_t inventory_slot,
@@ -362,15 +478,40 @@ class GameSession
 	int32_t configure_regeneration_host_output_consumer(
 		RegenerationHostOutputPrepare prepare,
 		RegenerationHostOutputCommit commit,
-		RegenerationHostOutputAbort abort, void *user_data) noexcept;
+		RegenerationHostOutputAbort abort, void *user_data,
+		LegacyHostOutputWorldAuthorizer legacy_world_authorizer = nullptr)
+		noexcept;
 	int32_t deliver_next_regeneration_host_output() noexcept;
+	/* Explicitly retry a durably aborted host output after its external cause
+	 * has been repaired. Automatic recovery never replays an aborted output. */
+	int32_t retry_regeneration_host_output(uint64_t session_id,
+		uint64_t host_intent_sequence) noexcept;
 	int32_t recover_regeneration_host_outputs() noexcept;
 	int32_t resolve_expired_regeneration_choices(
 		uint64_t request_id,
 		uint32_t *resolved_count_out) noexcept;
+	int32_t resolve_expired_regeneration_choices(
+		uint64_t authenticated_actor_id, uint64_t request_id,
+		uint32_t *resolved_count_out) noexcept;
+	/* Trusted host scheduler entry point. It reads the authoritative clock,
+	 * resolves every due choice idempotently, and checkpoints before return. */
+	int32_t process_due_regeneration_choice_expiry() noexcept;
+	int32_t choose_regeneration_card_option(uint64_t authenticated_actor_id,
+		uint64_t request_id, uint32_t choice_id, uint32_t option_id,
+		RegenerationCardActionResult *result_out) noexcept;
 	int32_t begin_card_regeneration_revision() noexcept;
 	int32_t bind_world_revision_server(
 		WorldRevisionServer &server) noexcept;
+	/* Production wiring path: bind the host's authenticated actor/Loom resolver
+	 * and station reach/claim policy before initializing the server. */
+	int32_t bind_world_revision_server(WorldRevisionServer &server,
+		WorldRevisionServerAuthorizer authorizer,
+		void *authorizer_user_data,
+		WorldRevisionServerStationAccessAuthorizer station_authorizer,
+		void *station_authorizer_user_data,
+		WorldRevisionServerInstabilityViewAuthorizer instability_authorizer
+			= nullptr,
+		void *instability_authorizer_user_data = nullptr) noexcept;
 	int32_t commit_regeneration_start(uint64_t actor_id, uint64_t loom_id,
 		uint64_t request_id, uint64_t expected_selection_revision,
 		uint64_t expected_policy_revision,
@@ -380,14 +521,40 @@ class GameSession
 	/* Trusted host recovery path; retries a failed generation attempt without
 	 * clearing its reserved-chunk barrier or charging/drawing again. */
 	int32_t retry_failed_regeneration() noexcept;
-	int32_t query_hand_recipe(uint32_t recipe_id,
-		game_crafting_query_result *result,
-		ft_vector<game_crafting_missing_ingredient> *missing_groups) const noexcept;
-	int32_t query_station_recipe(uint32_t recipe_id, uint32_t station_id,
-		int32_t station_x, int32_t station_y, int32_t station_z,
-		uint64_t expected_station_revision,
-		game_crafting_query_result *result,
-		ft_vector<game_crafting_missing_ingredient> *missing_groups) const noexcept;
+	/* Authenticated host boundary for inventory and equipment reads. The
+	 * returned values are copied under one item transaction lock. */
+	int32_t query_inventory_view(uint64_t authenticated_actor_id,
+		MinecraftInventoryView &view_out) const noexcept;
+	int32_t query_station_recipes(uint64_t authenticated_actor_id,
+		uint32_t station_id, int32_t station_x, int32_t station_y,
+		int32_t station_z, uint64_t expected_station_revision,
+		std::vector<MinecraftRecipeQueryEntry> &entries_out,
+		std::vector<MinecraftRecipeMissingGroup> &missing_out) const noexcept;
+	int32_t query_station_recipes(uint64_t authenticated_actor_id,
+		uint32_t station_id, int32_t station_x, int32_t station_y,
+		int32_t station_z, uint64_t expected_station_revision,
+		int32_t batch_count,
+		std::vector<MinecraftRecipeQueryEntry> &entries_out,
+		std::vector<MinecraftRecipeMissingGroup> &missing_out) const noexcept;
+	/* Returns one immutable recipe row with inventory, catalogue, recipe-book,
+	 * character, station, and active CardGame session revisions. Outputs are
+	 * unchanged on failure. */
+	int32_t query_recipe_snapshot(uint64_t authenticated_actor_id,
+		uint32_t recipe_id, uint32_t station_id, int32_t station_x,
+		int32_t station_y, int32_t station_z,
+		uint64_t expected_station_revision, int32_t batch_count,
+		MinecraftRecipeQueryEntry *entry_out,
+		std::vector<MinecraftRecipeMissingGroup> &missing_out) const noexcept;
+	int32_t query_station_recipe_snapshot(uint64_t authenticated_actor_id,
+		uint32_t station_id, int32_t station_x, int32_t station_y,
+		int32_t station_z, uint64_t expected_station_revision,
+		int32_t batch_count,
+		MinecraftStationRecipeSnapshot *snapshot_out) const noexcept;
+	int32_t craft_station_recipe_from_snapshot(
+		uint64_t authenticated_actor_id, uint64_t request_id,
+		uint32_t recipe_id, int32_t batch_count,
+		const MinecraftStationRecipeSnapshot &snapshot,
+		MinecraftCraftActionResult *result_out) noexcept;
 	int32_t grant_recipe_discovery(uint32_t source_type_id,
 		uint32_t source_id, uint64_t source_event_id,
 		ft_bool *newly_unlocked) noexcept;
@@ -397,60 +564,75 @@ class GameSession
 	/* Card Press research spends two card-stock items to deterministically
 	 * discover one still-locked rare card recipe. The host validates station
 	 * reach, ownership and revision using the configured station authorizer. */
-	int32_t research_card_recipe(uint64_t request_id,
+	int32_t research_card_recipe(uint64_t authenticated_actor_id,
+		uint64_t request_id,
 		uint64_t expected_inventory_revision, int32_t station_x,
 		int32_t station_y, int32_t station_z,
 		uint64_t expected_station_revision,
 		MinecraftRecipeResearchResult *result_out) noexcept;
-	int32_t craft_hand_recipe(uint64_t request_id, uint32_t recipe_id,
-		int32_t batch_count, uint64_t expected_inventory_revision,
+	int32_t craft_hand_recipe(uint64_t authenticated_actor_id,
+		uint64_t request_id, uint32_t recipe_id, int32_t batch_count,
+		uint64_t expected_inventory_revision,
+		uint64_t expected_catalog_revision,
+		uint64_t expected_recipe_book_revision,
+		uint64_t expected_character_state_revision,
 		MinecraftCraftActionResult *result_out) noexcept;
-	int32_t craft_station_recipe(uint64_t request_id, uint32_t recipe_id,
-		int32_t batch_count, uint64_t expected_inventory_revision,
-		uint32_t station_id, int32_t station_x, int32_t station_y,
-		int32_t station_z, uint64_t expected_station_revision,
+	int32_t craft_station_recipe(uint64_t authenticated_actor_id,
+		uint64_t request_id, uint32_t recipe_id, int32_t batch_count,
+		uint64_t expected_inventory_revision,
+		uint64_t expected_catalog_revision,
+		uint64_t expected_recipe_book_revision,
+		uint64_t expected_character_state_revision, uint32_t station_id,
+		int32_t station_x, int32_t station_y, int32_t station_z,
+		uint64_t expected_station_revision,
 		MinecraftCraftActionResult *result_out) noexcept;
 	/* Moves one catalogued physical item from inventory into its matching
 	 * character equipment slot, returning any replaced item to inventory. */
-	int32_t equip_inventory_item(uint64_t request_id, int32_t inventory_slot,
+	int32_t equip_inventory_item(uint64_t authenticated_actor_id,
+		uint64_t request_id, int32_t inventory_slot,
 		uint64_t expected_inventory_revision,
 		uint32_t equipment_slot) noexcept;
 	/* Returns the selected equipped physical item to inventory. */
-	int32_t unequip_equipment_item(uint64_t request_id,
+	int32_t unequip_equipment_item(uint64_t authenticated_actor_id,
+		uint64_t request_id,
 		uint64_t expected_inventory_revision,
 		uint32_t equipment_slot) noexcept;
 	/* Repairs one damaged physical equipment instance at an authorized
 	 * workbench, consuming the catalog-defined tier material transactionally. */
-	int32_t repair_equipment(uint64_t request_id, int32_t equipment_slot,
+	int32_t repair_equipment(uint64_t authenticated_actor_id,
+		uint64_t request_id, int32_t equipment_slot,
 		uint64_t expected_inventory_revision, int32_t station_x,
 		int32_t station_y, int32_t station_z,
 		uint64_t expected_station_revision) noexcept;
-	int32_t query_equipment_repair(int32_t equipment_slot,
+	int32_t query_equipment_repair(uint64_t authenticated_actor_id,
+		int32_t equipment_slot,
 		uint64_t expected_inventory_revision, int32_t station_x,
 		int32_t station_y, int32_t station_z,
 		uint64_t expected_station_revision,
 		MinecraftEquipmentRepairQuote *quote_out) const noexcept;
 	/* Applies a journalled, revision-checked melee hit with the equipped
 	 * main-hand weapon after authoritative range, facing, and obstruction checks. */
-	int32_t attack_entity(uint64_t request_id, uint32_t target_entity_id,
-		uint64_t expected_entity_revision,
-		MinecraftCombatActionResult *result_out) noexcept;
 	int32_t attack_entity_for_actor(uint64_t request_id,
 		uint64_t authenticated_actor_id, uint32_t target_entity_id,
 		uint64_t expected_entity_revision,
 		MinecraftCombatActionResult *result_out) noexcept;
 	/* Consumes one arrow and launches a checkpointed projectile from the
 	 * authoritative camera pose while a catalogued bow is equipped. */
-	int32_t launch_arrow(uint64_t request_id,
-		uint64_t expected_inventory_revision) noexcept;
 	int32_t launch_arrow_for_actor(uint64_t request_id,
 		uint64_t authenticated_actor_id,
 		uint64_t expected_inventory_revision) noexcept;
 	/* Starts or ends the bounded server-side shield guard action. The caller
 	 * must forward authenticated input to the authoritative simulation thread. */
-	int32_t set_shield_guarding(bool guarding) noexcept;
-	int32_t start_recipe_processing(uint64_t request_id, uint32_t recipe_id,
+	int32_t set_shield_guarding(uint64_t authenticated_actor_id,
+		bool guarding) noexcept;
+	/* Starts a furnace job from one coherent recipe-query snapshot. Every
+	 * supplied revision and the authenticated actor are bound to the journal
+	 * request and rechecked before inputs are consumed. */
+	int32_t start_recipe_processing(uint64_t authenticated_actor_id,
+		uint64_t request_id, uint32_t recipe_id,
 		int32_t batch_count, uint64_t expected_inventory_revision,
+		uint64_t expected_catalog_revision,
+		uint64_t expected_recipe_book_revision,
 		int32_t station_x, int32_t station_y, int32_t station_z,
 		uint64_t expected_station_revision,
 		MinecraftProcessingActionResult *result_out) noexcept;
@@ -465,11 +647,6 @@ class GameSession
 	int32_t till_farmland(uint64_t request_id, int32_t inventory_slot,
 		uint64_t expected_inventory_revision, int32_t world_x, int32_t world_y,
 		int32_t world_z, uint64_t expected_voxel_revision) noexcept;
-	int32_t place_boat_from_inventory(uint64_t request_id,
-		int32_t inventory_slot, uint64_t expected_inventory_revision,
-		int32_t water_x, int32_t water_y, int32_t water_z,
-		uint64_t expected_voxel_revision,
-		WorldBoatTransferTransaction::Result *result_out) noexcept;
 	/* Network hosts pass the authenticated actor ID here. An installed host
 	 * authorizer validates it; the ID is persisted with the boat and must match
 	 * on later retrieval. */
@@ -477,10 +654,6 @@ class GameSession
 		uint64_t authenticated_actor_id, int32_t inventory_slot,
 		uint64_t expected_inventory_revision, int32_t water_x, int32_t water_y,
 		int32_t water_z, uint64_t expected_voxel_revision,
-		WorldBoatTransferTransaction::Result *result_out) noexcept;
-	int32_t retrieve_boat_to_inventory(uint64_t request_id,
-		uint32_t entity_id, uint64_t expected_entity_revision,
-		uint64_t expected_inventory_revision,
 		WorldBoatTransferTransaction::Result *result_out) noexcept;
 	int32_t retrieve_boat_to_inventory_for_actor(uint64_t request_id,
 		uint64_t authenticated_actor_id, uint32_t entity_id,
@@ -495,6 +668,131 @@ class GameSession
 		double yaw, uint64_t *new_entity_revision_out) noexcept;
 
   private:
+	int start_with_world_id_internal(const std::string &seed,
+		const uint8_t world_id[32], ApplicationWindow &window,
+		VoxelRenderer &renderer);
+	/* Legacy in-process entry points have no authenticated actor boundary.
+	 * Keep them private for internal compatibility; hosts must use the public
+	 * actor-aware snapshot/query/craft APIs. */
+	int32_t query_hand_recipe(uint32_t recipe_id,
+		game_crafting_query_result *result,
+		ft_vector<game_crafting_missing_ingredient> *missing_groups) const noexcept;
+	int32_t query_station_recipe(uint32_t recipe_id, uint32_t station_id,
+		int32_t station_x, int32_t station_y, int32_t station_z,
+		uint64_t expected_station_revision,
+		game_crafting_query_result *result,
+		ft_vector<game_crafting_missing_ingredient> *missing_groups) const noexcept;
+	int32_t query_station_recipes(uint32_t station_id, int32_t station_x,
+		int32_t station_y, int32_t station_z,
+		uint64_t expected_station_revision,
+		std::vector<MinecraftRecipeQueryEntry> &entries_out,
+		std::vector<MinecraftRecipeMissingGroup> &missing_out) const noexcept;
+	int32_t query_station_recipes(uint32_t station_id, int32_t station_x,
+		int32_t station_y, int32_t station_z,
+		uint64_t expected_station_revision, int32_t batch_count,
+		std::vector<MinecraftRecipeQueryEntry> &entries_out,
+		std::vector<MinecraftRecipeMissingGroup> &missing_out) const noexcept;
+	int32_t query_recipe_snapshot(uint32_t recipe_id, uint32_t station_id,
+		int32_t station_x, int32_t station_y, int32_t station_z,
+		uint64_t expected_station_revision, int32_t batch_count,
+		MinecraftRecipeQueryEntry *entry_out,
+		std::vector<MinecraftRecipeMissingGroup> &missing_out) const noexcept;
+	int32_t craft_hand_recipe(uint64_t request_id, uint32_t recipe_id,
+		int32_t batch_count, uint64_t expected_inventory_revision,
+		MinecraftCraftActionResult *result_out) noexcept;
+	int32_t craft_hand_recipe(uint64_t request_id, uint32_t recipe_id,
+		int32_t batch_count, uint64_t expected_inventory_revision,
+		uint64_t expected_catalog_revision,
+		uint64_t expected_recipe_book_revision,
+		MinecraftCraftActionResult *result_out) noexcept;
+	int32_t craft_station_recipe(uint64_t request_id, uint32_t recipe_id,
+		int32_t batch_count, uint64_t expected_inventory_revision,
+		uint32_t station_id, int32_t station_x, int32_t station_y,
+		int32_t station_z, uint64_t expected_station_revision,
+		MinecraftCraftActionResult *result_out) noexcept;
+	int32_t craft_station_recipe(uint64_t request_id, uint32_t recipe_id,
+		int32_t batch_count, uint64_t expected_inventory_revision,
+		uint64_t expected_catalog_revision,
+		uint64_t expected_recipe_book_revision, uint32_t station_id,
+		int32_t station_x, int32_t station_y, int32_t station_z,
+		uint64_t expected_station_revision,
+		MinecraftCraftActionResult *result_out) noexcept;
+	int32_t research_card_recipe(uint64_t request_id,
+		uint64_t expected_inventory_revision, int32_t station_x,
+		int32_t station_y, int32_t station_z,
+		uint64_t expected_station_revision,
+		MinecraftRecipeResearchResult *result_out) noexcept;
+	int32_t research_card_recipe_internal(uint64_t authenticated_actor_id,
+		uint64_t request_id, uint64_t expected_inventory_revision,
+		int32_t station_x, int32_t station_y, int32_t station_z,
+		uint64_t expected_station_revision,
+		MinecraftRecipeResearchResult *result_out) noexcept;
+	int32_t resume_requested_regeneration() noexcept;
+	int32_t query_station_recipes_internal(uint64_t authenticated_actor_id,
+		uint32_t station_id, int32_t station_x, int32_t station_y,
+		int32_t station_z, uint64_t expected_station_revision,
+		int32_t batch_count,
+		std::vector<MinecraftRecipeQueryEntry> &entries_out,
+		std::vector<MinecraftRecipeMissingGroup> &missing_out) const noexcept;
+	int32_t query_recipe_snapshot_internal(uint64_t authenticated_actor_id,
+		uint32_t recipe_id, uint32_t station_id, int32_t station_x,
+		int32_t station_y, int32_t station_z,
+		uint64_t expected_station_revision, int32_t batch_count,
+		MinecraftRecipeQueryEntry *entry_out,
+		std::vector<MinecraftRecipeMissingGroup> &missing_out) const noexcept;
+	int32_t craft_station_recipe_internal(uint64_t authenticated_actor_id,
+		uint64_t request_id, uint32_t recipe_id, int32_t batch_count,
+		uint64_t expected_inventory_revision,
+		uint64_t expected_catalog_revision,
+		uint64_t expected_recipe_book_revision,
+		uint64_t expected_character_state_revision, uint32_t station_id,
+		int32_t station_x, int32_t station_y, int32_t station_z,
+		uint64_t expected_station_revision,
+		uint64_t expected_session_id,
+		uint64_t expected_session_revision,
+		MinecraftCraftActionResult *result_out) noexcept;
+	int32_t play_regeneration_card_internal(uint64_t authenticated_actor_id,
+		uint64_t request_id, uint32_t card_instance_id,
+		const RegenerationCardChoice &choice,
+		RegenerationPolicyIntent *intent_out) noexcept;
+	int32_t discard_regeneration_hand_card_internal(
+		uint64_t authenticated_actor_id, uint64_t request_id,
+		uint64_t source_draw_request_id, uint32_t card_instance_id,
+		RegenerationCardActionResult *result_out) noexcept;
+	int32_t start_recipe_processing_internal(uint64_t authenticated_actor_id,
+		uint64_t request_id, uint32_t recipe_id, int32_t batch_count,
+		uint64_t expected_inventory_revision,
+		uint64_t expected_catalog_revision,
+		uint64_t expected_recipe_book_revision, int32_t station_x,
+		int32_t station_y, int32_t station_z,
+		uint64_t expected_station_revision,
+		MinecraftProcessingActionResult *result_out) noexcept;
+	/* Local simulation paths use these trusted in-process helpers; network
+	 * callers use the actor-bound public APIs above. */
+	int32_t attack_entity(uint64_t request_id, uint32_t target_entity_id,
+		uint64_t expected_entity_revision,
+		MinecraftCombatActionResult *result_out) noexcept;
+	int32_t launch_arrow(uint64_t request_id,
+		uint64_t expected_inventory_revision) noexcept;
+	int32_t set_shield_guarding_internal(bool guarding) noexcept;
+	static bool character_state_revision_provider_callback(
+		const game_character &character, uint64_t *revision_out,
+		void *user_data) noexcept;
+	static bool processing_start_precommit_authorizer_callback(
+		uint64_t authenticated_actor_id, int32_t station_x, int32_t station_y,
+		int32_t station_z, uint64_t expected_station_revision,
+		void *user_data) noexcept;
+	static bool authenticated_actor_precommit_authorizer_callback(
+		uint64_t authenticated_actor_id, void *user_data) noexcept;
+	static bool craft_precommit_authorizer_callback(
+		uint64_t authenticated_actor_id, uint32_t station_id, int32_t station_x,
+		int32_t station_y, int32_t station_z,
+		uint64_t expected_station_revision, uint64_t expected_session_id,
+		uint64_t expected_session_revision, void *user_data) noexcept;
+	static bool equipment_repair_precommit_authorizer_callback(
+		uint64_t authenticated_actor_id, int32_t station_x, int32_t station_y,
+		int32_t station_z, uint64_t expected_station_revision,
+		void *user_data) noexcept;
 	int32_t process_regeneration_host_output_transaction(
 		const RegenerationHostOutput &output) noexcept;
 	int32_t acknowledge_regeneration_host_intent_internal(
@@ -529,12 +827,15 @@ class GameSession
 	WorldEntityStore world_entities_;
 	WorldSpawnerStore world_spawners_;
 	GameTransactionJournal transaction_journal_;
-	/* Serializes session APIs that scan or move physical item IDs. */
-	mutable std::mutex item_instance_transaction_mutex_;
+	/* Serializes session actions, item identity moves, card state, and saves.
+	 * Recursive because finalization/recovery call guarded APIs internally. */
+	mutable std::recursive_mutex item_instance_transaction_mutex_;
 	RegenerationCardSession regeneration_cards_;
 	RegenerationWorldRules regeneration_world_rules_;
 	RegenerationWorldRulesPolicy regeneration_world_rules_policy_;
 	std::vector<uint8_t> regeneration_script_catalog_;
+	std::vector<RuntimeBlockAcquisitionConfig>
+		runtime_block_acquisition_config_;
 	std::vector<std::pair<uint32_t, int64_t>> _regeneration_script_context;
 	std::vector<ft_bool> _regeneration_script_context_is_set;
 	std::vector<uint8_t> fluid_state_;
@@ -543,10 +844,21 @@ class GameSession
 	uint64_t trusted_script_manifest_hash_;
 	uint64_t regeneration_output_session_id_;
 	uint64_t configured_regeneration_output_session_id_;
+	uint64_t revision_solo_decision_timeout_ms_ = 900000U;
+	uint64_t revision_multiplayer_decision_timeout_ms_ = 300000U;
+	uint8_t world_id_[32] = {};
+	uint8_t world_seed_hash_[32] = {};
+	uint8_t character_id_[32] = {};
+	uint32_t character_mode_ = 1U;
+	bool character_identity_configured_ = false;
+	WorldSaveCatalog *active_join_catalog_ = nullptr;
+	uint8_t active_join_lease_id_[32] = {};
 	RegenerationHostOutputPrepare regeneration_host_output_prepare_ = nullptr;
 	RegenerationHostOutputCommit regeneration_host_output_commit_ = nullptr;
 	RegenerationHostOutputAbort regeneration_host_output_abort_ = nullptr;
 	void *regeneration_host_output_user_data_ = nullptr;
+	LegacyHostOutputWorldAuthorizer legacy_host_output_world_authorizer_
+		= nullptr;
 	WorldChunkInstabilityPolicy chunk_instability_policy_;
 	bool chunk_instability_policy_configured_;
 	int32_t ore_overgrowth_instability_delta_;
@@ -575,6 +887,8 @@ class GameSession
 	void *boat_actor_authorizer_user_data_ = nullptr;
 	CombatActorAuthorizer combat_actor_authorizer_ = nullptr;
 	void *combat_actor_authorizer_user_data_ = nullptr;
+	AuthenticatedActorAuthorizer authenticated_actor_authorizer_ = nullptr;
+	void *authenticated_actor_authorizer_user_data_ = nullptr;
 	BoatNetworkActorResolver boat_network_actor_resolver_ = nullptr;
 	void *boat_network_actor_resolver_user_data_ = nullptr;
 	RecipeDiscoveryAuthorizer recipe_discovery_authorizer_;
@@ -587,6 +901,9 @@ class GameSession
 	void *_script_context_authorizer_user_data = nullptr;
 	ProcessingStationAuthorizer processing_station_authorizer_;
 	void *processing_station_authorizer_user_data_;
+	ActorProcessingStationAuthorizer
+		actor_processing_station_authorizer_ = nullptr;
+	void *actor_processing_station_authorizer_user_data_ = nullptr;
 	ProcessingStationContinuityValidator
 		processing_station_continuity_validator_;
 	void *processing_station_continuity_user_data_;
@@ -597,8 +914,10 @@ class GameSession
 	World world_;
 	RenderDebug render_debug_;
 	std::vector<World::RevisionChunkCoordinate> revision_occupied_chunks_;
+	std::vector<uint64_t> revision_participant_actor_ids_;
 	int32_t revision_occupied_chunk_x_;
 	int32_t revision_occupied_chunk_z_;
+	uint32_t revision_active_player_count_;
 	bool revision_occupancy_valid_;
 	bool world_loom_start_committed_;
 
@@ -666,16 +985,46 @@ class GameSession
 		const std::vector<WorldSpawnerDeath> &deaths) noexcept;
 	int32_t process_animal_production(
 		const std::vector<WorldAnimalProductionEvent> &events) noexcept;
-	int32_t save_session_snapshot() noexcept;
+	int32_t save_session_snapshot(bool enforce_join_admission = true)
+		noexcept;
 	static int32_t save_snapshot_callback(void *context) noexcept;
 	static int32_t revision_start_commit_callback(uint64_t actor_id,
 		uint64_t loom_id, uint64_t request_id,
 		uint64_t expected_selection_revision,
 		uint64_t expected_policy_revision, uint32_t opening_card_count,
 		void *user_data) noexcept;
+	static int32_t revision_start_policy_status_callback(
+		uint64_t actor_id, uint64_t loom_id,
+		WorldRevisionStartPolicyStatus &status_out,
+		void *user_data) noexcept;
+	static int32_t revision_card_play_callback(uint64_t actor_id,
+		uint64_t loom_id, uint64_t request_id, uint32_t card_instance_id,
+		const RegenerationCardChoice &choice,
+		RegenerationPolicyIntent *intent_out, void *user_data) noexcept;
+	static int32_t revision_card_discard_callback(uint64_t actor_id,
+		uint64_t loom_id, uint64_t request_id,
+		uint64_t source_draw_request_id, uint32_t card_instance_id,
+		RegenerationCardActionResult *result_out, void *user_data) noexcept;
+	static int32_t revision_card_draw_callback(uint64_t actor_id,
+		uint64_t loom_id, uint64_t request_id,
+		uint64_t source_host_intent_sequence, uint32_t draw_count,
+		uint32_t required_discard_count,
+		RegenerationCardActionResult *result_out, void *user_data) noexcept;
+	static int32_t revision_card_expiry_callback(uint64_t actor_id,
+		uint64_t loom_id, uint64_t request_id, uint32_t *resolved_count_out,
+		bool *replayed_out, void *user_data) noexcept;
+	static int32_t revision_card_hand_query_callback(uint64_t actor_id,
+		uint64_t loom_id, RegenerationCardHandView &view_out,
+		void *user_data) noexcept;
+	static int32_t revision_card_choice_callback(uint64_t actor_id,
+		uint64_t loom_id, uint64_t request_id, uint32_t choice_id,
+		uint32_t option_id, RegenerationCardActionResult *result_out,
+		void *user_data) noexcept;
 	static int32_t revision_occupancy_provider_callback(
-		std::vector<World::RevisionChunkCoordinate> &chunks_out,
+		WorldRevisionOccupancySample &sample_out,
 		void *user_data);
+	static int32_t revision_epoch_provider_callback(uint64_t *epoch_ms_out,
+		void *user_data) noexcept;
 	static int32_t revision_checkpoint_committer_callback(
 		const uint8_t *bytes, std::size_t byte_count, void *user_data) noexcept;
 	int32_t pickup_nearby_ground_items() noexcept;

@@ -844,6 +844,30 @@ int32_t WorldItemStore::get_max_item_instance_id(
 	return (FT_ERR_SUCCESS);
 }
 
+int32_t WorldItemStore::replace_from(WorldItemStore &staged) noexcept
+{
+	if (&staged == this)
+		return (FT_ERR_INVALID_ARGUMENT);
+	std::unique_lock<std::mutex> target_lock(this->mutex_, std::defer_lock);
+	std::unique_lock<std::mutex> staged_lock(staged.mutex_, std::defer_lock);
+	std::lock(target_lock, staged_lock);
+	if (!this->initialized_ || !staged.initialized_)
+		return (FT_ERR_INVALID_OPERATION);
+	if (this->change_revision_ == std::numeric_limits<uint64_t>::max()
+		|| staged.change_revision_ == std::numeric_limits<uint64_t>::max())
+		return (FT_ERR_OUT_OF_RANGE);
+	this->entries_.swap(staged.entries_);
+	this->chunk_index_.swap(staged.chunk_index_);
+	this->pickup_cache_.swap(staged.pickup_cache_);
+	this->pickup_order_.swap(staged.pickup_order_);
+	std::swap(this->next_entity_id_, staged.next_entity_id_);
+	std::swap(this->next_transfer_transaction_id_,
+		staged.next_transfer_transaction_id_);
+	++this->change_revision_;
+	++staged.change_revision_;
+	return (FT_ERR_SUCCESS);
+}
+
 uint64_t WorldItemStore::change_revision() const noexcept
 {
 	std::lock_guard<std::mutex> lock(this->mutex_);

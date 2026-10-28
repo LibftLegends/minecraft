@@ -8,6 +8,8 @@
 # include <mutex>
 # include <vector>
 
+class World;
+
 struct WorldSpawnerDefinition
 {
 	double x;
@@ -24,6 +26,7 @@ struct WorldSpawnerDeath
 	uint32_t spawner_id;
 	uint32_t entity_id;
 	uint32_t loot_table_id;
+	uint64_t killer_actor_id;
 	double position_x;
 	double position_y;
 	double position_z;
@@ -55,9 +58,11 @@ class WorldSpawnerStore
 	int32_t set_active(uint32_t spawner_id, bool active) noexcept;
 	int32_t tick(uint64_t server_tick, WorldEntityStore &entities,
 		std::vector<WorldSpawnerDeath> &deaths_out,
-		bool *state_changed_out) noexcept;
+		bool *state_changed_out, const World *world = nullptr) noexcept;
 	int32_t acknowledge_death(uint32_t spawner_id,
 		uint32_t entity_id) noexcept;
+	int32_t is_entity_tracked(uint32_t entity_id,
+		bool *tracked_out) const noexcept;
 	int32_t serialize(std::vector<uint8_t> &bytes_out) const noexcept;
 	int32_t deserialize(const uint8_t *bytes,
 		std::size_t byte_count) noexcept;

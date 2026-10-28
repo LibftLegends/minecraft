@@ -186,7 +186,8 @@ int32_t WorldGenerationPipeline::submit_generation(uint64_t request_id,
 	uint32_t generation_revision, int32_t chunk_x, int32_t chunk_z,
 	const char *seed, const voxel_generation_config &config,
 	uint32_t stage_mask, WorldGenerationOperation operation,
-	const WorldChunkSnapshot *source_snapshot) noexcept
+	const WorldChunkSnapshot *source_snapshot,
+	const std::vector<GenerationFeaturePlan> *feature_plans) noexcept
 {
 	std::unique_ptr<Request> request;
 	int32_t error_code;
@@ -194,7 +195,7 @@ int32_t WorldGenerationPipeline::submit_generation(uint64_t request_id,
 	error_code = WorldGenerationRequestBuilder::build(request, request_id,
 			this->pipeline_epoch_.load(), world_epoch, relevance_epoch,
 			generation_revision, chunk_x, chunk_z, seed, config, stage_mask,
-			operation, source_snapshot);
+			operation, source_snapshot, feature_plans);
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
 	{

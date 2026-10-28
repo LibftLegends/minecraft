@@ -86,6 +86,20 @@ struct RegenerationCardActionResult
 	bool replayed;
 };
 
+struct RegenerationCardHandItem
+{
+	uint32_t card_instance_id;
+	uint32_t card_definition_id;
+};
+
+struct RegenerationCardHandView
+{
+	uint64_t card_session_id;
+	std::vector<RegenerationCardHandItem> cards;
+	std::vector<card_game_pending_choice_view> pending_choices;
+	uint32_t required_discard_count;
+};
+
 struct RegenerationCardTransferResult
 {
 	uint64_t request_id;
@@ -135,6 +149,10 @@ class RegenerationCardSession
 	int32_t set_action_session_id(uint64_t session_id) noexcept;
 	/* Extends a pristine four-card bootstrap hand to the quoted start size.
 	 * The request and result survive adapter snapshot save/restore. */
+	int32_t preflight_starting_hand_deal(uint64_t request_id,
+		uint32_t opening_hand_count) noexcept;
+	int32_t get_starting_hand_deal_identity(uint64_t *request_id_out,
+		uint32_t *opening_hand_count_out) const noexcept;
 	int32_t deal_starting_hand(uint64_t request_id,
 		uint32_t opening_hand_count,
 		RegenerationCardActionResult *result_out) noexcept;
@@ -200,22 +218,31 @@ class RegenerationCardSession
 		uint32_t stabilizer_risk_basis_points = 0U,
 		uint32_t stabilizer_ordinal = 0U,
 		const uint32_t *catalyst_options = nullptr,
-		uint32_t catalyst_option_count = 0U) noexcept;
+		uint32_t catalyst_option_count = 0U,
+		uint64_t authenticated_actor_id = 0U) noexcept;
 	int32_t set_cached_play_no_effect_choice_mask(uint64_t request_id,
 		uint32_t no_effect_choice_mask) noexcept;
 	int32_t acknowledge_intent(uint64_t host_intent_sequence) noexcept;
 	int32_t resolve_expired_choices(uint64_t request_id,
 		uint64_t authoritative_epoch,
 		uint32_t *resolved_count_out) noexcept;
+	int32_t choose_pending_option(uint64_t authenticated_actor_id,
+		uint64_t request_id, uint32_t choice_id, uint32_t option_id,
+		uint64_t authoritative_epoch,
+		RegenerationCardActionResult *result_out) noexcept;
+	int32_t query_expiry_result(uint64_t request_id, bool *found_out,
+		uint32_t *resolved_count_out) const noexcept;
 	int32_t resolve_all_pending_choices_to_default(
 		uint32_t *resolved_count_out) noexcept;
 	int32_t draw_cards(uint64_t request_id,
 		uint64_t source_host_intent_sequence, uint32_t draw_count,
 		uint32_t required_discard_count,
-		RegenerationCardActionResult *result_out) noexcept;
+		RegenerationCardActionResult *result_out,
+		uint64_t authenticated_actor_id = 0U) noexcept;
 	int32_t discard_hand_card(uint64_t request_id,
 		uint64_t source_draw_request_id, uint32_t card_instance_id,
-		RegenerationCardActionResult *result_out) noexcept;
+		RegenerationCardActionResult *result_out,
+		uint64_t authenticated_actor_id = 0U) noexcept;
 	/* Consumes a crafted physical card item and adds that same owned card to
 	 * the draw pile. Request IDs are session-local and monotonically increasing. */
 	int32_t import_card_item_to_deck(game_inventory &inventory,
@@ -251,6 +278,7 @@ class RegenerationCardSession
 
 	struct CachedPlay
 	{
+		uint64_t authenticated_actor_id;
 		uint32_t card_instance_id;
 		RegenerationCardChoice choice;
 		uint32_t stabilizer_risk_basis_points;
@@ -262,6 +290,7 @@ class RegenerationCardSession
 	};
 	struct CachedDraw
 	{
+		uint64_t authenticated_actor_id;
 		uint64_t source_host_intent_sequence;
 		uint32_t draw_count;
 		uint32_t required_discard_count;
@@ -269,6 +298,7 @@ class RegenerationCardSession
 	};
 	struct CachedDiscard
 	{
+		uint64_t authenticated_actor_id;
 		uint64_t source_draw_request_id;
 		uint32_t card_instance_id;
 		RegenerationCardActionResult result;
@@ -278,6 +308,14 @@ class RegenerationCardSession
 		uint64_t authoritative_epoch;
 		uint64_t command_sequence;
 		uint32_t resolved_count;
+	};
+	struct CachedChoice
+	{
+		uint64_t authenticated_actor_id;
+		uint32_t choice_id;
+		uint32_t option_id;
+		uint64_t authoritative_epoch;
+		RegenerationCardActionResult result;
 	};
 	struct CachedCardImport
 	{
@@ -314,6 +352,7 @@ class RegenerationCardSession
 	std::map<uint64_t, CachedDraw> draw_cache_;
 	std::map<uint64_t, CachedDiscard> discard_cache_;
 	std::map<uint64_t, CachedExpiry> expiry_cache_;
+	std::map<uint64_t, CachedChoice> choice_cache_;
 	std::map<uint64_t, CachedCardImport> card_import_cache_;
 	std::map<uint64_t, CachedCardExport> card_export_cache_;
 	std::map<uint64_t, PhysicalCardLink> physical_card_instances_;

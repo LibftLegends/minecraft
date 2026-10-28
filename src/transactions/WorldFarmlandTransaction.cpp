@@ -324,9 +324,14 @@ int32_t WorldFarmlandTransaction::execute(const char *snapshot_path,
 	}
 	if (rollback_result != FT_ERR_SUCCESS)
 		return (rollback_result);
-	(void)journal.deserialize(journal_before.data(), journal_before.size());
-	(void)save_checkpoint(snapshot_path, snapshot_writer);
-	return (result);
+	const int32_t journal_rollback = journal.deserialize(journal_before.data(),
+		journal_before.size());
+	if (journal_rollback != FT_ERR_SUCCESS)
+		return (FT_ERR_INVALID_STATE);
+	const int32_t checkpoint_rollback = save_checkpoint(snapshot_path,
+		snapshot_writer);
+	return (checkpoint_rollback == FT_ERR_SUCCESS
+		? result : FT_ERR_INVALID_STATE);
 }
 
 int32_t WorldFarmlandTransaction::recover_pending(const char *snapshot_path,

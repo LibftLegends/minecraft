@@ -1,5 +1,134 @@
 # Minecraft 1.0 Roadmap
 
+Backend implementation update (2026-10-26; source inspection only): chunk
+publication now treats failure to roll back a newly added publication receipt
+as an invalid transaction state when the combined session checkpoint fails.
+Corrupt-session recovery now validates the backup and atomically repairs the
+primary save before loading the backup state into live stores; repair failures
+are returned. Fluid bucket transfer now checks rollback results across the
+block, inventory, journal, fluid snapshot, and item-ID allocator, returning an
+invalid transaction state if restoration fails. Generation crash/fault recovery
+and cross-store acceptance coverage remain open. Block mining now reports an
+invalid transaction state if journal rollback or its rollback checkpoint fails
+during preparation. Equipment loadout preparation applies the same fail-closed
+rollback rule. Farmland till rollback checks all changed participants and its
+recovery checkpoint; equipment repair checks journal restoration after
+prepared-state serialization failure. Craft, pickup, and timed-processing
+prepare APIs now restore the pre-request journal when their initial checkpoint
+fails, preserving exact retry behavior; restoration failure is surfaced as an
+invalid transaction state. The hostile damage tick restores hit points and
+equipment wear if durability updates fail and reports equipment rollback
+failure explicitly. Generation crash/fault recovery and cross-store acceptance
+coverage remain open. Inventory block placement now checks journal transitions
+and durable checkpoints on both rollback branches, failing closed when those
+records cannot match the participant state. Prepared block-placement recovery
+also reports an invalid transaction state if it cannot roll back the placed
+block after inventory restoration fails. Card-item transfer preparation
+restores its pre-request journal after an initial checkpoint failure while
+preserving an already prepared retry for recovery. `GameSession::stop` now
+returns a failed final snapshot result without destroying the live session;
+menu transitions stay in the active phase so the host can retry, and process
+shutdown returns failure instead of reporting a clean exit. `GameSession` also
+has a backend start entrypoint that accepts a stable nonzero 32-byte world ID;
+the ID selects the save namespace independently of the seed. Host-config
+snapshot v3 binds both ID and SHA-256(seed), rejecting mismatched opens; v1/v2
+snapshots migrate only under the legacy SHA-256(seed) identity. Seeds that
+exceed the world's bounded seed field are rejected. The legacy seed-only start
+keeps its prior SHA-256-derived identity for compatibility.
+`WorldSaveCatalog` now provides persistent create/list/find/rename and policy
+update APIs for named worlds, with CSPRNG-generated IDs, bounded versioned
+metadata, checksum validation, and atomic writes constrained to `saves/`.
+Its WCT1 v2 records store the nonzero owner actor ID and sorted allowlist;
+v1 records remain readable with owner zero. WCT1 v3 adds character-admission
+mode and player capacity; v1/v2 default to world-bound-only and one player.
+WCT1 v4 persists sorted banned character IDs, and both join authorization APIs
+reject those identities. The owner can update the ban list; ejecting an active
+session still requires host-session integration.
+WCT1 v5 adds generator and ruleset compatibility ranges with owner-managed
+updates; the saved world's own versions must remain inside the configured
+ranges. Versions 1-4 migrate to exact-version ranges.
+WCT1 v6 persists a character import-category mask plus progression, item-count,
+and item-value caps. `authorize_character_import` checks a trusted host-derived
+summary against those limits and the world's access and ban policies. Versions
+1-5 migrate to a zero-import policy.
+WCT1 v7 adds an owner-managed approved-character list; `APPROVAL_REQUIRED`
+accepts an owner, an actor in the world allowlist, or a specifically approved
+character ID. Versions 1-6 migrate with no character approvals.
+`authorize_access` enforces
+private, invite-only, allowlist, friends-only, and public access, with the
+friendship result supplied by the authenticated host.
+`authorize_join` checks character ownership mode, source world, freshness,
+content versions against the saved compatibility ranges, approval, bans, and
+the host's active-player count.
+`reserve_join` adds a mutex-serialized per-character lease and reserves a
+capacity slot for the live catalog instance; `release_join` frees both. It
+also returns the same lease for an exact retry with the same actor/request ID,
+and rejects reuse of that ID with changed join data. `validate_join_lease`
+rechecks current access, bans, approvals, content ranges, ownership mode, and
+capacity immediately before publication. Every online session must use these
+APIs for reservation accounting to be complete.
+Leases are process-local and are cleared by process restart; durable join
+publication, crash reconciliation, and save/character commit are still open.
+Catalog policy edits can migrate ownership mode while no join lease is active.
+Rename, access-list, and
+admission-policy mutation APIs now require the authenticated owner actor ID and
+reject other callers.
+`GameSession::start_from_catalog_admitted` reserves a catalog join lease using
+host-authenticated actor and character inputs, opens only a compatible world,
+revalidates policy before returning an active session, retains the reservation
+if final save fails, and releases it after a successful final save. The legacy
+catalog start overload and public direct world-ID start overload fail closed
+because they have no authenticated join context. Network session publication,
+durable leases, and character profile filtering remain open. Session snapshot
+checkpoints now revalidate active admission leases; shutdown can still save the
+last authoritative state after policy revocation before it releases the lease.
+Lease release treats an already-missing process-local reservation as an
+idempotent success so a stale lease cannot strand an otherwise clean shutdown.
+`GameSession` now creates a stable CSPRNG character ID by default and persists
+it with a `WORLD_BOUND`/`PORTABLE` mode in host-config payload v4. Hosts may
+configure an identity before start; legacy payloads migrate to a world-bound
+identity derived from the world ID. This stores identity alongside each
+world's session snapshot; account-owned portable profile separation and
+cross-world state filtering are not implemented yet.
+Atomic join publication, durable replay records, and crash reconciliation of
+process-local leases remain open. Terrain chunks now persist independently and
+are cleaned up after confirmed catalog deletion; inclusion in WBK backup and
+restore and crash-atomic coordination with session snapshots remain open.
+The WVC1 per-world chunk store now loads and saves initial and streamed
+generated chunks, restores cached chunks before generation, and persists direct
+block placement, deletion, state replacement, authoritative replication edits,
+undo/redo, deferred generated edits, and persisted fluid overrides. A failed
+authoritative edit write restores the exact pre-edit voxel snapshot.
+Regeneration updates its terrain
+payload alongside the in-memory chunk and restores the previous terrain
+payload when a later in-process commit step rolls back. Store operations
+serialize through a per-instance mutex. Crash-
+atomic coordination, cross-process writes, and coordinated
+terrain/entity/revision snapshots still need integration; the current chunk
+store is not yet a complete world-save transaction.
+`GameSessionPersistence` exports and imports bounded, checksummed WBK1 v3
+bundles bound to the source world ID, containing the MCSP snapshot, optional
+revision-metadata sidecar, and WTA1 archive of that world's persisted chunks.
+The importer continues to accept legacy WBK1 v2 bundles, which leave terrain
+untouched. Malformed MCSP, revision metadata, terrain records, a destination ID
+mismatch, or a current host-config ID mismatch is rejected before installation.
+For v3 imports, WBJ1 v2 records the old snapshot, revision sidecar, and terrain
+archive before replacement; recovery restores all three or removes terrain if
+the world had no prior terrain directory. Catalog-aware backup and restore
+require the world owner; restore also requires typing the exact world name. A
+catalog maintenance lease blocks new admitted joins, and a process-local world
+registry blocks direct GameSession starts during these operations. Cross-process
+maintenance coordination and crash durability across the separate snapshot and
+terrain stores remain open. Owner-confirmed deletion journals the two session
+files in WBJ1, removes the catalog entry, then removes the per-world terrain
+directory under the WDL1 recovery marker. Terrain cleanup retries after a
+post-commit interruption.
+The legacy `authorize_join` capacity
+check still uses a host count; hosts must use `reserve_join` for serialized
+reservation. Network publication still needs admitted-start integration.
+Portable character profile separation and
+destination filtering remain open. No tests or builds were run.
+
 **Status:** implementation in progress; the documented APIs and code slices remain partial.
 **Audience:** Minecraft implementation agent (Luna), reviewers, and future maintainers.
 **Date:** 2026-09-21
@@ -234,7 +363,12 @@ Each draft has a 64-bit selection revision; stale edits are rejected, changes
 advance the revision, and selection requires an initialized, unprotected chunk
 within the configured cap and a hard safety limit of 256 chunks. Manual
 protection changes invalidate stale selection revisions and remove newly
-protected chunks from the selection.
+protected chunks from the selection. The authenticated network draft API also
+provides `unprotect` to remove a manual protection marker with the same
+compare-and-set selection revision and durable request handling.
+Its authenticated `preview` query refreshes occupancy and returns a bounded
+circle of chunk states and protection reasons for server-authoritative
+eligibility display.
 `query_revision_start_cost` is read-only and checks the expected selection
 revision and versioned world-owned pricing-policy revision, the selected
 chunks, the 4–7 card opening range, checked cost arithmetic, and a configured
@@ -250,7 +384,10 @@ World Loom integration has advanced beyond selection and quote groundwork.
 The single-player `GameSession` now coordinates the quoted resource debit,
 opening-card deal, persisted card/rules state, selected-chunk reservation and
 barrier activation. The committed decision window has a persisted five-minute
-deadline and deterministic choice/discard recovery. Barrier state is visible in
+deadline and deterministic choice/discard recovery. Authenticated status
+responses expose per-chunk publication state and aggregate completed jobs,
+regenerated/skipped chunk counts, and the current regeneration error code.
+Barrier state is visible in
 the revision map and the GPU renderer draws a cyan world-space perimeter.
 These paths have strict warning-as-error compile coverage, but the current
 directly linked application still fails during runtime validation with a
@@ -284,6 +421,38 @@ that immediate smelting is rejected without consuming input or fuel and that
 the processing path accepts the same recipe. The world-item validator source
 contains the same regression check, but its full runtime remains unverified
 until the direct application heap/stack corruption is resolved.
+
+Source-only backend update (2026-10-26): recipe query rows now carry inventory,
+catalog, recipe-book, and station revisions with immutable output metadata;
+`GameSession` exposes value-only inventory snapshots and authorized
+catalog-wide station queries. Craft requests pass queried inventory, catalog,
+and recipe-book revisions through version-3 durable journal records and cache
+entries while retaining version-1/version-2 readers. Actor-bound craft records
+use version 5 to bind both the equipment content revision and authenticated
+actor ID, retaining readers through version 4 and version-3 writes for legacy
+actor-free routes. The actor ID is part of exact retry identity. Prepared
+station-craft recovery rechecks the saved station identity and revision before
+replaying; if the host cannot verify continuity, the request remains pending
+and does not consume ingredients. Prepared Card Press research recovery also
+checks the saved station block revision before charging materials or unlocking
+a recipe; exact research retries preserve the original post-debit inventory
+revision in their result. The regeneration host-output consumer now
+skips effect callbacks for journal records already committed and resumes
+producer acknowledgement; aborted records fail closed. Producer acknowledgement
+requires a committed consumer journal record, even when callback wiring is
+absent. Prepared-callback retry still requires idempotent consumer callbacks
+across the callback/journal crash window. Recipe reads and crafts share the item
+transaction mutex, so a query cannot observe a partially applied inventory
+transaction. Catalog-wide recipe queries now accept a batch count and return
+primary/byproduct metadata and ingredient deficits scaled for it; the existing
+API still defaults to one item. These source changes have not been compiled or
+tested. Terminal craft-journal retries use cache-only replay and cannot execute
+again after the cached result is evicted. `GameSession::query_recipe_snapshot()`
+returns one revision-stamped row and deficits transactionally. Aborted pickup,
+processing-start, and CardGame transfer journal retries now fail closed rather
+than rerunning their mutations. Complete
+recipe/drop coverage, station lifecycle, timed-job failure recovery, and
+query/craft regression coverage remain open.
 
 The network protocol also accepts an owner-bound `quote` action and sends a
 direct `world_revision_quote` response containing the result and, on success,
@@ -494,7 +663,11 @@ The policy must also control solo, invite-only, friends-only, allowlist, and
 public access; imported inventory, recipes, abilities, equipment, and
 cosmetics; progression and item/value caps; content-version ranges; spawn and
 death rules; concurrent sessions; and whether the owner can revoke, eject, or
-ban a character ID.
+ban a character ID. WCT1 v6 stores import categories and caps, and its
+validator checks host-derived summaries; integration with actual profile
+splitting and save commit remains open. WCT1 v7 also persists character approvals.
+WCT1 v4 persists owner-managed bans;
+live-session ejection and audit events remain open.
 
 The UI must show the effective policy before world creation and before joining:
 what the character may bring, what remains in the source world, what is denied,
@@ -5103,10 +5276,11 @@ the regeneration boundary. This source change is not compiled or runtime
 validated. Boat steering, movement, and network transport still need
 implementation.
 
-The actor-aware boat placement and retrieval entrypoints now reject zero IDs
-and always call the configured host authorizer. Actor-less wrappers remain for
-local use only; authenticated transport must use the actor-aware entrypoints.
-This change has not been compiled or runtime validated.
+The actor-aware boat placement and retrieval entrypoints reject zero IDs and
+always call the configured host authorizer. The actor-less public wrappers
+have now been removed, leaving no public GameSession boat-transfer path that
+can omit actor identity. This change has not been compiled or runtime
+validated.
 
 An actor-aware boat movement step now checks ownership, reach, entity revision,
 loaded water support, protected chunks, and active World Loom barriers. It
@@ -5223,6 +5397,28 @@ pending revision replays after restart. Restart voxel replay and crash-boundary
 validation remain open. Source-only; compilation and runtime verification are
 deferred until implementation is complete.
 
+Authenticated inventory query boundary (2026-10-26): the public
+`GameSession::query_inventory_view` now requires a nonzero authenticated actor
+and a configured host authorizer; the actor-free entry point was removed. It
+returns immutable inventory and equipment item values under the item
+transaction lock and includes a deterministic equipment content revision.
+Recipe query rows carry the same equipment revision captured under the session
+transaction lock. Actor-aware overloads also guard catalog-wide and
+single-recipe snapshot queries plus revision-bound hand/station craft requests.
+Actor-bound station queries/crafts require a station callback that receives the
+actor ID and rechecks reach/claims/ownership around the read or immediately
+before execution; `configure_actor_processing_station_authorizer` now installs
+that required host policy before session start. Actor-bound craft requests bind
+the equipment content revision and authenticated actor ID into version-5
+journal identity and require the equipment token to match on new execution and
+prepared recovery; exact terminal retries remain
+tied to the persisted revision after equipment changes. Production callback
+wiring, legacy actor-free recipe/craft APIs, and cross-system acceptance
+evidence remain open. This is a content fingerprint, not a monotonically
+allocated character revision; no builds or tests have run.
+Source-only; tests and builds remain deferred until implementation is
+complete.
+
 Card scripting context restore correction (2026-10-14): GameSession applies
 configured script-context defaults only to a fresh card session. Restoring an
 existing RCS1 snapshot now preserves authorized runtime context values instead
@@ -5286,3 +5482,531 @@ consistency is still open. The attempted `make validate-all` does not pass yet:
 it times out during emissive block-delete convergence with the target chunk
 still dirty and a remesh in flight. That lighting/remesh scheduling failure
 is separate from the recipe query and remains an active backend issue.
+
+Regeneration deferred-edit commit allocation guard (2026-10-26): The
+regeneration applier reserves checked deferred-edit capacity before mutating
+chunk or session state, avoiding a post-checkpoint allocation failure in its
+`noexcept` commit tail. This does not close crash-atomic voxel persistence or
+cross-store generation replay. Source-only; implementation, test authoring,
+and validation remain in progress.
+
+CardGame host-output failure policy (2026-10-26): Permanent prepare errors
+(permission, invalid payload, or configuration) now persist an aborted output
+record after consumer abort succeeds; transient prepare errors and uncertain
+commit failures stay retryable. Added an explicit sequence-scoped retry API
+that checkpoints reopening before callback replay. Consumer storage still
+requires its own atomic idempotency. Source-only; test authoring and validation
+remain deferred until implementation is complete.
+
+World Loom occupancy retry ordering (2026-10-26): Exact cached draft-action
+and quote retries now replay before refreshing multiplayer occupancy. New
+mutations still refresh and fail closed on stale/unavailable occupancy, while
+station access remains rechecked for mutating retries. This preserves durable
+idempotency during provider outages. Source-only; test authoring and validation
+remain deferred.
+
+World Loom occupancy sample validation (2026-10-26): The occupancy-provider
+contract now returns one chunk per active player plus a sample epoch. The
+GameSession binding checks completeness and rejects future or older-than-one-
+second samples against the configured authoritative clock before publishing
+the occupied set. A zero-player sample is accepted only when the count is
+explicitly zero. Direct WorldRevisionServer providers also require a complete
+timestamped sample and authoritative epoch provider; the server applies the
+same freshness bound. Provider implementations and validator fixtures still
+need migration; source-only, with tests and builds deferred.
+
+World Revision status transport (2026-10-26): The version-1 protocol now has an
+authenticated, read-only `status` action for the owning actor/Loom. Its bounded
+response reports lifecycle flags, deadline and revision tokens, plus each
+selected chunk's revision state and whether publication is committed or
+pending. Durable per-chunk failure outcomes are not yet represented. Source-
+only; tests and builds remain deferred.
+
+Script manifest trust boundary audit (2026-10-26): GameSession source already
+requires host authorization of catalogue bytes against a nonzero trusted hash,
+then validates that hash again on fresh load and restore alongside the
+configured generation manifest. Production host provisioning and durable
+authenticated recovery of the expected hash remain open. Source audit only;
+no tests or builds were run.
+
+Runtime block acquisition policies (2026-10-26): GameSession can now receive
+runtime block policies before start, applies them to MinecraftItemCatalog, and
+fails startup if any registered runtime block lacks a policy. An active-session
+registration API covers newly added runtime blocks and retains policy for the
+next start of that GameSession. The policy list remains host-provisioned
+configuration rather than world-persisted data. Source-only; tests/builds
+remain deferred.
+
+Prepared furnace advance recovery (2026-10-26): Timed-processing tick recovery
+now completes an already-prepared advance before checking current furnace
+continuity, including frames with zero new elapsed ticks. New advances still
+require currently valid station contexts. Independent per-job advancement
+remains open. Source-only; tests and builds are deferred.
+
+Per-job furnace continuity (2026-10-26): New timed-processing advance records
+persist the sorted authorized job IDs, so each furnace is checked and advanced
+independently; a removed station pauses only its own job. Recovery replays the
+same set, while legacy advance records retain all-job replay behavior. Source-
+only; tests and builds remain deferred.
+
+World Revision protocol envelope version and length bound (2026-10-26): The
+server now requires `world_revision.protocol_version: 1`, returns version 1 in
+all World Revision action/quote/instability response envelopes, and checks
+request length with a bounded scan capped at 4096 bytes. Cost quotes reject
+zero request IDs and opening-card counts outside 4–7 before reserving replay
+cache capacity. Client and validator fixtures still need migration; no
+compatibility negotiation exists yet. Source-only; tests and builds are
+deferred until implementation work is complete.
+
+GameSession mutation boundary (2026-10-26): Public GameSession accessors for
+the item catalog, ground-item store, spawner store, and transaction journal
+now return const references. This prevents external callers from bypassing
+the session's authorization, identity checks, transaction journaling, and
+checkpoints through those owned objects. Source-only; the broader cross-store
+recovery work and validation remain open.
+
+GameSession card/start serialization (2026-10-26): The per-session transaction
+lock now also covers CardGame queries and mutations, host-intent delivery and
+acknowledgement, World Loom start/finalization, lifecycle transitions, and
+snapshot creation. Recursive locking supports internal recovery/finalization
+calls without exposing partial transitions to concurrent backend callers.
+Cross-process reservation ownership and crash-recovery validation remain open;
+this source-only change has not been tested or built.
+
+World persistence audit (2026-10-26): MCSP carries sorted checksummed fluid
+overrides and WLR carries accepted-generation requests and per-chunk
+publication receipts. WVC1 separately persists per-world chunk voxel payloads,
+including user edits and regeneration output, and startup loads those payloads
+before procedural generation. The files still lack one crash-atomic commit
+across terrain, MCSP, entities, spawners, instability and resource effects.
+Backup/restore also does not yet include WVC1 terrain. Source audit only; tests
+and builds remain deferred.
+
+Committed World Loom generation restart (2026-10-26): WLR metadata v4 now
+stores the accepted generation request and per-chunk publication receipts;
+session start checkpoints the request before scheduling, incrementally loads
+reserved chunks after restore, and resumes or retries generation with the
+committed rules and barrier. Each receipt is saved atomically with chunk-related
+items, entities/spawners, instability, and session state. Replay rebuilds chunk
+data and skips side effects already recorded as committed. A failed checkpoint
+removes its receipt and rolls in-memory participants back; with instability
+enabled, replay rejects a receipt whose rules hash or feature outcomes disagree.
+Completion writes a
+final checkpoint after clearing the request and receipt set. This closes lost
+start intent and duplicate per-chunk output on the GameSession snapshot path;
+backup/restore, corruption recovery, multi-world isolation and full crash
+validation remain open. Source-only; tests, builds and runtime validation are
+deferred until implementation is complete.
+
+Actor-bound furnace start and recovery (2026-10-26): Recipe-processing start
+now requires a nonzero authenticated actor, the session actor authorizer, and
+the actor-aware furnace station policy; the actor identity is persisted in
+new processing journal records for retry identity. Startup recovery revalidates
+the persisted furnace coordinates and station revision through the configured
+continuity validator before applying a prepared start, leaving it pending when
+the station cannot be verified. Production wiring, post-prepare authorization
+revalidation now occurs after the PREPARED checkpoint and before replay or
+mutation. Production wiring and deferred test/build evidence remain open.
+Actor-scoped processing requests also carry the inventory, catalog-content,
+and recipe-book revision tokens returned by the recipe query. Processing cache
+v5 persists catalog/book tokens (v1-v4 remain readable), and processing
+journal v4 binds those tokens with the actor ID (v1-v3 remain readable).
+Recovery reuses the persisted tuple so it cannot start a job against changed
+recipe content or knowledge. Runtime verification remains deferred.
+
+Permanent CardGame host-output commit rejection (2026-10-26): a permanent
+consumer commit error now invokes the host abort callback, persists the
+transaction as ABORTED, and waits for explicit operator retry after repair.
+Transient commit errors remain PREPARED and recoverable. The host callback
+contract requires permanent rejection to leave no committed effect. Crash
+injection, runtime validation, and external-consumer conformance remain open.
+
+Actor-bound equipment actions (2026-10-26): equip, unequip, repair, and repair
+quote APIs now require the authenticated actor authorizer. Workbench repair
+also requires actor-scoped station access and rechecks the station revision
+after assembling the quote. Loadout and repair journal v2 payloads persist the
+actor ID, retaining v1 readers; prepared recovery preserves that identity.
+Terminal replay/high-water behavior, production host wiring, and tests remain
+open.
+Equip and unequip now revalidate the actor after the prepared checkpoint and
+before inventory/equipment mutation. Repair rechecks actor and workbench access
+at that same boundary; startup recovery validates saved station continuity and
+leaves an unverifiable prepared repair pending.
+Public combat entry points now require an authenticated actor for attacks,
+arrows, and shield guarding; actor-free helpers are private to local simulation.
+Multiplayer transport integration and action authorization/replay tests remain
+open. Loadout and repair scopes retain the latest committed request as a
+durable high-water marker, reject missing older IDs, and keep exact actor-bound
+payload replay for the retained request. This bounds their journal history;
+broader result retention and acceptance tests remain open.
+
+Runtime block acquisition rules and the trusted regeneration script manifest
+now contribute to a checksummed host-policy hash in MCSP v19. Restore compares
+the saved value with host-provisioned rules and manifest before resuming, and a
+mismatch fails configuration validation. Registering a runtime rule during an
+active session checkpoints the updated hash; retrying an identical
+registration retries the save after a previous write failure.
+
+World Loom lifecycle metadata now uses WLR v6 to retain per-chunk failures and
+skips during a retryable run and the last completed revision's selected,
+published, failed, and skipped chunks after completion and restart. Status
+reports committed, failed, skipped, and pending publication separately and
+includes an error code for failed or skipped chunks. WLR v1 through v5 remain
+readable. Test authoring and build verification remain deferred until
+implementation work is complete.
+
+The World Loom start transaction now requires the configured authenticated
+actor authorizer and rechecks the actor before preparing, before resource
+mutation, and immediately before commit. Revocation after the prepared state
+or resource changes aborts and restores the transaction. Production identity
+provider wiring and test coverage remain open.
+
+MCSP snapshots now rotate a checksum-valid previous version to a `.bak` file
+before atomic replacement. Loading falls back to that backup when the primary
+snapshot is unreadable or has a damaged outer checksum, then atomically repairs
+the primary path when possible. Semantic validation failures with a valid outer
+checksum still fail closed; broader corruption recovery remains open.
+
+Backend follow-up (2026-10-26): Authenticated regeneration-card play and
+required-card discard now have actor-bound GameSession entry points. They
+recheck the configured actor authorizer around the CardGame mutation and
+restore the prior CardGame snapshot if authorization is revoked before the
+action is accepted. Actor-free entry points reject calls when a host actor
+authorizer is configured. CardGame snapshot version 9 persists actor identity
+in play and discard retry records; exact retries from another actor fail, and
+older snapshots restore these entries with actor ID zero. Required discard
+requests must match the actor on their source draw.
+
+World Revision protocol routes authenticated `play_card`, `draw_cards`,
+`discard_card`, and `resolve_expired_choices` actions for the owning actor and
+Loom through GameSession. It rechecks Loom access on exact retries, persists
+structured results through WRC1 v6, and omits private play-result fields from
+wire responses; readers retain WRC1 v1-v5 compatibility. Owner-bound
+`choose_card_option` is sequenced through the host clock and exact choice
+retries persist in RCS v10. Choice expiry uses
+the GameSession host clock, rejects early polls without consuming the request
+ID, and can recover the original result if the session save preceded the
+World Revision cache save. An owner-only `card_hand` query now returns physical
+instance and definition IDs, pending discard count, and redacted pending
+choice options/deadlines through an immutable GameSession snapshot. Scheduled
+timeout automation, disconnect/reconnect ownership, and broader multiplayer
+CardGame recovery remain open. Source-only; no tests or builds have run.
+
+Legacy World Loom start recovery (2026-10-26): A live retry of a prepared WLS1
+record is now durably aborted because that format did not retain its absolute
+decision deadline. Retries requiring a decision window must prepare a WLS2
+record with the deadline persisted; committed WLS1 records remain readable.
+Both changes are source-only; tests and builds remain deferred.
+
+Scheduled CardGame choice expiry (2026-10-26): GameSession's authoritative
+world tick now checks pending choices against the configured host clock and
+submits deadline resolution through the existing snapshot/checkpoint path.
+The request ID is derived from the persistent CardGame session and earliest
+due choice deadline/ID, preserving retry identity across restart. Provider and
+checkpoint failures fail the tick without silently dropping the timeout.
+Disconnected-session scheduling and crash/runtime verification remain open;
+tests and builds stay deferred until implementation and test authoring are
+complete.
+
+Host-facing choice deadline scheduler API (2026-10-26): Exposed
+`GameSession::process_due_regeneration_choice_expiry` for trusted server
+schedulers. It reads the host clock, resolves due choices with stable persisted
+request IDs, and checkpoints before returning. The application session tick
+calls the same backend entry point. Hosting timeouts while a session is
+unloaded/disconnected remains open; tests and builds remain deferred.
+
+Mode-specific World Loom decision windows (2026-10-26): Start commit now uses
+the refreshed authoritative player count to choose a solo window (15-minute
+default) or multiplayer window (5-minute default). Both are configurable before
+session start. WLS3 persists the selected mode, player count, timeout and
+absolute deadline. Prepared retries preserve that policy and abort if player
+count changed; incomplete prepared WLS1/WLS2 records abort instead of resuming
+under an implicit policy. Committed legacy records remain readable. Source-only;
+test authoring and builds remain deferred.
+
+World Loom pre-debit revalidation (2026-10-26): After the WLS3 prepared
+checkpoint, start commit refreshes occupancy, rechecks the selection and cost
+policy revisions, compares every quote field, verifies the player count still
+matches the persisted mode, and checks that the decision deadline has not
+elapsed before charging or dealing. Stale inputs durably abort the request.
+Crash/fault tests and builds remain deferred.
+
+World Loom status policy (2026-10-26): Owner-only status now includes the
+committed start mode, active-player count and selected decision timeout from
+the durable WLS3 journal, alongside the deadline. Legacy WLS2 reports its
+persisted timeout as legacy mode; missing policy is reported as unknown. No
+mode is inferred from current occupancy. Source-only; tests and builds remain
+deferred.
+
+World Loom lifecycle status (2026-10-26): Authenticated status now reports the
+logical lifecycle state plus whether player cancellation, selection editing,
+or trusted retry is allowed. It combines those values with the durable start
+mode and decision timeout. Protocol acceptance and restart-transition tests
+remain deferred.
+
+Terminal World Loom status ownership (2026-10-26): The backend retains the
+owner identity after pre-start cancellation and generation completion so the
+same authenticated actor/Loom can query `NO_DRAFT` or `COMPLETE` after
+reconnect. A later successful begin replaces the terminal owner. Existing WRS1
+checkpoint carries the identity; no new format is needed. Shutdown/restart
+transition validation remains deferred.
+
+World Loom status after cancel and historical completion (2026-10-26):
+`NO_DRAFT` now takes precedence over a prior completed revision when the
+retained owner canceled a newer uncommitted draft. Its response clears stale
+chunk results and old policy fields; a committed owner still sees `COMPLETE`.
+Source-only; restart transition tests remain deferred.
+
+World Loom per-chunk outcome durability (2026-10-26): The lifecycle checkpoint
+stores failed/skipped outcomes for active selected chunks and preserves them
+with the completed revision. Restore validation ensures each outcome belongs
+to a selected chunk and does not conflict with a published chunk. The
+authenticated status response reports `committed`, `pending`, `failed`, or
+`skipped` per selected chunk, including its error code when present. Restart,
+crash, and serialization fault coverage remains to be authored; tests/builds
+remain deferred.
+
+World Loom request serialization audit (2026-10-26): Libft's
+`game_server::run_once()` serializes callbacks under its server lock, so one
+normal network loop dispatches one request at a time. Multiple server loops or
+direct concurrent calls into `WorldRevisionServer` are not covered by that
+lock. The host must still guarantee single ownership/serialization for a world
+or add a lock design that preserves the GameSession checkpoint lock order.
+Concurrency coverage remains open; tests/builds remain deferred.
+
+Mining policy enforcement (2026-10-26): `WorldBlockMiningTransaction` now
+checks the current original block's acquisition policy and breakability before
+mutation in both new execution and prepared recovery. Admin-only or
+non-breakable blocks fail closed even when a caller bypasses `BlockInteractor`.
+The code has no authenticated privileged mining route yet; complete block/drop
+coverage, test authoring, and builds remain open.
+
+Spawner loot save boundary (2026-10-26): Source inspection confirms pending
+spawner deaths are handled under the GameSession transaction lock: deterministic
+loot and recipe discoveries are added, the corpse is removed, and death is
+acknowledged before one session snapshot. If saving fails, the prior item,
+entity/spawner, and recipe-book snapshots are restored. Crash injection at the
+save replacement boundary and broader acquisition coverage remain open;
+tests/builds are deferred.
+
+Melee mob loot transaction (2026-10-26): Lethal melee hits now resolve the
+matching supported mob loot table from the stable target ID and stage drops
+with the combat journal, entity removal, and weapon durability before one snapshot.
+Multiplayer drops retain a short killer pickup lock. Failed drops or checkpoint
+saving restore the prior item store and the entity/spawner snapshot, preserving
+the killed entity's original ID and state, so exact retries cannot repeat the
+loot. A spawner membership query leaves spawner-owned animals to the existing
+pending-death transaction, preventing duplicate loot. Coverage and builds
+remain deferred until the implementation pass ends.
+
+Projectile mob loot and attribution (2026-10-26): Lethal arrow hits on
+non-spawner mobs now stage deterministic loot with projectile removal and mob
+removal in the simulation checkpoint. The shooter actor ID is persisted on
+projectiles through projectile request payload v2; WENS v5 now persists
+projectile attribution and the last authenticated damage actor for mobs while
+reading WENS v1-v4. Spawner death records carry that actor into loot creation
+and apply the short killer pickup lock. Projectile payload v1 remains readable.
+The loot table mapping is shared with melee handling. Migration and crash
+coverage plus builds remain deferred.
+
+World Loom final-checkpoint recovery (2026-10-26): A failed final generation
+checkpoint now restores the live manager to its previous revision and
+barriered committed request, including selected chunks, publication receipts,
+and deadline. Explicit and startup-resume retries checkpoint that committed
+request before scheduling workers. Per-chunk receipts continue to prevent
+replayed side effects. Occupancy provider samples now document one entry per
+active player, preserving duplicates for co-located players until the manager
+deduplicates positions. Source-only; crash/retry coverage remains deferred.
+
+Starter deck startup invariant (2026-10-26): Session setup checks nonzero
+starter copies, the per-definition copy cap, accumulation overflow, and the
+configured 20-card total before shuffle/deal, then confirms the CardGame engine
+contains all 20 cards after insertion and inspects each definition count and
+unique nonzero physical instance ID against the expected multiset. Regression
+coverage remains for the test-authoring pass. Source-only; tests and builds
+remain deferred.
+
+Barrier-aware survival respawn (2026-10-26): Death recovery checks the
+configured spawn chunk against active World Loom barriers before changing the
+player's horizontal position. If the spawn is reserved, it keeps the current
+horizontal position and performs the usual ground adjustment there. This
+closes a local position-change path around the movement barrier; authoritative
+multiplayer reconnect positioning remains a host integration requirement.
+Source-only; tests and builds remain deferred.
+
+World Revision cache side-effect guard (2026-10-26): Quote and draft mutation
+paths check capacity and allocate the replay entry before refreshing live
+occupancy. Cache-full/allocation failures cannot prune selection state or
+advance its revision; failed occupancy refreshes remove the placeholder.
+Cache-saturation/fault-injection coverage remains deferred. Source-only; tests
+and builds remain deferred.
+
+Barrier-aware committed-session restore spawn (2026-10-26): Startup checks the
+default spawn after restoring barriers, resumes at the saved player
+coordinates if that spawn is reserved, and fails closed if the saved position
+is reserved too. This prevents a committed regeneration from being bypassed
+by the local reconnect spawn path. Host live-position mapping and restart
+transition coverage remain open. Source-only; tests and builds remain deferred.
+
+Barrier-aware spawn search (2026-10-26): The shared player spawn search now
+rejects terrain-safe candidates inside active World Loom barriers, covering
+startup and death recovery when a nearby safe surface lies in another chunk.
+Invalid coordinates stop the bounded search safely. Spawn/barrier coverage
+remains open. Source-only; tests and builds remain deferred.
+
+Barrier-aware animal effects (2026-10-26): Animal movement rejects safe-step
+destinations inside active World Loom barriers, while allowing an animal
+already there to step out. Hostiles inside a barrier cannot attack through it,
+and chickens there do not add eggs during regeneration. Existing entity
+occupancy and publication recovery remain open. Source-only; tests and builds
+remain deferred.
+
+Barrier-aware player footprint (2026-10-26): Horizontal movement now checks
+the player's full collision width against reserved chunks, preventing the body
+from overlapping a barrier before the camera center crosses the chunk edge.
+Chunks already intersecting the player's starting footprint remain traversable
+so an already-overlapping player can move out. This only covers the local
+movement path; authoritative multiplayer movement admission and teleport
+transitions remain open. Source-only; tests and builds remain deferred.
+
+Completed terrain recovery implementation (2026-10-26): Startup can reconstruct
+the most recent completed World Loom revision as an in-place deterministic
+replay, restoring its saved selection, publication receipts, and original
+regeneration mode while keeping the externally visible revision identifier.
+Replay lifecycle metadata accepts the saved stage mask for that mode.
+After selected chunks load, the session rehydrates saved regeneration rules
+and refuses a replay whose selected footprint changes. The replay rebuilds
+per-chunk feature assignments. While the process remains live, completed
+assignments are retained and passed through the normal chunk streaming request
+so an evicted selected chunk regains its terrain features. Existing publication
+receipts suppress duplicate spawner and loot publication during replay; their
+stores remain separately persisted. WVC1 now persists voxel bytes and mutable
+edits separately, so normal startup can reuse saved terrain. WBK v3 now includes
+WVC1 terrain with WBJ1 rollback on restore. Cross-file crash consistency and
+replay/restart acceptance remain open. Source-only; tests and builds remain
+deferred.
+
+Regeneration outcome allocation failure (2026-10-26): Per-chunk failure and
+skip outcome recording now returns allocation errors instead of swallowing
+them. A failed outcome allocation is also recorded as a generation error, so
+the revision cannot finish as successful with missing outcome state. The
+manager pre-reserves outcome capacity for the selected set before scheduling;
+this error path remains covered by the later fault-injection test pass.
+Source-only; tests and builds remain deferred.
+
+World Loom prepare-checkpoint retry (2026-10-26): If the initial PREPARED
+session snapshot fails, `GameSession::commit_regeneration_start` now restores
+the transaction journal to its pre-request image. The server drops the new
+confirm request-cache entry on transient I/O or allocation errors from that
+callback, allowing the same request ID to retry preparation. This applies only
+before the debit/deal boundary; committed starts continue to retain their
+cached success for checkpoint retry. Crash/fault coverage and builds remain
+deferred.
+
+World Revision server durability gate (2026-10-26): Server initialization now
+requires both the host start transaction callback and checkpoint writer in
+addition to its authentication, station, occupancy, and epoch providers. A
+configured network server therefore cannot accept lifecycle mutations while
+silently omitting its durable state checkpoint. Existing validator fixtures
+need migration to the required callbacks during the later test-authoring pass.
+Source-only; builds remain deferred.
+
+World Loom charge settlement and participant binding (2026-10-26): The start
+journal now writes WLS6 with the quoted revision identifier, sorted
+authenticated participant IDs, card content version, generation and trusted
+script manifest hashes, currency
+identity/amount, paid and bonus chunk counts, and an explicit retain-after-commit
+policy. Fresh occupancy identities and the opening-deal preflight must pass
+before debit. Before commit, rejection and checkpoint failure
+abort and restore the pre-debit state. After commit, timeout, disconnect or
+restart, partial chunk publication, and trusted same-plan retry retain the
+upfront cost; an exceptional repair refund requires a separate audited
+transaction. The exact card instance zones remain in the atomic session
+snapshot. Owner-only status exposes participant, content, and settlement data only
+when the record matches the active/completed revision and requesting owner.
+WLS1-WLS5 committed records remain readable; legacy prepared records abort
+safely from their pre-mutation checkpoint. Runtime checks and builds are deferred until
+backend implementation and test authoring are complete.
+
+World backup/restore policy consistency (2026-10-26): Catalog maintenance now
+blocks owner edits to access, ownership, allowlist, ban/approval, admission,
+compatibility, and character-import policy while a restore holds the world
+maintenance lease. Admission-capacity changes also fail while existing join
+leases would exceed the new capacity, and admission-mode changes fail while
+join leases are active. This closes process-local policy races during restore
+and prevents live reservations from becoming invalid through owner edits.
+Policy mutations that can change a live session's authorization or world
+configuration also fail while that catalog instance has active join leases.
+Only one live `WorldSaveCatalog` can now initialize a normalized catalog path
+within a process, so separate catalog objects cannot maintain independent
+capacity and character-lease tables for the same save. Cross-process
+coordination remains open. Source-only; tests/builds remain deferred until
+implementation and test authoring are complete.
+
+Catalog world creation orchestration (2026-10-26): `GameSession` now exposes a
+backend create-and-start entry point that persists the world definition,
+generates a fresh world-bound character identity and retry request ID, then
+starts through `start_from_catalog_admitted`. It returns the created
+definition even if session startup fails, so callers can retry opening the
+persisted world. The session identity is cleared after a failed inactive
+start. Catalog creation and first-session startup are not a single durable
+transaction; the world entry intentionally remains available after a startup
+failure. Source-only; tests/builds remain deferred until implementation and
+test authoring are complete.
+
+Direct world-ID admission boundary (2026-10-26): The public
+`start_with_world_id` overload now fails closed because it lacks an
+authenticated actor, character, and request identity. Its implementation is
+private and is reached only by the catalog-admitted start path and the legacy
+seed-derived compatibility path. Network publication wiring, durable leases,
+and the legacy seed-only compatibility boundary remain open. Source-only;
+tests/builds remain deferred.
+
+Owner-confirmed world deletion (2026-10-26): `GameSessionPersistence` now
+deletes the ID-derived snapshot and revision sidecar only under catalog and
+process-local session maintenance locks. It journals their prior bytes in WBJ1
+before removal, then atomically removes the catalog entry only after both save
+files are gone. A failed pre-commit operation invokes the existing WBJ1
+rollback; startup recovery can restore files if the process stops before the
+catalog removal. The owner must type the exact world name, and active join
+leases prevent deletion. A WDL1 marker lets admitted world-open recovery
+finish cleanup when the catalog entry is already gone, without scanning or
+deleting legacy saves that lack a deletion marker. Hosts can also run the
+catalog deletion recovery API during startup; `initialize_catalog` combines
+catalog loading with that reconciliation before session admission. Cross-
+process locking remains open. Source-only; tests/builds remain deferred.
+
+Offline ownership-mode migration (2026-10-26): Owner-authorized
+`update_policy` can now change a world between local and shared ownership
+modes, using the existing atomic catalog replacement. The operation rejects
+while any local join lease is active, so live participants are not silently
+carried across an ownership-policy transition. Cross-process lease coordination
+and player-profile migration between separately owned worlds remain open.
+Source-only; tests/builds remain deferred.
+
+Terrain chunk-store integration (2026-10-26): `WorldTerrainChunkStore` writes
+and reads versioned, coordinate-bound, checksummed voxel chunk payloads under
+a world-ID directory using atomic replacement and the existing
+`game_voxel_chunk` serializer. Catalog-backed GameSession startup initializes
+the store. Initial and streamed chunk loads prefer saved payloads; newly
+generated chunks, direct placement/deletion/state replacement, undo/redo,
+deferred generated edits, and regeneration results update the store. The
+regeneration applier restores the prior payload if a later in-process commit
+step rolls back. Remaining gaps include crash-atomic coordination with the
+GameSession snapshot and entity/spawner/instability stores, cross-process
+access, and complete recovery/acceptance coverage. This does not yet constitute
+a complete world-save transaction. Source-only; tests/builds remain deferred
+until implementation and test authoring are complete.
+
+Terrain-aware world bundles (2026-10-26): WBK1 v3 now includes a bounded,
+checksummed WTA1 archive of the world's WVC1 chunk files. Export and import
+validate each WVC1 header, coordinate-bound filename, payload length, record
+checksum, and complete voxel payload. Import validates the archive before
+changing state, keeps WBK1 v2 compatibility without touching terrain, and uses
+WBJ1 v2 to retain
+the pre-import terrain archive alongside the prior MCSP and revision sidecar.
+Recovery restores all previous data after
+an interrupted v3 install, including the prior absence of a terrain directory.
+Cross-file crash durability and concurrency across separate stores remain
+open. Source review only; tests and builds remain deferred until test
+authoring is complete.

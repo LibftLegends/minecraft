@@ -90,6 +90,9 @@ class WorldItemStore
 	int32_t query_renderable(double x, double y, double z, double radius,
 		std::vector<WorldItemSnapshot> *snapshots_out) const noexcept;
 	int32_t serialize(std::vector<uint8_t> &bytes_out) const noexcept;
+	/* Atomically replace this initialized store with a fully decoded staged
+	 * store. The staged store receives the previous contents. */
+	int32_t replace_from(WorldItemStore &staged) noexcept;
 	int32_t get_max_item_instance_id(uint64_t *instance_id_out) const noexcept;
 	uint64_t change_revision() const noexcept;
 	int32_t validate_instance_id_uniqueness(

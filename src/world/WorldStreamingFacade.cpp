@@ -1,6 +1,7 @@
 #include "../../src/world/World.hpp"
 #include "../../src/coordinates/WorldCoordinates.hpp"
 #include "../../src/diagnostics/RuntimeAnalytics.hpp"
+#include "../../Libft/Modules/Buffer/byte_buffer.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -11,6 +12,62 @@
 
 namespace
 {
+	class WorldVoxelChunkRollbackSnapshot
+	{
+	  public:
+		WorldVoxelChunkRollbackSnapshot() noexcept : initialized_(false) {}
+		~WorldVoxelChunkRollbackSnapshot()
+		{
+			if (initialized_)
+				(void)chunk_.destroy();
+		}
+		int32_t capture(const game_voxel_chunk &source) noexcept
+		{
+			ft_byte_buffer payload;
+			int32_t result = payload.initialize();
+			const bool payload_initialized = result == FT_ERR_SUCCESS;
+			if (result == FT_ERR_SUCCESS)
+				result = source.serialize(payload);
+			if (result == FT_ERR_SUCCESS)
+				result = payload.reset_read_position();
+			if (result == FT_ERR_SUCCESS)
+			{
+				result = chunk_.initialize();
+				initialized_ = result == FT_ERR_SUCCESS;
+			}
+			if (result == FT_ERR_SUCCESS)
+				result = chunk_.deserialize(payload);
+			if (result == FT_ERR_SUCCESS && payload.remaining() != 0U)
+				result = FT_ERR_INVALID_ARGUMENT;
+			if (payload_initialized)
+			{
+				const int32_t destroy_result = payload.destroy();
+				if (result == FT_ERR_SUCCESS)
+					result = destroy_result;
+			}
+			if (result != FT_ERR_SUCCESS && initialized_)
+			{
+				(void)chunk_.destroy();
+				initialized_ = false;
+			}
+			return (result);
+		}
+		int32_t restore(game_voxel_chunk &target) noexcept
+		{
+			if (!initialized_)
+				return (FT_ERR_INVALID_STATE);
+			int32_t result = target.destroy();
+			if (result == FT_ERR_SUCCESS)
+				result = target.move(chunk_);
+			if (result == FT_ERR_SUCCESS)
+				initialized_ = false;
+			return (result);
+		}
+	  private:
+		game_voxel_chunk chunk_;
+		bool initialized_;
+	};
+
 	template <typename T>
 	static bool fluid_override_less(const T &left, const T &right)
 	{
@@ -859,6 +916,16 @@ int32_t World::deserialize_fluid_state(const uint8_t *bytes,
 			return (apply_result);
 		if (changed)
 		{
+			if (this->terrain_chunk_store_.is_initialized())
+			{
+				const int32_t persist_result =
+					this->terrain_chunk_store_.save_chunk(
+						this->chunks[index].chunk_x,
+						this->chunks[index].chunk_z,
+						this->chunks[index].chunk);
+				if (persist_result != FT_ERR_SUCCESS)
+					return (persist_result);
+			}
 			this->chunk_streamer.mark_remesh_dirty(this->chunks[index]);
 			const int32_t queue_result = this->chunk_streamer.queue_chunk_remesh(
 				this->chunks[index]);
@@ -942,12 +1009,20 @@ int32_t World::apply_authoritative_block_change(
 	WorldChunk *world_chunk;
 	uint64_t previous_revision;
 	uint64_t current_revision;
+	uint64_t previous_world_voxel_revision;
+	uint64_t previous_geometry_revision;
+	uint16_t previous_content_version;
+	uint16_t previous_light_input_version;
 	uint32_t existing_block_id;
 	uint8_t existing_light;
+	uint8_t previous_boundary_source_light_max[4];
+	bool previous_boundary_target_has_transparent[4];
 	ft_bool incremental_additive_light;
 	ft_bool incremental_removal_light;
+	bool terrain_persistence_enabled;
 	game_block_edit_op edit;
 	WorldEditHistory::Record record;
+	WorldVoxelChunkRollbackSnapshot terrain_rollback;
 	int32_t error_code;
 
 	if (delta_out == nullptr || request.local_x >= GAME_VOXEL_CHUNK_WIDTH
@@ -970,6 +1045,25 @@ int32_t World::apply_authoritative_block_change(
 	existing_light = world_chunk->light.get(request.local_x, request.local_y,
 		request.local_z);
 	previous_revision = world_chunk->chunk.get_revision();
+	previous_world_voxel_revision = world_chunk->voxel_revision;
+	previous_geometry_revision = this->geometry_revision;
+	previous_content_version = world_chunk->content_version;
+	previous_light_input_version = world_chunk->light_input_version;
+	std::shared_ptr<const WorldChunkReadState> previous_read_state =
+		world_chunk->read_state;
+	std::memcpy(previous_boundary_source_light_max,
+		world_chunk->boundary_source_light_max,
+		sizeof(previous_boundary_source_light_max));
+	std::memcpy(previous_boundary_target_has_transparent,
+		world_chunk->boundary_target_has_transparent,
+		sizeof(previous_boundary_target_has_transparent));
+	terrain_persistence_enabled = this->terrain_chunk_store().is_initialized();
+	if (terrain_persistence_enabled)
+	{
+		error_code = terrain_rollback.capture(world_chunk->chunk);
+		if (error_code != FT_ERR_SUCCESS)
+			return (error_code);
+	}
 	error_code = world_chunk->chunk.apply_authoritative_block_change(request,
 		delta_out);
 	if (error_code != FT_ERR_SUCCESS)
@@ -981,14 +1075,53 @@ int32_t World::apply_authoritative_block_change(
 	world_chunk->content_version = world_light_version::next(
 		world_chunk->content_version);
 	world_chunk->mark_light_input_changed();
-	this->mark_geometry_changed();
-	this->chunk_streamer.mark_remesh_dirty(*world_chunk);
 	error_code = world_chunk->publish_read_state_after_block_edit(
 		static_cast<int32_t>(request.local_x),
 		static_cast<int32_t>(request.local_y),
 		static_cast<int32_t>(request.local_z), request.requested_block_id);
 	if (error_code != FT_ERR_SUCCESS)
+	{
+		if (terrain_persistence_enabled)
+		{
+			if (terrain_rollback.restore(world_chunk->chunk) != FT_ERR_SUCCESS)
+				return (FT_ERR_INVALID_STATE);
+			world_chunk->voxel_revision = previous_world_voxel_revision;
+			world_chunk->content_version = previous_content_version;
+			world_chunk->light_input_version = previous_light_input_version;
+			world_chunk->read_state = previous_read_state;
+			std::memcpy(world_chunk->boundary_source_light_max,
+				previous_boundary_source_light_max,
+				sizeof(previous_boundary_source_light_max));
+			std::memcpy(world_chunk->boundary_target_has_transparent,
+				previous_boundary_target_has_transparent,
+				sizeof(previous_boundary_target_has_transparent));
+		}
 		return (error_code);
+	}
+	if (terrain_persistence_enabled)
+	{
+		error_code = this->terrain_chunk_store().save_chunk(request.chunk_x,
+			request.chunk_z, world_chunk->chunk);
+		if (error_code != FT_ERR_SUCCESS)
+		{
+			if (terrain_rollback.restore(world_chunk->chunk) != FT_ERR_SUCCESS)
+				return (FT_ERR_INVALID_STATE);
+			world_chunk->voxel_revision = previous_world_voxel_revision;
+			world_chunk->content_version = previous_content_version;
+			world_chunk->light_input_version = previous_light_input_version;
+			world_chunk->read_state = previous_read_state;
+			std::memcpy(world_chunk->boundary_source_light_max,
+				previous_boundary_source_light_max,
+				sizeof(previous_boundary_source_light_max));
+			std::memcpy(world_chunk->boundary_target_has_transparent,
+				previous_boundary_target_has_transparent,
+				sizeof(previous_boundary_target_has_transparent));
+			this->geometry_revision = previous_geometry_revision;
+			return (error_code);
+		}
+	}
+	this->mark_geometry_changed();
+	this->chunk_streamer.mark_remesh_dirty(*world_chunk);
 	(void)this->invalidate_loom_station_if_block_changed(
 		request.chunk_x * GAME_VOXEL_CHUNK_WIDTH
 			+ static_cast<int32_t>(request.local_x),

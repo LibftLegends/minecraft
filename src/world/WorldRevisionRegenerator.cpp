@@ -379,6 +379,8 @@ int32_t WorldRevisionRegenerator::start(WorldRevisionManager &manager,
 	std::vector<std::vector<WorldGenerationPipeline::GenerationFeaturePlan> >
 		features_by_selected_chunk;
 	std::vector<WorldRevisionManager::RevisionChunk> staged_selected;
+	std::vector<WorldRevisionManager::CompletedChunkFeatureAssignment>
+		staged_feature_assignments;
 	uint64_t generation_epoch;
 	uint32_t maximum_selected_chunks;
 	std::size_t village_plan_count = 0U;
@@ -1089,6 +1091,25 @@ int32_t WorldRevisionRegenerator::start(WorldRevisionManager &manager,
 		manager.progress_.finish();
 		return (FT_ERR_NO_MEMORY);
 	}
+	try
+	{
+		staged_feature_assignments.reserve(manager.selected_.size());
+		for (std::size_t index = 0U;
+			index < manager.selected_.size(); ++index)
+		{
+			WorldRevisionManager::CompletedChunkFeatureAssignment assignment;
+			assignment.chunk_x = manager.selected_[index].chunk_x;
+			assignment.chunk_z = manager.selected_[index].chunk_z;
+			assignment.plans = features_by_selected_chunk[index];
+			staged_feature_assignments.push_back(std::move(assignment));
+		}
+	}
+	catch (...)
+	{
+		manager.progress_.record_error(FT_ERR_NO_MEMORY);
+		manager.progress_.finish();
+		return (FT_ERR_NO_MEMORY);
+	}
 	std::size_t selected_index = 0U;
 	for (const WorldRevisionManager::RevisionChunk &entry : manager.selected_)
 	{
@@ -1161,6 +1182,7 @@ int32_t WorldRevisionRegenerator::start(WorldRevisionManager &manager,
 			return (FT_ERR_NO_MEMORY);
 		}
 	}
+	manager.pending_feature_assignments_.swap(staged_feature_assignments);
 	manager.progress_.set_job_count(submissions.size());
 	if (submissions.empty())
 		return (WorldRevisionRegenerator::finish(manager, world));
@@ -1170,6 +1192,7 @@ int32_t WorldRevisionRegenerator::start(WorldRevisionManager &manager,
 	{
 		manager.progress_.record_error(error_code);
 		manager.progress_.finish();
+		manager.pending_feature_assignments_.clear();
 		return (error_code);
 	}
 	return (FT_ERR_SUCCESS);
@@ -1212,12 +1235,15 @@ int32_t WorldRevisionRegenerator::finish(WorldRevisionManager &manager,
 		manager.pending_ = false;
 		return (error_code);
 	}
-	manager.revision_id_ += 1U;
+	if (!manager.replaying_completed_revision_)
+		manager.revision_id_ += 1U;
 	manager.pending_ = false;
 	manager.selected_.clear();
 	manager.rules_target_chunks_.clear();
 	manager.feature_plans_.clear();
 	manager.barriers_active_ = false;
+	manager.replaying_completed_revision_ = false;
+	manager.completed_revision_rules_pending_ = false;
 	world.chunk_streamer.cancel_pending_remeshes();
 	world.chunk_streamer.bump_generation_revision();
 	world.chunk_streamer.reset_candidates_after_regeneration();

@@ -284,6 +284,7 @@ int Application::run_game(ApplicationOptions &options,
 	 * heap so stack usage is independent of the build instrumentation. */
 	std::unique_ptr<GameSession> game_session(
 		new (std::nothrow) GameSession());
+	int32_t stop_result;
 	if (game_session == nullptr)
 		return (1);
 
@@ -294,11 +295,12 @@ int Application::run_game(ApplicationOptions &options,
 	if (options.auto_start)
 		menu_ctl.request_start("");
 	run_game_loop(window, menu_ctl, *game_session, renderer, strategy);
+	stop_result = FT_ERR_SUCCESS;
 	if (game_session->is_active())
-		game_session->stop();
+		stop_result = game_session->stop();
 	window.set_cursor_visible(true);
 	window.destroy();
-	return (0);
+	return (stop_result == FT_ERR_SUCCESS ? 0 : 1);
 }
 
 int Application::run(int argc, char **argv)

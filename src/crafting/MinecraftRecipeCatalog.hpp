@@ -32,14 +32,46 @@ struct MinecraftProcessingActionResult
 struct MinecraftRecipeQueryEntry
 {
 	uint32_t recipe_id;
+	uint32_t station_id;
+	int32_t station_x;
+	int32_t station_y;
+	int32_t station_z;
+	uint64_t station_revision;
+	uint64_t catalog_revision;
+	uint64_t inventory_revision;
+	uint64_t recipe_book_revision;
 	ft_bool known;
 	game_crafting_query_result status;
+	game_crafting_output_snapshot output;
+	int32_t batch_count;
+	uint64_t character_state_revision;
 };
 
 struct MinecraftRecipeMissingGroup
 {
 	uint32_t recipe_id;
 	game_crafting_missing_ingredient ingredient;
+};
+
+/* One read-only station query result pinned to a complete inventory,
+ * catalogue, character, station, and CardGame session revision tuple.
+ * Consumers can keep the value without observing later mutable state. */
+struct MinecraftStationRecipeSnapshot
+{
+	game_inventory_snapshot inventory;
+	uint64_t inventory_revision;
+	uint64_t catalog_revision;
+	uint64_t recipe_book_revision;
+	uint64_t character_state_revision;
+	uint64_t session_id;
+	uint64_t session_revision;
+	uint32_t station_id;
+	int32_t station_x;
+	int32_t station_y;
+	int32_t station_z;
+	uint64_t station_revision;
+	std::vector<MinecraftRecipeQueryEntry> entries;
+	std::vector<MinecraftRecipeMissingGroup> missing;
 };
 
 class MinecraftRecipeCatalog
@@ -114,6 +146,7 @@ class MinecraftRecipeCatalog
 		uint32_t source_id, uint64_t source_event_id,
 		ft_bool *newly_unlocked) noexcept;
 	int32_t serialize_recipe_book(std::vector<uint8_t> &bytes_out) const noexcept;
+	int32_t get_catalog_revision(uint64_t *revision_out) const noexcept;
 	int32_t restore_recipe_book(const uint8_t *bytes,
 		std::size_t byte_count) noexcept;
 	int32_t is_recipe_known(uint32_t recipe_id, ft_bool *known) const noexcept;
@@ -129,9 +162,14 @@ class MinecraftRecipeCatalog
 		game_crafting_query_result *result,
 		ft_vector<game_crafting_missing_ingredient> *missing_groups) const noexcept;
 	/* Returns all catalog entries, including undiscovered recipes, or one exact
-	 * recipe when recipe_id_filter is nonzero. Both outputs are transactional. */
+	 * recipe when recipe_id_filter is nonzero. Output metadata is scaled for
+	 * batch_count; both outputs are transactional. */
 	int32_t query_recipes(const game_inventory &inventory,
 		uint32_t recipe_id_filter, StationId station_id,
+		std::vector<MinecraftRecipeQueryEntry> &entries_out,
+		std::vector<MinecraftRecipeMissingGroup> &missing_out) const noexcept;
+	int32_t query_recipes(const game_inventory &inventory,
+		uint32_t recipe_id_filter, StationId station_id, int32_t batch_count,
 		std::vector<MinecraftRecipeQueryEntry> &entries_out,
 		std::vector<MinecraftRecipeMissingGroup> &missing_out) const noexcept;
 	/* Simulation-owner-thread API. Station-constrained recipes fail closed. */
@@ -139,12 +177,31 @@ class MinecraftRecipeCatalog
 		uint64_t request_id, uint32_t recipe_id, int32_t batch_count,
 		uint64_t expected_inventory_revision,
 		MinecraftCraftActionResult *result_out) noexcept;
+	int32_t craft_hand_recipe(game_inventory &inventory,
+		uint64_t request_id, uint32_t recipe_id, int32_t batch_count,
+		uint64_t expected_inventory_revision, uint64_t expected_catalog_revision,
+		uint64_t expected_recipe_book_revision,
+		MinecraftCraftActionResult *result_out) noexcept;
 	int32_t craft_recipe_at_station(game_inventory &inventory,
 		uint64_t request_id, uint32_t recipe_id, int32_t batch_count,
 		uint64_t expected_inventory_revision, StationId station_id,
 		int32_t station_x, int32_t station_y, int32_t station_z,
 		uint64_t expected_station_revision,
 		MinecraftCraftActionResult *result_out) noexcept;
+	int32_t craft_recipe_at_station(game_inventory &inventory,
+		uint64_t request_id, uint32_t recipe_id, int32_t batch_count,
+		uint64_t expected_inventory_revision, uint64_t expected_catalog_revision,
+		uint64_t expected_recipe_book_revision, StationId station_id,
+		int32_t station_x, int32_t station_y, int32_t station_z,
+		uint64_t expected_station_revision,
+		MinecraftCraftActionResult *result_out) noexcept;
+	int32_t replay_craft_action(uint64_t request_id, uint32_t recipe_id,
+		int32_t batch_count, uint64_t expected_inventory_revision,
+		uint64_t expected_catalog_revision,
+		uint64_t expected_recipe_book_revision, StationId station_id,
+		int32_t station_x, int32_t station_y, int32_t station_z,
+		uint64_t expected_station_revision,
+		MinecraftCraftActionResult *result_out) const noexcept;
 	int32_t serialize_craft_action_cache(
 		std::vector<uint8_t> &bytes_out) const noexcept;
 	int32_t validate_craft_action_cache(const uint8_t *bytes,
@@ -161,6 +218,14 @@ class MinecraftRecipeCatalog
 		int32_t station_x, int32_t station_y, int32_t station_z,
 		uint64_t expected_station_revision,
 		MinecraftProcessingActionResult *result_out) noexcept;
+	int32_t start_processing(game_inventory &inventory, uint64_t request_id,
+		uint32_t recipe_id, int32_t batch_count,
+		uint64_t expected_inventory_revision,
+		uint64_t expected_catalog_revision,
+		uint64_t expected_recipe_book_revision,
+		int32_t station_x, int32_t station_y, int32_t station_z,
+		uint64_t expected_station_revision,
+		MinecraftProcessingActionResult *result_out) noexcept;
 	struct ProcessingStationContext
 	{
 		uint64_t request_id;
@@ -174,6 +239,11 @@ class MinecraftRecipeCatalog
 	int32_t advance_processing(game_inventory &inventory,
 		uint32_t server_ticks, uint32_t job_budget,
 		uint32_t *completed_out, uint32_t *pending_output_out) noexcept;
+	int32_t advance_processing(game_inventory &inventory,
+		uint32_t server_ticks,
+		const std::vector<uint64_t> &authorized_request_ids,
+		uint32_t job_budget, uint32_t *completed_out,
+		uint32_t *pending_output_out) noexcept;
 	int32_t get_processing_job_count(uint32_t *count_out) const noexcept;
 	int32_t serialize_processing_state(
 		std::vector<uint8_t> &bytes_out) const noexcept;
@@ -207,6 +277,8 @@ class MinecraftRecipeCatalog
 		uint32_t recipe_id;
 		int32_t batch_count;
 		uint64_t expected_inventory_revision;
+		uint64_t expected_catalog_revision;
+		uint64_t expected_recipe_book_revision;
 		StationId station_id;
 		int32_t station_x;
 		int32_t station_y;
@@ -232,6 +304,8 @@ class MinecraftRecipeCatalog
 		uint32_t recipe_id;
 		int32_t batch_count;
 		uint64_t expected_inventory_revision;
+		uint64_t expected_catalog_revision;
+		uint64_t expected_recipe_book_revision;
 		MinecraftProcessingActionResult result;
 	};
 	std::map<uint64_t, CachedProcessingAction> processing_action_cache_;
@@ -241,6 +315,7 @@ class MinecraftRecipeCatalog
 	uint32_t processing_ticks_per_item_[7];
 	const MinecraftItemCatalog *items_;
 	uint64_t highest_craft_request_id_;
+	uint64_t catalog_content_revision_;
 	/* Protects allocator high-water updates and unique output commits. */
 	mutable std::mutex instance_id_mutex_;
 	uint64_t next_output_instance_id_;
@@ -250,7 +325,9 @@ class MinecraftRecipeCatalog
 		const MinecraftItemCatalog &items) noexcept;
 	int32_t craft_recipe_at_station_internal(game_inventory &inventory,
 		uint64_t request_id, uint32_t recipe_id, int32_t batch_count,
-		uint64_t expected_inventory_revision, StationId station_id,
+		uint64_t expected_inventory_revision,
+		uint64_t expected_catalog_revision,
+		uint64_t expected_recipe_book_revision, StationId station_id,
 		int32_t station_x, int32_t station_y, int32_t station_z,
 		uint64_t expected_station_revision,
 		MinecraftCraftActionResult *result_out) noexcept;

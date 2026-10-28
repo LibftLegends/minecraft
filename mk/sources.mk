@@ -99,6 +99,7 @@ SRC = \
     src/world/World.cpp \
     src/world/WorldChunkInstabilityFacade.cpp \
     src/world/WorldChunkInstabilityStore.cpp \
+    src/world/WorldTerrainChunkStore.cpp \
     src/world/WorldStreamingFacade.cpp \
     src/world/WorldRevisionFacade.cpp \
     src/world/WorldGenerationPipeline.cpp \
@@ -121,6 +122,7 @@ SRC = \
     src/world/WorldRevisionMetadataStore.cpp \
     src/world/WorldRevisionChunkSet.cpp \
     src/world/WorldRevisionServer.cpp \
+    src/world/WorldSaveCatalog.cpp \
     src/coordinates/WorldCoordinates.cpp \
     src/chunks/WorldChunk.cpp \
     src/chunks/WorldChunkStore.cpp \

@@ -9,7 +9,9 @@
 
 namespace
 {
-	static const uint32_t ENTITY_SNAPSHOT_VERSION = 3U;
+	static const uint32_t ENTITY_SNAPSHOT_VERSION = 5U;
+	static const uint32_t PROJECTILE_OWNER_ENTITY_SNAPSHOT_VERSION = 4U;
+	static const uint32_t LEGACY_OWNER_ENTITY_SNAPSHOT_VERSION = 3U;
 	static const uint32_t ITEM_ENTITY_SNAPSHOT_VERSION = 2U;
 	static const uint32_t LEGACY_ENTITY_SNAPSHOT_VERSION = 1U;
 	static const std::size_t ENTITY_SNAPSHOT_HEADER_SIZE = 16U;
@@ -162,6 +164,12 @@ bool WorldEntityStore::state_is_valid(const EntityState &state) noexcept
 int32_t WorldEntityStore::spawn(const EntityState &state,
 	uint32_t *entity_id_out) noexcept
 {
+	return (this->spawn(state, 0U, entity_id_out));
+}
+
+int32_t WorldEntityStore::spawn(const EntityState &state,
+	uint64_t owner_actor_id, uint32_t *entity_id_out) noexcept
+{
 	EntityState staged = state;
 	uint32_t entity_id;
 	std::lock_guard<std::mutex> lock(this->mutex_);
@@ -170,6 +178,9 @@ int32_t WorldEntityStore::spawn(const EntityState &state,
 	if (entity_id_out == nullptr || state.id != 0U || state.type == 0U)
 		return (FT_ERR_INVALID_ARGUMENT);
 	if (state.type == static_cast<uint32_t>(EntityState::Kind::BOAT))
+		return (FT_ERR_INVALID_ARGUMENT);
+	if (owner_actor_id != 0U && state.type
+		!= static_cast<uint32_t>(EntityState::Kind::PROJECTILE))
 		return (FT_ERR_INVALID_ARGUMENT);
 	if (this->entities_.size() >= WorldEntityStore::MAXIMUM_ENTITIES
 		|| this->next_entity_id_ == 0U
@@ -182,7 +193,7 @@ int32_t WorldEntityStore::spawn(const EntityState &state,
 	try
 	{
 		if (!this->entities_.emplace(entity_id,
-				Entry{staged, 1U, 0U, 0U}).second)
+				Entry{staged, 1U, 0U, owner_actor_id}).second)
 			return (FT_ERR_ALREADY_EXISTS);
 	}
 	catch (const std::bad_alloc &)
@@ -334,6 +345,14 @@ int32_t WorldEntityStore::apply_damage(uint32_t entity_id,
 	uint64_t expected_revision, int32_t damage,
 	WorldEntitySnapshot *snapshot_out) noexcept
 {
+	return (this->apply_damage(entity_id, expected_revision, damage, 0U,
+		snapshot_out));
+}
+
+int32_t WorldEntityStore::apply_damage(uint32_t entity_id,
+	uint64_t expected_revision, int32_t damage, uint64_t source_actor_id,
+	WorldEntitySnapshot *snapshot_out) noexcept
+{
 	std::lock_guard<std::mutex> lock(this->mutex_);
 	if (!this->initialized_)
 		return (FT_ERR_NOT_INITIALISED);
@@ -369,6 +388,7 @@ int32_t WorldEntityStore::apply_damage(uint32_t entity_id,
 	else
 		staged_state.health -= damage;
 	entry->second.state = staged_state;
+	entry->second.owner_actor_id = source_actor_id;
 	++entry->second.revision;
 	snapshot_out->state = entry->second.state;
 	snapshot_out->revision = entry->second.revision;
@@ -393,11 +413,11 @@ int32_t WorldEntityStore::rollback_update(
 	if (entry == this->entities_.end())
 		return (FT_ERR_NOT_FOUND);
 	if (entry->second.revision != expected_current_revision
-		|| entry->second.item_instance_id != prior_snapshot.item_instance_id
-		|| entry->second.owner_actor_id != prior_snapshot.owner_actor_id)
+		|| entry->second.item_instance_id != prior_snapshot.item_instance_id)
 		return (FT_ERR_INVALID_STATE);
 	entry->second.state = prior_snapshot.state;
 	entry->second.revision = prior_snapshot.revision;
+	entry->second.owner_actor_id = prior_snapshot.owner_actor_id;
 	return (FT_ERR_SUCCESS);
 }
 
@@ -562,12 +582,14 @@ int32_t WorldEntityStore::deserialize(const uint8_t *bytes,
 	if (bytes[0] != 'W' || bytes[1] != 'E' || bytes[2] != 'N'
 		|| bytes[3] != 'S'
 		|| (snapshot_version != ENTITY_SNAPSHOT_VERSION
+			&& snapshot_version != PROJECTILE_OWNER_ENTITY_SNAPSHOT_VERSION
+			&& snapshot_version != LEGACY_OWNER_ENTITY_SNAPSHOT_VERSION
 			&& snapshot_version != ITEM_ENTITY_SNAPSHOT_VERSION
 			&& snapshot_version != LEGACY_ENTITY_SNAPSHOT_VERSION))
 		return (FT_ERR_INVALID_ARGUMENT);
 	record_size = snapshot_version == LEGACY_ENTITY_SNAPSHOT_VERSION
 		? LEGACY_ENTITY_SNAPSHOT_RECORD_SIZE
-		: (snapshot_version == ITEM_ENTITY_SNAPSHOT_VERSION
+		: ((snapshot_version == ITEM_ENTITY_SNAPSHOT_VERSION)
 			? ITEM_ENTITY_SNAPSHOT_RECORD_SIZE : ENTITY_SNAPSHOT_RECORD_SIZE);
 	next_entity_id = read_u32(bytes, 8U);
 	entity_count = read_u32(bytes, 12U);
@@ -596,17 +618,30 @@ int32_t WorldEntityStore::deserialize(const uint8_t *bytes,
 				== LEGACY_ENTITY_SNAPSHOT_VERSION ? 0U
 				: read_u64(bytes, offset + LEGACY_ENTITY_SNAPSHOT_RECORD_SIZE);
 			const uint64_t owner_actor_id = snapshot_version
-				== ENTITY_SNAPSHOT_VERSION
+				>= LEGACY_OWNER_ENTITY_SNAPSHOT_VERSION
 				? read_u64(bytes, offset + ITEM_ENTITY_SNAPSHOT_RECORD_SIZE) : 0U;
+			bool owner_type_supported = false;
+			if (item_instance_id != 0U)
+				owner_type_supported = state.type
+					== static_cast<uint32_t>(EntityState::Kind::BOAT);
+			else if (snapshot_version
+				>= PROJECTILE_OWNER_ENTITY_SNAPSHOT_VERSION
+				&& state.type == static_cast<uint32_t>(
+					EntityState::Kind::PROJECTILE))
+				owner_type_supported = true;
+		else if (snapshot_version >= ENTITY_SNAPSHOT_VERSION
+			&& state.type >= static_cast<uint32_t>(EntityState::Kind::ZOMBIE)
+			&& state.type <= static_cast<uint32_t>(EntityState::Kind::SPIDER)
+			&& state.type != static_cast<uint32_t>(EntityState::Kind::BOAT))
+			owner_type_supported = true;
+		const bool owner_is_supported = owner_actor_id == 0U
+			|| owner_type_supported;
 			if (revision == 0U || !WorldEntityStore::state_is_valid(state)
 				|| (state.type == static_cast<uint32_t>(EntityState::Kind::BOAT)
 					&& item_instance_id == 0U)
 				|| (item_instance_id != 0U
 					&& state.type != static_cast<uint32_t>(EntityState::Kind::BOAT))
-				|| (owner_actor_id != 0U
-					&& (item_instance_id == 0U
-						|| state.type
-							!= static_cast<uint32_t>(EntityState::Kind::BOAT)))
+				|| !owner_is_supported
 				|| (item_instance_id != 0U
 					&& !staged_item_instance_ids.insert(item_instance_id).second)
 				|| state.id <= maximum_id

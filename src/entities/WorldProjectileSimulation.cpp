@@ -2,6 +2,8 @@
 
 #include "../../Libft/Modules/Errno/errno.hpp"
 #include "../../Libft/Modules/Game/game_item.hpp"
+#include "../inventory/MinecraftLootCatalog.hpp"
+#include "../coordinates/WorldCoordinates.hpp"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -52,7 +54,8 @@ namespace
 }
 
 int32_t WorldProjectileSimulation::tick(World &world,
-	WorldEntityStore &entities, WorldItemStore &items,
+	WorldEntityStore &entities, WorldSpawnerStore &spawners,
+	WorldItemStore &items,
 	MinecraftItemCatalog &catalog, uint64_t server_tick,
 	const GameSessionSnapshotWriter *snapshot_writer,
 	bool *state_changed_out) noexcept
@@ -132,6 +135,8 @@ int32_t WorldProjectileSimulation::tick(World &world,
 			std::ceil(travel_distance / 0.25)));
 		bool terrain_unloaded = false;
 		bool terrain_hit = false;
+		bool barrier_hit = false;
+		bool discard_projectile = false;
 		for (uint32_t sample_index = 1U;
 			sample_index <= sample_count; ++sample_index)
 		{
@@ -145,6 +150,36 @@ int32_t WorldProjectileSimulation::tick(World &world,
 				next_state.position_x = sample_x;
 				next_state.position_y = sample_y;
 				next_state.position_z = sample_z;
+				terrain_hit = true;
+				break ;
+			}
+			const int32_t sample_world_x = static_cast<int32_t>(
+				std::floor(sample_x));
+			const int32_t sample_world_z = static_cast<int32_t>(
+				std::floor(sample_z));
+			const int32_t sample_chunk_x = WorldCoordinates::floor_divide(
+				sample_world_x, GAME_VOXEL_CHUNK_WIDTH);
+			const int32_t sample_chunk_z = WorldCoordinates::floor_divide(
+				sample_world_z, GAME_VOXEL_CHUNK_DEPTH);
+			if (world.revision_barrier_blocks_chunk(sample_chunk_x,
+				sample_chunk_z))
+			{
+				const double previous_fraction = static_cast<double>(
+					sample_index - 1U) / sample_count;
+				const double previous_x = start_x + travel_x * previous_fraction;
+				const double previous_z = start_z + travel_z * previous_fraction;
+				const int32_t previous_chunk_x = WorldCoordinates::floor_divide(
+					static_cast<int32_t>(std::floor(previous_x)),
+					GAME_VOXEL_CHUNK_WIDTH);
+				const int32_t previous_chunk_z = WorldCoordinates::floor_divide(
+					static_cast<int32_t>(std::floor(previous_z)),
+					GAME_VOXEL_CHUNK_DEPTH);
+				discard_projectile = world.revision_barrier_blocks_chunk(
+					previous_chunk_x, previous_chunk_z);
+				next_state.position_x = previous_x;
+				next_state.position_y = start_y + travel_y * previous_fraction;
+				next_state.position_z = previous_z;
+				barrier_hit = true;
 				terrain_hit = true;
 				break ;
 			}
@@ -177,8 +212,8 @@ int32_t WorldProjectileSimulation::tick(World &world,
 		next_state.tick = server_tick;
 		if (terrain_hit)
 		{
-			result = drop_projectile_item(items, catalog, next_state,
-				server_tick);
+			result = barrier_hit && discard_projectile ? FT_ERR_SUCCESS
+				: drop_projectile_item(items, catalog, next_state, server_tick);
 			if (result == FT_ERR_SUCCESS)
 				result = entities.despawn(projectile.state.id,
 					projectile.revision);
@@ -237,7 +272,53 @@ int32_t WorldProjectileSimulation::tick(World &world,
 			WorldEntitySnapshot damaged = {};
 			result = entities.apply_damage(hit_entity.state.id,
 				hit_entity.revision,
-				projectile.state.health, &damaged);
+				projectile.state.health, projectile.owner_actor_id, &damaged);
+			if (result == FT_ERR_SUCCESS && damaged.state.health == 0)
+			{
+				uint32_t loot_table_id = 0U;
+				const int32_t loot_table_result =
+					MinecraftLootCatalog::resolve_entity_loot_table(
+						damaged.state.type, &loot_table_id);
+				if (loot_table_result != FT_ERR_SUCCESS
+					&& loot_table_result != FT_ERR_NOT_FOUND)
+					result = loot_table_result;
+				if (result == FT_ERR_SUCCESS && loot_table_id != 0U)
+				{
+					bool spawner_owned = false;
+					result = spawners.is_entity_tracked(damaged.state.id,
+						&spawner_owned);
+					if (result == FT_ERR_SUCCESS && !spawner_owned)
+					{
+						std::vector<MinecraftLootDrop> drops;
+						result = MinecraftLootCatalog::resolve(loot_table_id,
+							damaged.state.id, drops);
+						const uint64_t owner_lock_until_tick =
+							projectile.owner_actor_id == 0U ? 0U
+							: server_tick > UINT64_MAX - 40U ? UINT64_MAX
+							: server_tick + 40U;
+						for (const MinecraftLootDrop &loot_drop : drops)
+						{
+							ft_sharedptr<game_item> drop;
+							uint64_t item_entity_id = 0U;
+							if (result == FT_ERR_SUCCESS)
+								result = catalog.create_item(loot_drop.item_id,
+									loot_drop.quantity, &drop);
+							if (result == FT_ERR_SUCCESS)
+								result = items.spawn(drop,
+										damaged.state.position_x,
+										damaged.state.position_y,
+										damaged.state.position_z, server_tick,
+										projectile.owner_actor_id,
+										owner_lock_until_tick, &item_entity_id);
+							if (result != FT_ERR_SUCCESS)
+								break ;
+						}
+						if (result == FT_ERR_SUCCESS)
+							result = entities.despawn(damaged.state.id,
+								damaged.revision);
+					}
+				}
+			}
 			if (result == FT_ERR_SUCCESS)
 				result = entities.despawn(projectile.state.id,
 					projectile.revision);

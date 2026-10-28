@@ -63,6 +63,17 @@ int32_t DeleteBlockCommand::execute(World &world) const
 	err = wc->chunk.write_block(lx, world_y, lz, GAME_VOXEL_AIR_BLOCK);
 	if (err != FT_ERR_SUCCESS)
 		return (err);
+	if (world.terrain_chunk_store().is_initialized())
+	{
+		err = world.terrain_chunk_store().save_chunk(cx, cz, wc->chunk);
+		if (err != FT_ERR_SUCCESS)
+		{
+			if (wc->chunk.write_block(lx, world_y, lz, existing_block_id)
+				!= FT_ERR_SUCCESS)
+				return (FT_ERR_INVALID_STATE);
+			return (err);
+		}
+	}
 	wc->mark_content_changed();
 	wc->commit_prepared_read_state_after_block_edit(prepared_read_state);
 	world.mark_geometry_changed();

@@ -1,4 +1,6 @@
 #include "../../src/world/World.hpp"
+#include "../../src/world/WorldChunkCandidateScanner.hpp"
+#include "../../src/world/WorldChunkStreamer.hpp"
 
 World::World() : chunk_streamer_storage_(new WorldChunkStreamer(*this)),
 	revision_manager_storage_(new WorldRevisionManager(*this)),
@@ -81,6 +83,51 @@ int32_t World::set_generation_checkpoint_callback(
 	return (FT_ERR_SUCCESS);
 }
 
+int32_t World::load_selected_revision_chunks(uint32_t load_budget,
+	bool *ready_out) noexcept
+{
+	std::vector<RevisionChunkCoordinate> selected_chunks;
+	uint32_t loaded_count = 0U;
+	int32_t error_code;
+
+	if (ready_out == nullptr || load_budget == 0U)
+		return (FT_ERR_INVALID_ARGUMENT);
+	*ready_out = false;
+	error_code = this->copy_selected_revision_chunks(selected_chunks);
+	if (error_code != FT_ERR_SUCCESS)
+		return (error_code);
+	if (selected_chunks.empty())
+		return (FT_ERR_INVALID_STATE);
+	for (const RevisionChunkCoordinate &coordinate : selected_chunks)
+	{
+		if (this->find_chunk(coordinate.chunk_x, coordinate.chunk_z) != nullptr)
+			continue ;
+		if (loaded_count >= load_budget)
+			return (FT_ERR_SUCCESS);
+		error_code = this->try_load_chunk_at(coordinate.chunk_x,
+			coordinate.chunk_z);
+		if (error_code < 0)
+			return (error_code);
+		if (error_code > 0)
+			++loaded_count;
+	}
+	for (const RevisionChunkCoordinate &coordinate : selected_chunks)
+	{
+		const WorldChunk *chunk = this->find_chunk(coordinate.chunk_x,
+			coordinate.chunk_z);
+		if (chunk == nullptr || !chunk->initialized)
+			return (FT_ERR_SUCCESS);
+	}
+	*ready_out = true;
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t World::try_load_chunk_at(int32_t chunk_x, int32_t chunk_z)
+{
+	return (WorldChunkCandidateScanner::try_load_chunk_at(
+		this->chunk_streamer, chunk_x, chunk_z));
+}
+
 int32_t World::checkpoint_generation_commit() noexcept
 {
 	if (this->generation_checkpoint_callback_ == nullptr)
@@ -159,7 +206,7 @@ int32_t World::seed_first_chunk_and_stream()
 	}
 	error_code = WorldChunkLoader::initialize_chunk(&this->chunks[0], 0, 0,
 			this->seed, this->chunks, this->chunk_count,
-			this->voxel_context.config());
+			this->voxel_context.config(), &this->terrain_chunk_store_);
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
 	/* Keep the initial synchronous load on the same renderer identity scheme
@@ -186,12 +233,35 @@ int32_t World::seed_first_chunk_and_stream()
 int32_t World::initialize(const char *seed_value,
 	const char *voxel_config_file_path)
 {
+	return (this->initialize_internal(seed_value, voxel_config_file_path,
+		nullptr));
+}
+
+int32_t World::initialize_for_world(const char *seed_value,
+	const uint8_t world_id[32], const char *voxel_config_file_path)
+{
+	if (world_id == nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
+	return (this->initialize_internal(seed_value, voxel_config_file_path,
+		world_id));
+}
+
+int32_t World::initialize_internal(const char *seed_value,
+	const char *voxel_config_file_path, const uint8_t *world_id)
+{
 	int32_t	error_code;
 
 	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
 	std::fprintf(stderr, "World initialize: reset\n");
 	#endif
 	this->destroy();
+	this->terrain_chunk_store_.reset();
+	if (world_id != nullptr)
+	{
+		error_code = this->terrain_chunk_store_.initialize(world_id);
+		if (error_code != FT_ERR_SUCCESS)
+			return (error_code);
+	}
 	this->lifecycle_active_ = true;
 	this->chunk_count = WorldCoordinates::CHUNK_COUNT;
 	this->loaded_chunk_count = 0;

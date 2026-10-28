@@ -16,6 +16,7 @@
 #include "../../src/world/WorldGenerationPipeline.hpp"
 #include "../../src/world/WorldRevisionPricing.hpp"
 #include "../../src/world/WorldChunkInstabilityStore.hpp"
+#include "../../src/world/WorldTerrainChunkStore.hpp"
 #include "../../src/entities/WorldEntityStore.hpp"
 #include "../../src/entities/WorldSpawnerStore.hpp"
 #include "../../src/entities/WorldItemStore.hpp"
@@ -65,6 +66,11 @@ class World
 		bool						regenerating;
 		size_t						selected_count;
 		size_t						manually_protected_count;
+		size_t						completed_jobs;
+		size_t						total_jobs;
+		int32_t						regenerated_chunks;
+		int32_t						skipped_chunks;
+		int32_t						regeneration_error;
 	};
 
 	struct							RevisionPreviewEntry
@@ -172,6 +178,8 @@ class World
 	int32_t initialize(const char *seed_value);
 	int32_t initialize(const char *seed_value,
 		const char *voxel_config_file_path);
+	int32_t initialize_for_world(const char *seed_value,
+		const uint8_t world_id[32], const char *voxel_config_file_path = nullptr);
 	void mark_geometry_changed() noexcept;
 	void set_voxel_config(const voxel_generation_config &config);
 	const voxel_generation_config &voxel_generation_settings() const;
@@ -314,6 +322,7 @@ class World
 	bool revision_barriers_active() const noexcept;
 	int32_t set_revision_decision_deadline_epoch(
 		uint64_t deadline_epoch) noexcept;
+	int32_t clear_revision_decision_deadline_epoch() noexcept;
 	uint64_t revision_decision_deadline_epoch() const noexcept;
 	bool revision_barrier_blocks_chunk(int32_t chunk_x,
 		int32_t chunk_z) const noexcept;
@@ -340,10 +349,20 @@ class World
 	int32_t get_revision_protection_info(int32_t chunk_x, int32_t chunk_z,
 		RevisionProtectionInfo *info_out) const noexcept;
 	ChunkRevisionState revision_state(int32_t chunk_x, int32_t chunk_z) const;
+	bool revision_chunk_is_published(int32_t chunk_x,
+		int32_t chunk_z) const noexcept;
 	int32_t build_revision_preview(int32_t preview_center_x,
 		int32_t preview_center_z, int32_t radius,
 		std::vector<RevisionPreviewEntry> &preview) const;
 	int32_t start_revision_regeneration();
+	int32_t load_selected_revision_chunks(uint32_t load_budget,
+		bool *ready_out) noexcept;
+	int32_t set_revision_generation_requested(bool requested) noexcept;
+	bool revision_generation_requested() const noexcept;
+	bool revision_replaying_completed_generation() const noexcept;
+	bool revision_completed_rules_pending() const noexcept;
+	int32_t rehydrate_completed_revision_rules(
+		const RegenerationWorldRules &rules) noexcept;
 	/* Trusted host recovery path; retries the still-reserved plan after a
 	 * failed generation attempt while retaining its movement barrier. */
 	int32_t retry_failed_revision_regeneration();
@@ -433,6 +452,10 @@ class World
 		return (this->item_store_);
 	}
 	MinecraftItemCatalog *item_catalog() noexcept { return (this->item_catalog_); }
+	WorldTerrainChunkStore &terrain_chunk_store() noexcept
+	{
+		return (this->terrain_chunk_store_);
+	}
 
   private:
 	friend class WorldEditHistory;
@@ -487,6 +510,7 @@ class World
     int32_t revision_generation_error_;
     mutable std::shared_mutex world_data_mutex_;
 	WorldChunkInstabilityStore chunk_instability_store_;
+	WorldTerrainChunkStore terrain_chunk_store_;
 	WorldEntityStore *entity_store_;
 	WorldSpawnerStore *spawner_store_;
 	WorldItemStore *item_store_;
@@ -503,6 +527,8 @@ class World
 	std::vector<FluidCellOverride> fluid_cell_overrides_;
 
     void copy_seed(const char *seed_value);
+    int32_t initialize_internal(const char *seed_value,
+		const char *voxel_config_file_path, const uint8_t *world_id);
     int32_t seed_first_chunk_and_stream();
     void clear_chunk_index();
     void rebuild_chunk_index();

@@ -338,7 +338,8 @@ class WorldGenerationPipeline
 		int32_t chunk_z, const char *seed,
 		const voxel_generation_config &config, uint32_t stage_mask,
 		WorldGenerationOperation operation,
-		const WorldChunkSnapshot *source_snapshot = nullptr) noexcept;
+		const WorldChunkSnapshot *source_snapshot = nullptr,
+		const std::vector<GenerationFeaturePlan> *feature_plans = nullptr) noexcept;
 	int32_t submit_remesh(uint64_t request_id, uint64_t world_epoch,
 		uint64_t relevance_epoch, uint32_t generation_revision, int32_t chunk_x,
 		int32_t chunk_z, uint64_t voxel_revision, uint64_t light_revision,

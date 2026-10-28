@@ -852,6 +852,27 @@ int32_t WorldGenerationResultCommitter::create_chunk_from_stream_result(WorldChu
 		candidate.retry_frames = 1;
 		return (FT_ERR_SUCCESS);
 	}
+	if (world.terrain_chunk_store().is_initialized())
+	{
+		error_code = world.terrain_chunk_store().save_chunk(slot->chunk_x,
+			slot->chunk_z, slot->chunk);
+		if (error_code != FT_ERR_SUCCESS)
+		{
+			cleanup_error = chunk_mesh_destroy(slot->mesh);
+			const int32_t chunk_cleanup_error = slot->chunk.destroy();
+			if (cleanup_error == FT_ERR_SUCCESS)
+				cleanup_error = chunk_cleanup_error;
+			(void)slot->light.destroy();
+			if (world.loaded_chunk_count > 0)
+				world.loaded_chunk_count -= 1;
+			slot->reset_coordinates();
+			candidate.state = WorldChunkStreamer::CANDIDATE_FAILED_RETRYABLE;
+			candidate.last_error = cleanup_error == FT_ERR_SUCCESS
+				? error_code : cleanup_error;
+			candidate.retry_frames = 1;
+			return (FT_ERR_SUCCESS);
+		}
+	}
 	error_code = slot->publish_read_state();
 	if (error_code != FT_ERR_SUCCESS)
 	{

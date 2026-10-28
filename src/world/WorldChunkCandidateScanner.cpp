@@ -131,6 +131,7 @@ int32_t WorldChunkCandidateScanner::try_load_chunk_at(WorldChunkStreamer &stream
 {
 	WorldChunk *slot;
 	int32_t error_code;
+	bool fluid_state_changed = false;
 
 	if (streamer.world_.find_chunk(chunk_x, chunk_z) != nullptr)
 		return (0);
@@ -141,9 +142,21 @@ int32_t WorldChunkCandidateScanner::try_load_chunk_at(WorldChunkStreamer &stream
 	error_code = WorldChunkLoader::initialize_chunk(slot, chunk_x, chunk_z,
 			streamer.world_.seed, streamer.world_.chunks,
 			streamer.world_.chunk_count,
-			streamer.world_.voxel_context.config());
+			streamer.world_.voxel_context.config(),
+			&streamer.world_.terrain_chunk_store());
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
+	error_code = streamer.world_.apply_fluid_state_to_chunk(*slot,
+		&fluid_state_changed);
+	if (error_code == FT_ERR_SUCCESS && fluid_state_changed
+		&& streamer.world_.terrain_chunk_store().is_initialized())
+		error_code = streamer.world_.terrain_chunk_store().save_chunk(
+			chunk_x, chunk_z, slot->chunk);
+	if (error_code != FT_ERR_SUCCESS)
+	{
+		slot->destroy();
+		return (error_code);
+	}
 	streamer.world_.loaded_chunk_count = streamer.world_.loaded_chunk_count + 1;
 	streamer.world_.mark_geometry_changed();
 	/* Synchronous and asynchronous publication must use the same monotonic

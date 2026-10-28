@@ -98,6 +98,19 @@ namespace
 			&& value < static_cast<double>(std::numeric_limits<int32_t>::max()));
 	}
 
+	static bool position_in_revision_barrier(const World &world,
+		double x, double z) noexcept
+	{
+		if (!coordinate_is_representable(x)
+			|| !coordinate_is_representable(z))
+			return (true);
+		const int32_t chunk_x = WorldCoordinates::floor_divide(
+			static_cast<int32_t>(std::floor(x)), GAME_VOXEL_CHUNK_WIDTH);
+		const int32_t chunk_z = WorldCoordinates::floor_divide(
+			static_cast<int32_t>(std::floor(z)), GAME_VOXEL_CHUNK_DEPTH);
+		return (world.revision_barrier_blocks_chunk(chunk_x, chunk_z));
+	}
+
 	static bool is_safe_step(const World &world, const EntityState &state,
 		double x, double z) noexcept
 	{
@@ -109,6 +122,8 @@ namespace
 			GAME_VOXEL_CHUNK_WIDTH);
 		const int32_t chunk_z = WorldCoordinates::floor_divide(block_z,
 			GAME_VOXEL_CHUNK_DEPTH);
+		if (world.revision_barrier_blocks_chunk(chunk_x, chunk_z))
+			return (false);
 		const WorldChunk *chunk = world.find_chunk(chunk_x, chunk_z);
 		if (chunk == nullptr || !chunk->initialized || block_y <= 0
 			|| block_y + 1 >= GAME_VOXEL_CHUNK_HEIGHT)
@@ -185,6 +200,8 @@ int32_t WorldAnimalSimulation::tick(World &world,
 			|| !coordinate_is_representable(state.position_z))
 			continue;
 		if (hostile && hostile_attacks_out != nullptr
+			&& !position_in_revision_barrier(world, state.position_x,
+				state.position_z)
 			&& server_tick % HOSTILE_ATTACK_INTERVAL_TICKS
 				== (static_cast<uint64_t>(state.id) % 6U)
 					* static_cast<uint64_t>(ANIMAL_TICK_INTERVAL))
@@ -322,7 +339,9 @@ int32_t WorldAnimalSimulation::tick(World &world,
 		if (hostile_damage > 0)
 			hostile_attacks.push_back({state.id, hostile_damage,
 				state.position_x, state.position_z});
-		if (state.type == static_cast<uint32_t>(EntityState::Kind::CHICKEN))
+		if (state.type == static_cast<uint32_t>(EntityState::Kind::CHICKEN)
+			&& !position_in_revision_barrier(world, state.position_x,
+				state.position_z))
 		{
 			const uint64_t period =
 				WorldAnimalSimulation::CHICKEN_EGG_PERIOD_MINIMUM_TICKS

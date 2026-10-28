@@ -70,7 +70,8 @@ ApplicationPhaseController::Phase ApplicationPhaseController::tick_menu(Phase ph
 			"[Application] loading failed; returning to main menu error=%d\n",
 			session.error_code());
 	#endif
-		session.stop();
+		if (session.stop() != FT_ERR_SUCCESS)
+			return (Phase::LOADING);
 		menu.show_main_menu();
 		return (Phase::MAIN_MENU);
 	}
@@ -110,7 +111,8 @@ ApplicationPhaseController::Phase ApplicationPhaseController::tick_in_game(Appli
 				"[Application] session failed; returning to main menu error=%d\n",
 				session.error_code());
 	#endif
-		session.stop();
+		if (session.stop() != FT_ERR_SUCCESS)
+			return (Phase::IN_GAME);
 		menu.show_main_menu();
 		window.set_cursor_visible(true);
 		return (Phase::MAIN_MENU);
@@ -132,7 +134,8 @@ ApplicationPhaseController::Phase ApplicationPhaseController::tick_in_game_setti
 	}
 	if (menu.wants_main_menu())
 	{
-		session.stop();
+		if (session.stop() != FT_ERR_SUCCESS)
+			return (Phase::IN_GAME_SETTINGS);
 		menu.show_main_menu();
 		menu.clear_flags();
 		window.set_cursor_visible(true);

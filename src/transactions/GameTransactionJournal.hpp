@@ -45,6 +45,9 @@ class GameTransactionJournal
 		bool *replayed_out) noexcept;
 	int32_t mark_committed(uint64_t scope_id, uint64_t request_id) noexcept;
 	int32_t mark_aborted(uint64_t scope_id, uint64_t request_id) noexcept;
+	/* Explicit operator retry only: reopen a terminal aborted operation after
+	 * its external preconditions have been repaired. */
+	int32_t retry_aborted(uint64_t scope_id, uint64_t request_id) noexcept;
 	int32_t find(uint64_t scope_id, uint64_t request_id,
 		Record *record_out) const noexcept;
 	/* Returns the highest-sequence retained record for this scope and action

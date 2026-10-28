@@ -58,6 +58,7 @@ static uint64_t regeneration_payload_read_u64(const uint8_t *payload,
 
 RegenerationCardSession::RegenerationCardSession() : engine_(), script_bridge_(),
 	play_cache_(), draw_cache_(), discard_cache_(), expiry_cache_(),
+	choice_cache_(),
 	card_import_cache_(),
 	card_export_cache_(), physical_card_instances_(),
 	highest_card_transfer_request_id_(0U),
@@ -843,13 +844,33 @@ int32_t RegenerationCardSession::seed_starter_deck(
 	uint32_t opening_hand_size, uint64_t shuffle_seed) noexcept
 {
 	uint32_t card_definition_id = 1U;
-	uint32_t starter_card_copies[RegenerationCardSession::STARTER_CARD_DEFINITION_COUNT]
+	const uint32_t starter_card_copies[RegenerationCardSession::STARTER_CARD_DEFINITION_COUNT]
 		= {4U, 4U, 2U, 2U, 2U, 4U, 2U};
 	uint32_t index;
+	uint32_t starter_deck_total = 0U;
+	uint32_t actual_deck_total = 0U;
+	uint32_t actual_card_copies[
+		RegenerationCardSession::STARTER_CARD_DEFINITION_COUNT] = {};
+	uint32_t actual_card_instance_ids[
+		RegenerationCardSession::STARTER_DECK_INSTANCE_COUNT] = {};
 	uint64_t initial_random_state;
 	card_game_deck_card card = {};
 	int32_t error_code;
 
+	index = 0U;
+	while (index < RegenerationCardSession::STARTER_CARD_DEFINITION_COUNT)
+	{
+		if (starter_card_copies[index] == 0U
+			|| starter_card_copies[index] > 4U
+			|| starter_deck_total > UINT32_MAX - starter_card_copies[index])
+			return (FT_ERR_CONFIGURATION);
+		starter_deck_total += starter_card_copies[index];
+		++index;
+	}
+	if (starter_deck_total
+		!= RegenerationCardSession::STARTER_DECK_INSTANCE_COUNT
+		|| opening_hand_size > starter_deck_total)
+		return (FT_ERR_CONFIGURATION);
 	error_code = this->engine_.set_random_seed(shuffle_seed);
 	while (card_definition_id
 		<= RegenerationCardSession::STARTER_CARD_DEFINITION_COUNT
@@ -864,6 +885,45 @@ int32_t RegenerationCardSession::seed_starter_deck(
 			++index;
 		}
 		++card_definition_id;
+	}
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = this->engine_.get_deck_count(
+			RegenerationCardSession::PLAYER_ID, &actual_deck_total);
+	if (error_code == FT_ERR_SUCCESS
+		&& actual_deck_total
+			!= RegenerationCardSession::STARTER_DECK_INSTANCE_COUNT)
+		error_code = FT_ERR_INVALID_STATE;
+	index = 0U;
+	while (error_code == FT_ERR_SUCCESS && index < actual_deck_total)
+	{
+		error_code = this->engine_.deck_inspect(
+			RegenerationCardSession::PLAYER_ID, index, &card);
+		if (error_code != FT_ERR_SUCCESS)
+			break ;
+		if (card.instance_id == 0U || card.card_id == 0U
+			|| card.card_id > RegenerationCardSession::STARTER_CARD_DEFINITION_COUNT)
+			error_code = FT_ERR_INVALID_STATE;
+		else
+		{
+			uint32_t prior_index = 0U;
+			while (prior_index < index
+				&& actual_card_instance_ids[prior_index] != card.instance_id)
+				++prior_index;
+			if (prior_index != index)
+				error_code = FT_ERR_ALREADY_EXISTS;
+			else
+				actual_card_instance_ids[index] = card.instance_id;
+			actual_card_copies[card.card_id - 1U] += 1U;
+		}
+		++index;
+	}
+	index = 0U;
+	while (error_code == FT_ERR_SUCCESS
+		&& index < RegenerationCardSession::STARTER_CARD_DEFINITION_COUNT)
+	{
+		if (actual_card_copies[index] != starter_card_copies[index])
+			error_code = FT_ERR_CONFIGURATION;
+		++index;
 	}
 	if (error_code == FT_ERR_SUCCESS)
 		error_code = this->engine_.shuffle_deck(
@@ -913,31 +973,32 @@ int32_t RegenerationCardSession::initialize(uint32_t opening_hand_size,
 	return (FT_ERR_SUCCESS);
 }
 
-int32_t RegenerationCardSession::deal_starting_hand(uint64_t request_id,
-	uint32_t opening_hand_count,
-	RegenerationCardActionResult *result_out) noexcept
+int32_t RegenerationCardSession::get_starting_hand_deal_identity(
+	uint64_t *request_id_out, uint32_t *opening_hand_count_out) const noexcept
 {
-	RegenerationCardActionResult result = {};
+	if (request_id_out == nullptr || opening_hand_count_out == nullptr
+		|| !this->initialized_)
+		return (FT_ERR_INVALID_ARGUMENT);
+	*request_id_out = this->starting_hand_request_id_;
+	*opening_hand_count_out = this->starting_hand_count_;
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t RegenerationCardSession::preflight_starting_hand_deal(
+	uint64_t request_id, uint32_t opening_hand_count) noexcept
+{
 	uint32_t hand_count = 0U;
 	uint32_t draw_count = 0U;
 	uint32_t pending_intent_count = 0U;
 	int32_t error_code;
 
-	if (!this->initialized_ || result_out == nullptr || request_id == 0U
+	if (!this->initialized_ || request_id == 0U
 		|| opening_hand_count < 4U || opening_hand_count > 7U)
 		return (FT_ERR_INVALID_ARGUMENT);
 	if (this->starting_hand_request_id_ != 0U)
-	{
-		if (this->starting_hand_request_id_ != request_id
-			|| this->starting_hand_count_ != opening_hand_count)
-			return (FT_ERR_INVALID_ARGUMENT);
-		result.request_id = request_id;
-		result.session_id = this->action_session_id_;
-		result.count = opening_hand_count;
-		result.replayed = true;
-		*result_out = result;
-		return (FT_ERR_SUCCESS);
-	}
+		return (this->starting_hand_request_id_ == request_id
+			&& this->starting_hand_count_ == opening_hand_count
+			? FT_ERR_SUCCESS : FT_ERR_INVALID_ARGUMENT);
 	if (!this->play_cache_.empty() || !this->draw_cache_.empty()
 		|| !this->discard_cache_.empty() || !this->card_import_cache_.empty()
 		|| !this->card_export_cache_.empty()
@@ -957,6 +1018,34 @@ int32_t RegenerationCardSession::deal_starting_hand(uint64_t request_id,
 		|| hand_count < 4U || opening_hand_count < hand_count
 		|| draw_count < opening_hand_count - hand_count)
 		return (FT_ERR_INVALID_OPERATION);
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t RegenerationCardSession::deal_starting_hand(uint64_t request_id,
+	uint32_t opening_hand_count,
+	RegenerationCardActionResult *result_out) noexcept
+{
+	RegenerationCardActionResult result = {};
+	uint32_t hand_count = 0U;
+	int32_t error_code = this->preflight_starting_hand_deal(request_id,
+		opening_hand_count);
+
+	if (result_out == nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
+	if (error_code != FT_ERR_SUCCESS)
+		return (error_code);
+	if (this->starting_hand_request_id_ != 0U)
+	{
+		result.request_id = request_id;
+		result.session_id = this->action_session_id_;
+		result.count = opening_hand_count;
+		result.replayed = true;
+		*result_out = result;
+		return (FT_ERR_SUCCESS);
+	}
+	error_code = this->engine_.get_hand_count(PLAYER_ID, &hand_count);
+	if (error_code != FT_ERR_SUCCESS)
+		return (error_code);
 	result.request_id = request_id;
 	result.session_id = this->action_session_id_;
 	result.count = opening_hand_count;
@@ -985,6 +1074,7 @@ int32_t RegenerationCardSession::destroy() noexcept
 	this->draw_cache_.clear();
 	this->discard_cache_.clear();
 	this->expiry_cache_.clear();
+	this->choice_cache_.clear();
 	this->card_import_cache_.clear();
 	this->card_export_cache_.clear();
 	this->physical_card_instances_.clear();
@@ -2281,7 +2371,8 @@ int32_t RegenerationCardSession::play_card(uint64_t request_id,
 	RegenerationPolicyIntent *intent_out,
 	uint32_t stabilizer_risk_basis_points,
 	uint32_t stabilizer_ordinal, const uint32_t *catalyst_options,
-	uint32_t catalyst_option_count) noexcept
+	uint32_t catalyst_option_count,
+	uint64_t authenticated_actor_id) noexcept
 {
 	std::map<uint64_t, CachedPlay>::iterator cached;
 	card_game_snapshot before_state = {};
@@ -2302,7 +2393,8 @@ int32_t RegenerationCardSession::play_card(uint64_t request_id,
 	cached = this->play_cache_.find(request_id);
 	if (cached != this->play_cache_.end())
 	{
-		if (cached->second.card_instance_id != card_instance_id
+		if (cached->second.authenticated_actor_id != authenticated_actor_id
+			|| cached->second.card_instance_id != card_instance_id
 			|| cached->second.choice.kind != choice.kind
 			|| cached->second.choice.value_primary != choice.value_primary
 			|| cached->second.choice.value_secondary != choice.value_secondary
@@ -2395,10 +2487,13 @@ int32_t RegenerationCardSession::play_card(uint64_t request_id,
 		|| this->discard_cache_.find(request_id)
 			!= this->discard_cache_.end()
 		|| this->expiry_cache_.find(request_id)
-			!= this->expiry_cache_.end())
+			!= this->expiry_cache_.end()
+		|| this->choice_cache_.find(request_id)
+			!= this->choice_cache_.end())
 		return (FT_ERR_INVALID_ARGUMENT);
 	if (this->play_cache_.size() + this->draw_cache_.size()
 		+ this->discard_cache_.size() + this->expiry_cache_.size()
+		+ this->choice_cache_.size()
 		>= RegenerationCardSession::MAXIMUM_PLAY_REQUESTS)
 		return (FT_ERR_FULL);
 	if (this->next_command_sequence_ == UINT64_MAX)
@@ -2411,6 +2506,7 @@ int32_t RegenerationCardSession::play_card(uint64_t request_id,
 	{
 		CachedPlay pending = {};
 
+		pending.authenticated_actor_id = authenticated_actor_id;
 		pending.card_instance_id = card_instance_id;
 		pending.choice = choice;
 		if (!this->play_cache_.emplace(request_id, pending).second)
@@ -2583,17 +2679,21 @@ int32_t RegenerationCardSession::resolve_expired_choices(
 	cached = this->expiry_cache_.find(request_id);
 	if (cached != this->expiry_cache_.end())
 	{
-		if (cached->second.authoritative_epoch != authoritative_epoch)
+		/* The caller cannot supply the epoch: it is read from the host clock.
+		 * A later-clock exact retry must replay the first accepted result. */
+		if (authoritative_epoch < cached->second.authoritative_epoch)
 			return (FT_ERR_INVALID_ARGUMENT);
 		*resolved_count_out = cached->second.resolved_count;
 		return (FT_ERR_SUCCESS);
 	}
 	if (this->play_cache_.find(request_id) != this->play_cache_.end()
 		|| this->draw_cache_.find(request_id) != this->draw_cache_.end()
-		|| this->discard_cache_.find(request_id) != this->discard_cache_.end())
+		|| this->discard_cache_.find(request_id) != this->discard_cache_.end()
+		|| this->choice_cache_.find(request_id) != this->choice_cache_.end())
 		return (FT_ERR_ALREADY_EXISTS);
 	if (this->play_cache_.size() + this->draw_cache_.size()
 		+ this->discard_cache_.size() + this->expiry_cache_.size()
+		+ this->choice_cache_.size()
 		>= MAXIMUM_PLAY_REQUESTS
 		|| this->next_command_sequence_ == UINT64_MAX)
 		return (FT_ERR_FULL);
@@ -2630,6 +2730,101 @@ int32_t RegenerationCardSession::resolve_expired_choices(
 	return (FT_ERR_SUCCESS);
 }
 
+int32_t RegenerationCardSession::choose_pending_option(
+	uint64_t authenticated_actor_id, uint64_t request_id,
+	uint32_t choice_id, uint32_t option_id, uint64_t authoritative_epoch,
+	RegenerationCardActionResult *result_out) noexcept
+{
+	auto cached = this->choice_cache_.find(request_id);
+	card_game_action action = {};
+	card_game_action_result action_result = {};
+	CachedChoice pending = {};
+	int32_t result;
+	if (!this->initialized_)
+		return (FT_ERR_INVALID_OPERATION);
+	if (authenticated_actor_id == 0U || request_id == 0U || choice_id == 0U
+		|| option_id == 0U || authoritative_epoch == 0U || result_out == nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
+	*result_out = {};
+	if (cached != this->choice_cache_.end())
+	{
+		if (cached->second.authenticated_actor_id != authenticated_actor_id
+			|| cached->second.choice_id != choice_id
+			|| cached->second.option_id != option_id
+			|| authoritative_epoch < cached->second.authoritative_epoch)
+			return (FT_ERR_INVALID_ARGUMENT);
+		*result_out = cached->second.result;
+		result_out->replayed = true;
+		return (FT_ERR_SUCCESS);
+	}
+	if (this->play_cache_.find(request_id) != this->play_cache_.end()
+		|| this->draw_cache_.find(request_id) != this->draw_cache_.end()
+		|| this->discard_cache_.find(request_id) != this->discard_cache_.end()
+		|| this->expiry_cache_.find(request_id) != this->expiry_cache_.end())
+		return (FT_ERR_ALREADY_EXISTS);
+	if (this->play_cache_.size() + this->draw_cache_.size()
+		+ this->discard_cache_.size() + this->expiry_cache_.size()
+		+ this->choice_cache_.size() >= MAXIMUM_PLAY_REQUESTS
+		|| this->next_command_sequence_ == UINT64_MAX)
+		return (FT_ERR_FULL);
+	pending.authenticated_actor_id = authenticated_actor_id;
+	pending.choice_id = choice_id;
+	pending.option_id = option_id;
+	pending.authoritative_epoch = authoritative_epoch;
+	try
+	{
+		if (!this->choice_cache_.emplace(request_id, pending).second)
+			return (FT_ERR_ALREADY_EXISTS);
+	}
+	catch (const std::bad_alloc &)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	action.schema_version = this->action_session_id_ != 0U ? 3U : 1U;
+	action.session_id = this->action_session_id_;
+	action.request_id = request_id;
+	action.command.command_sequence = this->next_command_sequence_;
+	action.command.player_id = RegenerationCardSession::PLAYER_ID;
+	action.command.type = CARD_GAME_INTENT_CHOOSE_OPTION;
+	action.command.card_id = choice_id;
+	action.command.target_instance = option_id;
+	action.command.authoritative_epoch = authoritative_epoch;
+	result = this->engine_.submit_host_action(action, &action_result, nullptr,
+		authoritative_epoch);
+	if (result != FT_ERR_SUCCESS)
+	{
+		this->choice_cache_.erase(request_id);
+		return (result);
+	}
+	pending.result.session_id = this->action_session_id_;
+	pending.result.request_id = request_id;
+	pending.result.command_sequence = this->next_command_sequence_;
+	pending.result.count = 1U;
+	pending.result.replayed = false;
+	auto committed = this->choice_cache_.find(request_id);
+	if (committed == this->choice_cache_.end())
+		return (FT_ERR_INVALID_STATE);
+	committed->second.result = pending.result;
+	++this->next_command_sequence_;
+	*result_out = pending.result;
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t RegenerationCardSession::query_expiry_result(uint64_t request_id,
+	bool *found_out, uint32_t *resolved_count_out) const noexcept
+{
+	if (!this->initialized_)
+		return (FT_ERR_INVALID_OPERATION);
+	if (request_id == 0U || found_out == nullptr
+		|| resolved_count_out == nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
+	const auto cached = this->expiry_cache_.find(request_id);
+	*found_out = cached != this->expiry_cache_.end();
+	*resolved_count_out = cached == this->expiry_cache_.end()
+		? 0U : cached->second.resolved_count;
+	return (FT_ERR_SUCCESS);
+}
+
 int32_t RegenerationCardSession::resolve_all_pending_choices_to_default(
 	uint32_t *resolved_count_out) noexcept
 {
@@ -2644,7 +2839,8 @@ int32_t RegenerationCardSession::resolve_all_pending_choices_to_default(
 int32_t RegenerationCardSession::draw_cards(uint64_t request_id,
 	uint64_t source_host_intent_sequence, uint32_t draw_count,
 	uint32_t required_discard_count,
-	RegenerationCardActionResult *result_out) noexcept
+	RegenerationCardActionResult *result_out,
+	uint64_t authenticated_actor_id) noexcept
 {
 	std::map<uint64_t, CachedDraw>::iterator cached;
 	std::map<uint64_t, CachedDraw>::const_iterator prior_draw;
@@ -2663,7 +2859,8 @@ int32_t RegenerationCardSession::draw_cards(uint64_t request_id,
 		|| draw_count > FT_CARD_GAME_MAX_DRAW_COUNT
 		|| required_discard_count > FT_CARD_GAME_MAX_REQUIRED_DISCARD_COUNT)
 		return (FT_ERR_INVALID_ARGUMENT);
-	if (this->expiry_cache_.find(request_id) != this->expiry_cache_.end())
+	if (this->expiry_cache_.find(request_id) != this->expiry_cache_.end()
+		|| this->choice_cache_.find(request_id) != this->choice_cache_.end())
 		return (FT_ERR_ALREADY_EXISTS);
 	cached = this->draw_cache_.find(request_id);
 	if (cached != this->draw_cache_.end())
@@ -2671,7 +2868,10 @@ int32_t RegenerationCardSession::draw_cards(uint64_t request_id,
 		if (cached->second.source_host_intent_sequence
 				!= source_host_intent_sequence
 			|| cached->second.draw_count != draw_count
-			|| cached->second.required_discard_count != required_discard_count)
+			|| cached->second.required_discard_count != required_discard_count
+			|| (authenticated_actor_id != 0U
+				&& cached->second.authenticated_actor_id
+					!= authenticated_actor_id))
 			return (FT_ERR_INVALID_ARGUMENT);
 		*result_out = cached->second.result;
 		result_out->replayed = true;
@@ -2695,6 +2895,7 @@ int32_t RegenerationCardSession::draw_cards(uint64_t request_id,
 		return (FT_ERR_INVALID_ARGUMENT);
 	if (this->play_cache_.size() + this->draw_cache_.size()
 		+ this->discard_cache_.size() + this->expiry_cache_.size()
+		+ this->choice_cache_.size()
 		>= RegenerationCardSession::MAXIMUM_PLAY_REQUESTS
 		|| this->next_command_sequence_ == UINT64_MAX)
 		return (FT_ERR_FULL);
@@ -2717,6 +2918,9 @@ int32_t RegenerationCardSession::draw_cards(uint64_t request_id,
 		++play;
 	if (play == this->play_cache_.end())
 		return (FT_ERR_PERMISSION_DENIED);
+	if (authenticated_actor_id != 0U
+		&& play->second.authenticated_actor_id != authenticated_actor_id)
+		return (FT_ERR_PERMISSION_DENIED);
 	if ((play->second.result.effect_kind
 			== REGENERATION_CARD_EFFECT_DOUBLE_DRAFT
 			&& (draw_count != 2U || required_discard_count != 1U))
@@ -2738,6 +2942,7 @@ int32_t RegenerationCardSession::draw_cards(uint64_t request_id,
 	try
 	{
 		CachedDraw pending = {};
+		pending.authenticated_actor_id = play->second.authenticated_actor_id;
 		pending.source_host_intent_sequence = source_host_intent_sequence;
 		pending.draw_count = draw_count;
 		pending.required_discard_count = required_discard_count;
@@ -2790,7 +2995,8 @@ int32_t RegenerationCardSession::draw_cards(uint64_t request_id,
 
 int32_t RegenerationCardSession::discard_hand_card(uint64_t request_id,
 	uint64_t source_draw_request_id, uint32_t card_instance_id,
-	RegenerationCardActionResult *result_out) noexcept
+	RegenerationCardActionResult *result_out,
+	uint64_t authenticated_actor_id) noexcept
 {
 	std::map<uint64_t, CachedDiscard>::iterator cached;
 	std::map<uint64_t, CachedDraw>::const_iterator draw;
@@ -2805,12 +3011,14 @@ int32_t RegenerationCardSession::discard_hand_card(uint64_t request_id,
 	if (result_out == nullptr || request_id == 0U
 		|| source_draw_request_id == 0U || card_instance_id == 0U)
 		return (FT_ERR_INVALID_ARGUMENT);
-	if (this->expiry_cache_.find(request_id) != this->expiry_cache_.end())
+	if (this->expiry_cache_.find(request_id) != this->expiry_cache_.end()
+		|| this->choice_cache_.find(request_id) != this->choice_cache_.end())
 		return (FT_ERR_ALREADY_EXISTS);
 	cached = this->discard_cache_.find(request_id);
 	if (cached != this->discard_cache_.end())
 	{
-		if (cached->second.source_draw_request_id != source_draw_request_id
+		if (cached->second.authenticated_actor_id != authenticated_actor_id
+			|| cached->second.source_draw_request_id != source_draw_request_id
 			|| cached->second.card_instance_id != card_instance_id)
 			return (FT_ERR_INVALID_ARGUMENT);
 		*result_out = cached->second.result;
@@ -2819,10 +3027,12 @@ int32_t RegenerationCardSession::discard_hand_card(uint64_t request_id,
 	}
 	if (this->play_cache_.find(request_id) != this->play_cache_.end()
 		|| this->draw_cache_.find(request_id) != this->draw_cache_.end()
-		|| this->expiry_cache_.find(request_id) != this->expiry_cache_.end())
+		|| this->expiry_cache_.find(request_id) != this->expiry_cache_.end()
+		|| this->choice_cache_.find(request_id) != this->choice_cache_.end())
 		return (FT_ERR_INVALID_ARGUMENT);
 	if (this->play_cache_.size() + this->draw_cache_.size()
 		+ this->discard_cache_.size() + this->expiry_cache_.size()
+		+ this->choice_cache_.size()
 		>= RegenerationCardSession::MAXIMUM_PLAY_REQUESTS
 		|| this->next_command_sequence_ == UINT64_MAX)
 		return (FT_ERR_FULL);
@@ -2834,6 +3044,7 @@ int32_t RegenerationCardSession::discard_hand_card(uint64_t request_id,
 		return (FT_ERR_INVALID_OPERATION);
 	draw = this->draw_cache_.find(source_draw_request_id);
 	if (draw == this->draw_cache_.end()
+		|| draw->second.authenticated_actor_id != authenticated_actor_id
 		|| draw->second.required_discard_count == 0U)
 		return (FT_ERR_PERMISSION_DENIED);
 	if (this->pending_required_discard_count_ == 0U)
@@ -2841,6 +3052,7 @@ int32_t RegenerationCardSession::discard_hand_card(uint64_t request_id,
 	try
 	{
 		CachedDiscard pending = {};
+		pending.authenticated_actor_id = authenticated_actor_id;
 		pending.source_draw_request_id = source_draw_request_id;
 		pending.card_instance_id = card_instance_id;
 		if (!this->discard_cache_.emplace(request_id, pending).second)

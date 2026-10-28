@@ -27,6 +27,19 @@ class WorldRevisionManager
 		int32_t chunk_x;
 		int32_t chunk_z;
 	};
+	struct RegenerationChunkOutcome
+	{
+		int32_t chunk_x;
+		int32_t chunk_z;
+		int32_t error_code;
+		bool skipped;
+	};
+	struct CompletedChunkFeatureAssignment
+	{
+		int32_t chunk_x;
+		int32_t chunk_z;
+		std::vector<WorldGenerationPipeline::GenerationFeaturePlan> plans;
+	};
 
 	World &world_;
 	bool						pending_;
@@ -37,6 +50,7 @@ class WorldRevisionManager
 	WorldRevisionCostPolicy cost_policy_;
 	bool cost_policy_configured_;
 	bool barriers_active_;
+	bool generation_requested_ = false;
 	uint32_t					stage_mask_;
 	int32_t						mode_;
 	voxel_generation_config	config_;
@@ -48,13 +62,28 @@ class WorldRevisionManager
 	int32_t biome_weight_adjustments_[VOXEL_MAX_CUSTOM_BIOMES];
 	bool base_biome_selector_captured_;
 	std::vector<RevisionChunk> selected_;
+	std::vector<RevisionChunk> published_chunks_;
+	std::vector<RegenerationChunkOutcome> failed_chunks_;
+	uint32_t completed_revision_id_;
+	std::vector<RevisionChunk> completed_selected_chunks_;
+	std::vector<RevisionChunk> completed_published_chunks_;
+	std::vector<RegenerationChunkOutcome> completed_chunk_outcomes_;
+	std::vector<CompletedChunkFeatureAssignment> pending_feature_assignments_;
+	std::vector<CompletedChunkFeatureAssignment> completed_feature_assignments_;
 	std::vector<RevisionChunk> restored_selected_;
+	std::vector<RevisionChunk> restored_published_chunks_;
+	std::vector<RegenerationChunkOutcome> restored_failed_chunks_;
 	uint64_t restored_selection_revision_;
 	uint64_t restored_deadline_epoch_;
 	uint64_t decision_deadline_epoch_;
+	uint64_t finish_previous_deadline_epoch_;
 	int32_t restored_mode_;
 	uint32_t restored_stage_mask_;
 	bool restored_barrier_state_;
+	bool restored_generation_requested_ = false;
+	bool restored_replaying_completed_revision_ = false;
+	bool replaying_completed_revision_ = false;
+	bool completed_revision_rules_pending_ = false;
 	bool lifecycle_restore_pending_;
 	std::vector<RevisionChunk> rules_target_chunks_;
 	std::vector<WorldGenerationPipeline::GenerationFeaturePlan> feature_plans_;
@@ -84,6 +113,15 @@ class WorldRevisionManager
 	int32_t cancel() noexcept;
 	int32_t set_barriers_active(bool active) noexcept;
 	bool barriers_active() const noexcept;
+	int32_t set_generation_requested(bool requested) noexcept;
+	bool generation_requested() const noexcept;
+	bool replaying_completed_revision() const noexcept;
+	bool completed_revision_rules_pending() const noexcept;
+	int32_t rehydrate_completed_revision_rules(
+		const RegenerationWorldRules &rules) noexcept;
+	bool has_published_chunk(int32_t chunk_x, int32_t chunk_z) const noexcept;
+	int32_t set_chunk_published(int32_t chunk_x, int32_t chunk_z,
+		bool published) noexcept;
 	bool barrier_blocks_chunk(int32_t chunk_x, int32_t chunk_z) const noexcept;
 	uint32_t identifier() const noexcept;
 	uint32_t stage_mask() const noexcept;
@@ -91,6 +129,21 @@ class WorldRevisionManager
 	bool pending() const noexcept;
 	bool regenerating() const noexcept;
 	std::size_t selected_count() const noexcept;
+	std::size_t regeneration_job_count() const noexcept;
+	std::size_t completed_regeneration_job_count() const noexcept;
+	int32_t regenerated_chunk_count() const noexcept;
+	int32_t skipped_chunk_count() const noexcept;
+	int32_t regeneration_error() const noexcept;
+	int32_t get_regeneration_chunk_outcome(int32_t chunk_x, int32_t chunk_z,
+		RegenerationChunkOutcome *outcome_out) const noexcept;
+	int32_t copy_completed_chunk_feature_plans(int32_t chunk_x,
+		int32_t chunk_z,
+	std::vector<WorldGenerationPipeline::GenerationFeaturePlan>
+		&plans_out) const noexcept;
+	int32_t copy_status_chunks(std::vector<RevisionChunk> &chunks_out,
+		uint32_t *revision_id_out, bool *completed_out) const noexcept;
+	bool status_chunk_is_published(int32_t chunk_x,
+		int32_t chunk_z) const noexcept;
 	int32_t feature_reservation_upper_bound(
 		uint32_t *count_out) const noexcept;
 	int32_t copy_selected_chunks(
@@ -164,15 +217,21 @@ class WorldRevisionManager
 	int32_t restore_committed_revision(
 		const RegenerationWorldRules &rules) noexcept;
 	int32_t set_decision_deadline_epoch(uint64_t deadline_epoch) noexcept;
+	int32_t clear_decision_deadline_epoch() noexcept;
 	uint64_t decision_deadline_epoch() const noexcept;
 
 	bool is_regenerating_for(uint64_t relevance_epoch) const noexcept;
 	void record_regeneration_completed() noexcept;
 	void record_regeneration_error(int32_t error_code) noexcept;
 	void record_regeneration_skipped() noexcept;
+	int32_t record_regeneration_chunk_error(int32_t chunk_x, int32_t chunk_z,
+		int32_t error_code) noexcept;
+	int32_t record_regeneration_chunk_skipped(int32_t chunk_x,
+		int32_t chunk_z) noexcept;
 	void record_regeneration_success() noexcept;
 	bool all_regeneration_jobs_done() const noexcept;
 	int32_t finish_regeneration() noexcept;
+	void rollback_failed_regeneration_checkpoint() noexcept;
 	int32_t start_regeneration() noexcept;
 	int32_t retry_failed_regeneration() noexcept;
 	int32_t regenerate_selected_chunks(int32_t *regenerated_count,

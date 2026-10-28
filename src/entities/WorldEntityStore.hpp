@@ -15,8 +15,9 @@ struct WorldEntitySnapshot
 	/* Nonzero only for entities that represent a single physical inventory
 	 * item, such as a placed boat. */
 	uint64_t item_instance_id;
-	/* Authenticated owner for player-placed entities; zero denotes legacy or
-	 * host-owned entities. */
+	/* Authenticated owner or initiating actor; used for placed entities,
+	 * projectile attribution, and last-hit loot ownership. Zero denotes
+	 * host-owned or legacy entities. */
 	uint64_t owner_actor_id;
 };
 
@@ -35,6 +36,10 @@ class WorldEntityStore
 	int32_t destroy() noexcept;
 	bool is_initialized() const noexcept;
 	int32_t spawn(const EntityState &state, uint32_t *entity_id_out) noexcept;
+	/* Nonzero actor ownership is accepted for server-launched projectiles and
+	 * retained in the entity snapshot for attributed loot delivery. */
+	int32_t spawn(const EntityState &state, uint64_t owner_actor_id,
+		uint32_t *entity_id_out) noexcept;
 	int32_t spawn_item(const EntityState &state, uint64_t item_instance_id,
 		uint32_t *entity_id_out) noexcept;
 	int32_t spawn_item(const EntityState &state, uint64_t item_instance_id,
@@ -50,6 +55,11 @@ class WorldEntityStore
 	 * the entity DEAD; the updated value is returned atomically. */
 	int32_t apply_damage(uint32_t entity_id, uint64_t expected_revision,
 		int32_t damage, WorldEntitySnapshot *snapshot_out) noexcept;
+	/* Records the authenticated actor who delivered this hit for loot and
+	 * recovery attribution. The legacy overload records host ownership (zero). */
+	int32_t apply_damage(uint32_t entity_id, uint64_t expected_revision,
+		int32_t damage, uint64_t source_actor_id,
+		WorldEntitySnapshot *snapshot_out) noexcept;
 	/* Compensates a transaction only if the entity still has the revision
 	 * produced by that transaction; the prior revision is restored exactly. */
 	int32_t rollback_update(const WorldEntitySnapshot &prior_snapshot,

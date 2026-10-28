@@ -1,6 +1,7 @@
 #include "../../src/world/World.hpp"
 #include "../../src/cards/RegenerationWorldRules.hpp"
 #include <limits>
+#include <new>
 
 int32_t World::begin_world_revision(const voxel_generation_config &config,
 	RegenerationMode mode)
@@ -40,6 +41,13 @@ World::WorldRevision World::world_revision() const
 	result.regenerating = this->revision_manager.regenerating();
 	result.selected_count = this->revision_manager.selected_count();
 	result.manually_protected_count = this->revision_manager.manually_protected_count();
+	result.completed_jobs =
+		this->revision_manager.completed_regeneration_job_count();
+	result.total_jobs = this->revision_manager.regeneration_job_count();
+	result.regenerated_chunks =
+		this->revision_manager.regenerated_chunk_count();
+	result.skipped_chunks = this->revision_manager.skipped_chunk_count();
+	result.regeneration_error = this->revision_manager.regeneration_error();
 	return (result);
 }
 
@@ -187,6 +195,11 @@ int32_t World::set_revision_decision_deadline_epoch(
 		deadline_epoch));
 }
 
+int32_t World::clear_revision_decision_deadline_epoch() noexcept
+{
+	return (this->revision_manager.clear_decision_deadline_epoch());
+}
+
 uint64_t World::revision_decision_deadline_epoch() const noexcept
 {
 	return (this->revision_manager.decision_deadline_epoch());
@@ -275,44 +288,85 @@ World::ChunkRevisionState World::revision_state(int32_t chunk_x,
 				chunk_z)));
 }
 
+bool World::revision_chunk_is_published(int32_t chunk_x,
+	int32_t chunk_z) const noexcept
+{
+	return (this->revision_manager.has_published_chunk(chunk_x, chunk_z));
+}
+
 int32_t World::build_revision_preview(int32_t preview_center_x,
 	int32_t preview_center_z, int32_t radius,
 	std::vector<RevisionPreviewEntry> &preview) const
 {
+	std::vector<RevisionPreviewEntry> staged;
 	RevisionPreviewEntry entry;
 
 	if (radius < 0 || radius > WorldCoordinates::CACHE_CHUNK_RADIUS)
 		return (FT_ERR_INVALID_ARGUMENT);
-	preview.clear();
-	preview.reserve(static_cast<size_t>((radius * 2 + 1) * (radius * 2 + 1)));
-	for (int32_t z = -radius; z <= radius; ++z)
+	try
 	{
-		for (int32_t x = -radius; x <= radius; ++x)
+		staged.reserve(static_cast<size_t>((radius * 2 + 1)
+			* (radius * 2 + 1)));
+		for (int32_t z = -radius; z <= radius; ++z)
 		{
-			if (x * x + z * z > radius * radius)
-				continue ;
-			const int64_t chunk_x = static_cast<int64_t>(preview_center_x) + x;
-			const int64_t chunk_z = static_cast<int64_t>(preview_center_z) + z;
-			if (chunk_x < std::numeric_limits<int32_t>::min()
-				|| chunk_x > std::numeric_limits<int32_t>::max()
-				|| chunk_z < std::numeric_limits<int32_t>::min()
-				|| chunk_z > std::numeric_limits<int32_t>::max())
-				continue ;
-			entry.chunk_x = static_cast<int32_t>(chunk_x);
-			entry.chunk_z = static_cast<int32_t>(chunk_z);
-			entry.state = this->revision_state(entry.chunk_x, entry.chunk_z);
-			if (this->get_revision_protection_info(entry.chunk_x,
-					entry.chunk_z, &entry.protection_info) != FT_ERR_SUCCESS)
-				return (FT_ERR_INVALID_STATE);
-			preview.push_back(entry);
+			for (int32_t x = -radius; x <= radius; ++x)
+			{
+				if (x * x + z * z > radius * radius)
+					continue ;
+				const int64_t chunk_x = static_cast<int64_t>(preview_center_x) + x;
+				const int64_t chunk_z = static_cast<int64_t>(preview_center_z) + z;
+				if (chunk_x < std::numeric_limits<int32_t>::min()
+					|| chunk_x > std::numeric_limits<int32_t>::max()
+					|| chunk_z < std::numeric_limits<int32_t>::min()
+					|| chunk_z > std::numeric_limits<int32_t>::max())
+					continue ;
+				entry.chunk_x = static_cast<int32_t>(chunk_x);
+				entry.chunk_z = static_cast<int32_t>(chunk_z);
+				entry.state = this->revision_state(entry.chunk_x, entry.chunk_z);
+				if (this->get_revision_protection_info(entry.chunk_x,
+						entry.chunk_z, &entry.protection_info) != FT_ERR_SUCCESS)
+					return (FT_ERR_INVALID_STATE);
+				staged.push_back(entry);
+			}
 		}
 	}
+	catch (const std::bad_alloc &)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	preview.swap(staged);
 	return (FT_ERR_SUCCESS);
 }
 
 int32_t World::start_revision_regeneration()
 {
 	return (this->revision_manager.start_regeneration());
+}
+
+int32_t World::set_revision_generation_requested(bool requested) noexcept
+{
+	return (this->revision_manager.set_generation_requested(requested));
+}
+
+bool World::revision_generation_requested() const noexcept
+{
+	return (this->revision_manager.generation_requested());
+}
+
+bool World::revision_replaying_completed_generation() const noexcept
+{
+	return (this->revision_manager.replaying_completed_revision());
+}
+
+bool World::revision_completed_rules_pending() const noexcept
+{
+	return (this->revision_manager.completed_revision_rules_pending());
+}
+
+int32_t World::rehydrate_completed_revision_rules(
+	const RegenerationWorldRules &rules) noexcept
+{
+	return (this->revision_manager.rehydrate_completed_revision_rules(rules));
 }
 
 int32_t World::retry_failed_revision_regeneration()

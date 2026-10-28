@@ -106,7 +106,8 @@ int32_t WorldChunkLoader::setup_chunk_coordinates(WorldChunk *world_chunk,
 }
 
 int32_t WorldChunkLoader::init_chunk_data(WorldChunk *world_chunk,
-	const char *seed, const voxel_generation_config *config)
+	const char *seed, const voxel_generation_config *config,
+	WorldTerrainChunkStore *terrain_store)
 {
 	int32_t	err;
 
@@ -119,12 +120,24 @@ int32_t WorldChunkLoader::init_chunk_data(WorldChunk *world_chunk,
 		(void)world_chunk->chunk.destroy();
 		return (err);
 	}
-	if (config != nullptr)
-		err = voxel_generate_chunk(world_chunk->chunk, world_chunk->world_x,
-				world_chunk->world_z, seed, *config);
+	if (terrain_store != nullptr && terrain_store->is_initialized())
+		err = terrain_store->load_chunk(world_chunk->chunk_x,
+				world_chunk->chunk_z, world_chunk->chunk);
 	else
-		err = voxel_generate_chunk(world_chunk->chunk, world_chunk->world_x,
-				world_chunk->world_z, seed);
+		err = FT_ERR_NOT_FOUND;
+	if (err == FT_ERR_NOT_FOUND)
+	{
+		if (config != nullptr)
+			err = voxel_generate_chunk(world_chunk->chunk, world_chunk->world_x,
+					world_chunk->world_z, seed, *config);
+		else
+			err = voxel_generate_chunk(world_chunk->chunk, world_chunk->world_x,
+					world_chunk->world_z, seed);
+		if (err == FT_ERR_SUCCESS && terrain_store != nullptr
+			&& terrain_store->is_initialized())
+			err = terrain_store->save_chunk(world_chunk->chunk_x,
+					world_chunk->chunk_z, world_chunk->chunk);
+	}
 	if (err != FT_ERR_SUCCESS)
 	{
 		(void)chunk_mesh_destroy(world_chunk->mesh);
@@ -198,15 +211,50 @@ int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk,
 }
 
 int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk,
+	int32_t chunk_x, int32_t chunk_z, const char *seed,
+	WorldTerrainChunkStore *terrain_store)
+{
+	int32_t err = setup_chunk_coordinates(world_chunk, chunk_x, chunk_z);
+	if (err == FT_ERR_SUCCESS)
+		err = init_chunk_data(world_chunk, seed, nullptr, terrain_store);
+	if (err == FT_ERR_SUCCESS)
+		err = voxel_light_build_chunk_local(world_chunk->light,
+			world_chunk->world_x, world_chunk->world_z, lookup_local_light_block,
+			&world_chunk->chunk);
+	if (err == FT_ERR_SUCCESS)
+		err = chunk_mesh_generate_from_chunk_with_light(world_chunk->mesh,
+			world_chunk->chunk, world_chunk->light);
+	if (err != FT_ERR_SUCCESS)
+	{
+		(void)chunk_mesh_destroy(world_chunk->mesh);
+		(void)world_chunk->chunk.destroy();
+		return (err);
+	}
+	world_chunk->initialized = true;
+	world_chunk->mesh_revision += 1U;
+	world_chunk->voxel_revision += 1U;
+	world_chunk->light_revision += 1U;
+	world_chunk->content_version = 1U;
+	world_chunk->light_version = 1U;
+	world_chunk->light_input_version = 1U;
+	world_chunk->computed_light_input_version = 1U;
+	world_chunk->light_ready_for_render = true;
+	world_chunk->clear_pending_remesh_request();
+	world_chunk->mesh_dirty = false;
+	err = world_chunk->publish_read_state();
+	return (err);
+}
+
+int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk,
 	int32_t chunk_x, int32_t chunk_z, const char *seed, WorldChunk *chunks,
-	int32_t chunk_count)
+	int32_t chunk_count, WorldTerrainChunkStore *terrain_store)
 {
 	int32_t	err;
 
 	err = setup_chunk_coordinates(world_chunk, chunk_x, chunk_z);
 	if (err != FT_ERR_SUCCESS)
 		return (err);
-	err = init_chunk_data(world_chunk, seed);
+	err = init_chunk_data(world_chunk, seed, nullptr, terrain_store);
 	if (err != FT_ERR_SUCCESS)
 		return (err);
 	err = build_mesh_with_neighbors(world_chunk, chunk_x, chunk_z, chunks,
@@ -232,14 +280,15 @@ int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk,
 
 int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk,
 	int32_t chunk_x, int32_t chunk_z, const char *seed, WorldChunk *chunks,
-	int32_t chunk_count, const voxel_generation_config &config)
+	int32_t chunk_count, const voxel_generation_config &config,
+	WorldTerrainChunkStore *terrain_store)
 {
 	int32_t	err;
 
 	err = setup_chunk_coordinates(world_chunk, chunk_x, chunk_z);
 	if (err != FT_ERR_SUCCESS)
 		return (err);
-	err = init_chunk_data(world_chunk, seed, &config);
+	err = init_chunk_data(world_chunk, seed, &config, terrain_store);
 	if (err != FT_ERR_SUCCESS)
 		return (err);
 	err = build_mesh_with_neighbors(world_chunk, chunk_x, chunk_z, chunks,

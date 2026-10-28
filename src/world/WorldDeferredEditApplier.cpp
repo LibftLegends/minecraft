@@ -45,6 +45,7 @@ int32_t WorldDeferredEditApplier::apply_single_edit(
 	int32_t local_x;
 	int32_t local_z;
 	WorldChunk *chunk;
+	uint32_t previous_block_id;
 
 	chunk_x = WorldCoordinates::floor_divide(edit.world_x,
 			GAME_VOXEL_CHUNK_WIDTH);
@@ -60,12 +61,39 @@ int32_t WorldDeferredEditApplier::apply_single_edit(
 			GAME_VOXEL_CHUNK_WIDTH);
 	local_z = WorldCoordinates::positive_modulo(edit.world_z,
 			GAME_VOXEL_CHUNK_DEPTH);
+	if (chunk->chunk.read_block(local_x, edit.world_y, local_z,
+			&previous_block_id) != FT_ERR_SUCCESS)
+		return (FT_ERR_INVALID_OPERATION);
 	if (chunk->chunk.write_generated_block(local_x, edit.world_y, local_z,
 			edit.block_id) != FT_ERR_SUCCESS)
 		return (FT_ERR_INVALID_OPERATION);
 	chunk->mark_content_changed();
-	if (chunk->publish_read_state() != FT_ERR_SUCCESS)
-		return (FT_ERR_NO_MEMORY);
+	int32_t publish_error = chunk->publish_read_state();
+	if (publish_error != FT_ERR_SUCCESS)
+	{
+		if (chunk->chunk.write_generated_block(local_x, edit.world_y, local_z,
+				previous_block_id) != FT_ERR_SUCCESS)
+			return (FT_ERR_INVALID_STATE);
+		chunk->mark_content_changed();
+		if (chunk->publish_read_state() != FT_ERR_SUCCESS)
+			return (FT_ERR_INVALID_STATE);
+		return (publish_error);
+	}
+	if (world.terrain_chunk_store().is_initialized())
+	{
+		const int32_t save_error = world.terrain_chunk_store().save_chunk(
+			chunk_x, chunk_z, chunk->chunk);
+		if (save_error != FT_ERR_SUCCESS)
+		{
+			if (chunk->chunk.write_generated_block(local_x, edit.world_y,
+					local_z, previous_block_id) != FT_ERR_SUCCESS)
+				return (FT_ERR_INVALID_STATE);
+			chunk->mark_content_changed();
+			if (chunk->publish_read_state() != FT_ERR_SUCCESS)
+				return (FT_ERR_INVALID_STATE);
+			return (save_error);
+		}
+	}
 	/* A deferred edit can change both the edited chunk's lighting and the
 	 * border faces of every adjacent chunk.  Updating only the edited chunk
 	 * leaves a neighboring mesh with the old border occupancy, which can make

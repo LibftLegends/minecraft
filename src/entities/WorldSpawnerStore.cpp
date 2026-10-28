@@ -1,4 +1,6 @@
 #include "WorldSpawnerStore.hpp"
+#include "../world/World.hpp"
+#include "../coordinates/WorldCoordinates.hpp"
 
 #include "../../Libft/Modules/Errno/errno.hpp"
 #include <algorithm>
@@ -6,6 +8,24 @@
 #include <cstring>
 #include <limits>
 #include <new>
+
+static bool world_spawner_position_in_barrier(const World *world,
+	double x, double z) noexcept
+{
+	if (world == nullptr || !world->revision_barriers_active())
+		return (false);
+	if (!std::isfinite(x) || !std::isfinite(z)
+		|| x <= static_cast<double>(std::numeric_limits<int32_t>::min())
+		|| x >= static_cast<double>(std::numeric_limits<int32_t>::max())
+		|| z <= static_cast<double>(std::numeric_limits<int32_t>::min())
+		|| z >= static_cast<double>(std::numeric_limits<int32_t>::max()))
+		return (true);
+	const int32_t chunk_x = WorldCoordinates::floor_divide(
+		static_cast<int32_t>(std::floor(x)), GAME_VOXEL_CHUNK_WIDTH);
+	const int32_t chunk_z = WorldCoordinates::floor_divide(
+		static_cast<int32_t>(std::floor(z)), GAME_VOXEL_CHUNK_DEPTH);
+	return (world->revision_barrier_blocks_chunk(chunk_x, chunk_z));
+}
 #include <set>
 
 namespace
@@ -247,7 +267,7 @@ int32_t WorldSpawnerStore::set_active(uint32_t spawner_id,
 int32_t WorldSpawnerStore::tick(uint64_t server_tick,
 	WorldEntityStore &entities,
 	std::vector<WorldSpawnerDeath> &deaths_out,
-	bool *state_changed_out) noexcept
+	bool *state_changed_out, const World *world) noexcept
 {
 	std::vector<WorldSpawnerDeath> staged_deaths;
 	bool state_changed = false;
@@ -294,14 +314,18 @@ int32_t WorldSpawnerStore::tick(uint64_t server_tick,
 				if (entity_result != FT_ERR_SUCCESS
 					&& entity_result != FT_ERR_NOT_FOUND)
 					return (entity_result);
-				staged_deaths.push_back({pair.first, entity_id,
-					entry.definition.loot_table_id,
-					entity_result == FT_ERR_SUCCESS
-						? dead_entity.state.position_x : entry.definition.x,
-					entity_result == FT_ERR_SUCCESS
-						? dead_entity.state.position_y : entry.definition.y,
-					entity_result == FT_ERR_SUCCESS
-						? dead_entity.state.position_z : entry.definition.z});
+				const double death_x = entity_result == FT_ERR_SUCCESS
+					? dead_entity.state.position_x : entry.definition.x;
+				const double death_y = entity_result == FT_ERR_SUCCESS
+					? dead_entity.state.position_y : entry.definition.y;
+				const double death_z = entity_result == FT_ERR_SUCCESS
+					? dead_entity.state.position_z : entry.definition.z;
+				if (!world_spawner_position_in_barrier(world, death_x, death_z))
+					staged_deaths.push_back({pair.first, entity_id,
+						entry.definition.loot_table_id,
+						entity_result == FT_ERR_SUCCESS
+							? dead_entity.owner_actor_id : 0U,
+						death_x, death_y, death_z});
 			}
 		}
 	}
@@ -313,6 +337,8 @@ int32_t WorldSpawnerStore::tick(uint64_t server_tick,
 	{
 		Entry &entry = pair.second;
 		if (!entry.active || server_tick < entry.next_spawn_tick
+			|| world_spawner_position_in_barrier(world, entry.definition.x,
+				entry.definition.z)
 			|| entry.alive_entity_ids.size() + entry.pending_deaths.size()
 				>= entry.definition.maximum_alive)
 			continue ;
@@ -363,6 +389,28 @@ int32_t WorldSpawnerStore::acknowledge_death(uint32_t spawner_id,
 	if (death == entry->second.pending_deaths.end())
 		return (FT_ERR_NOT_FOUND);
 	entry->second.pending_deaths.erase(death);
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t WorldSpawnerStore::is_entity_tracked(uint32_t entity_id,
+	bool *tracked_out) const noexcept
+{
+	if (entity_id == 0U || tracked_out == nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
+	std::lock_guard<std::mutex> lock(this->mutex_);
+	if (!this->initialized_)
+		return (FT_ERR_NOT_INITIALISED);
+	for (const auto &pair : this->entries_)
+	{
+		const Entry &entry = pair.second;
+		if (contains_id(entry.alive_entity_ids, entity_id)
+			|| contains_id(entry.pending_deaths, entity_id))
+		{
+			*tracked_out = true;
+			return (FT_ERR_SUCCESS);
+		}
+	}
+	*tracked_out = false;
 	return (FT_ERR_SUCCESS);
 }
 

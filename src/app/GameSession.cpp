@@ -18,15 +18,18 @@
 #include "../../src/world/WorldRevisionChunkSet.hpp"
 #include "../../src/network/ProtocolBoatMoveIntentMessage.hpp"
 #include "../../src/network/ProtocolBoatMoveResultMessage.hpp"
+#include "../../src/coordinates/WorldCoordinates.hpp"
 #include "../../src/diagnostics/RuntimeAnalytics.hpp"
 #include "../../Libft/Modules/Encryption/encryption.hpp"
 #include "../../Libft/Modules/File/file_utils.hpp"
+#include "../../Libft/Modules/RNG/rng.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <cmath>
 #include <cstring>
 #include <limits>
 #include <new>
+#include <utility>
 #include <vector>
 #if defined(__APPLE__)
 # include <mach/mach.h>
@@ -38,10 +41,128 @@ const char *GameSession::BIOME_NAMES[5] = {"PLAINS", "HILLS", "DESERT", "SNOW", 
 namespace
 {
 	static const int32_t PLAYER_INITIAL_HIT_POINTS = 100;
+	struct GameSessionWorldRegistryEntry
+	{
+		uint8_t world_id[32];
+	};
+	static std::mutex game_session_world_registry_mutex;
+	static std::vector<GameSessionWorldRegistryEntry>
+		game_session_active_worlds;
+	static std::vector<GameSessionWorldRegistryEntry>
+		game_session_maintenance_worlds;
+
+	static int32_t game_session_register_world(const uint8_t world_id[32]) noexcept
+	{
+		if (world_id == nullptr)
+			return (FT_ERR_INVALID_ARGUMENT);
+		std::lock_guard<std::mutex> lock(game_session_world_registry_mutex);
+		for (const GameSessionWorldRegistryEntry &entry
+			: game_session_maintenance_worlds)
+			if (std::memcmp(entry.world_id, world_id, 32U) == 0)
+				return (FT_ERR_INVALID_STATE);
+		for (const GameSessionWorldRegistryEntry &entry
+			: game_session_active_worlds)
+			if (std::memcmp(entry.world_id, world_id, 32U) == 0)
+				return (FT_ERR_ALREADY_EXISTS);
+		GameSessionWorldRegistryEntry entry = {};
+		std::memcpy(entry.world_id, world_id, 32U);
+		try
+		{
+			game_session_active_worlds.push_back(entry);
+		}
+		catch (const std::bad_alloc &)
+		{
+			return (FT_ERR_NO_MEMORY);
+		}
+		return (FT_ERR_SUCCESS);
+	}
+
+	static int32_t game_session_unregister_world(
+		const uint8_t world_id[32]) noexcept
+	{
+		if (world_id == nullptr)
+			return (FT_ERR_INVALID_ARGUMENT);
+		std::lock_guard<std::mutex> lock(game_session_world_registry_mutex);
+		for (std::vector<GameSessionWorldRegistryEntry>::iterator it =
+			game_session_active_worlds.begin();
+			it != game_session_active_worlds.end(); ++it)
+			if (std::memcmp(it->world_id, world_id, 32U) == 0)
+			{
+				game_session_active_worlds.erase(it);
+				return (FT_ERR_SUCCESS);
+			}
+		return (FT_ERR_NOT_FOUND);
+	}
+
+	class GameSessionWorldReservationGuard
+	{
+	  public:
+		explicit GameSessionWorldReservationGuard(
+			const uint8_t world_id[32]) noexcept
+			: result_(game_session_register_world(world_id)), committed_(false)
+		{
+			std::memcpy(this->world_id_, world_id, 32U);
+		}
+		~GameSessionWorldReservationGuard()
+		{
+			if (this->result_ == FT_ERR_SUCCESS && !this->committed_)
+				(void)game_session_unregister_world(this->world_id_);
+		}
+		int32_t result() const noexcept { return (this->result_); }
+		void commit() noexcept { this->committed_ = true; }
+
+	  private:
+		uint8_t world_id_[32];
+		int32_t result_;
+		bool committed_;
+	};
+	static int32_t game_session_validate_revision_actor_ids(
+		const std::vector<uint64_t> &actor_ids) noexcept
+	{
+		std::vector<uint64_t> sorted;
+		try
+		{
+			sorted = actor_ids;
+		}
+		catch (const std::bad_alloc &)
+		{
+			return (FT_ERR_NO_MEMORY);
+		}
+		for (uint64_t actor_id : sorted)
+		{
+			if (actor_id == 0U)
+				return (FT_ERR_INVALID_STATE);
+		}
+		std::sort(sorted.begin(), sorted.end());
+		if (std::adjacent_find(sorted.begin(), sorted.end()) != sorted.end())
+			return (FT_ERR_INVALID_STATE);
+		return (FT_ERR_SUCCESS);
+	}
+
+	static bool game_session_revision_barrier_blocks_position(
+		const World &world, double x, double z) noexcept
+	{
+		if (!std::isfinite(x) || !std::isfinite(z)
+			|| GAME_VOXEL_CHUNK_WIDTH <= 0
+			|| GAME_VOXEL_CHUNK_DEPTH <= 0)
+			return (true);
+		const double chunk_x = std::floor(x / GAME_VOXEL_CHUNK_WIDTH);
+		const double chunk_z = std::floor(z / GAME_VOXEL_CHUNK_DEPTH);
+		if (chunk_x < std::numeric_limits<int32_t>::min()
+			|| chunk_x > std::numeric_limits<int32_t>::max()
+			|| chunk_z < std::numeric_limits<int32_t>::min()
+			|| chunk_z > std::numeric_limits<int32_t>::max())
+			return (true);
+		return (world.revision_barrier_blocks_chunk(
+			static_cast<int32_t>(chunk_x), static_cast<int32_t>(chunk_z)));
+	}
+
 	static const uint64_t DRAW_NOTICE_TRANSACTION_SCOPE =
 		0x574F524C44445257ULL;
 	static const uint32_t DRAW_NOTICE_TRANSACTION_TYPE = 12U;
 	static const uint32_t REGENERATION_HOST_OUTPUT_TRANSACTION_TYPE = 13U;
+	static const uint64_t MINIMUM_REVISION_DECISION_TIMEOUT_MS = 1000U;
+	static const uint64_t MAXIMUM_REVISION_DECISION_TIMEOUT_MS = 3600000U;
 	static const uint64_t RECIPE_RESEARCH_TRANSACTION_SCOPE =
 		0x4D43524553454152ULL;
 	static const uint32_t RECIPE_RESEARCH_TRANSACTION_TYPE = 14U;
@@ -49,7 +170,8 @@ namespace
 	static const int32_t RECIPE_RESEARCH_COST_ITEM_ID =
 		MinecraftItemCatalog::CARD_STOCK_ITEM_ID;
 	static const uint32_t RECIPE_RESEARCH_COST_QUANTITY = 2U;
-	static const uint32_t RECIPE_RESEARCH_PAYLOAD_SIZE = 60U;
+	static const uint32_t RECIPE_RESEARCH_V1_PAYLOAD_SIZE = 60U;
+	static const uint32_t RECIPE_RESEARCH_PAYLOAD_SIZE = 68U;
 	static const uint32_t RECIPE_RESEARCH_RECIPE_IDS[] = {
 		MinecraftRecipeCatalog::VOLCANO_MARK_CARD_RECIPE_ID,
 		MinecraftRecipeCatalog::ULTIMATE_GREED_CARD_RECIPE_ID,
@@ -116,6 +238,95 @@ namespace
 			delete item;
 		}
 		return (FT_ERR_SUCCESS);
+	}
+	static int32_t game_session_snapshot_equipment(
+		const game_character &character,
+		std::vector<game_inventory_item_snapshot> &equipment_out) noexcept
+	{
+		const int32_t equipment_slots[] = {EQUIP_HEAD, EQUIP_CHEST,
+			EQUIP_WEAPON, EQUIP_LEGS, EQUIP_FEET, EQUIP_OFF_HAND};
+		std::vector<game_inventory_item_snapshot> staged;
+		try
+		{
+			staged.reserve(sizeof(equipment_slots) / sizeof(equipment_slots[0]));
+			for (uint32_t index = 0U; index < sizeof(equipment_slots)
+				/ sizeof(equipment_slots[0]); ++index)
+			{
+				ft_sharedptr<game_item> *equipped =
+					character.get_equipped_item(equipment_slots[index]);
+				if (equipped == nullptr)
+					return (character.get_error());
+				if (*equipped)
+				{
+					game_inventory_item_snapshot item = {};
+					item.slot = equipment_slots[index];
+					item.item_id = (*equipped)->get_item_id();
+					item.instance_id = (*equipped)->get_instance_id();
+					item.stack_size = (*equipped)->get_stack_size();
+					item.max_stack = (*equipped)->get_max_stack();
+					item.rarity = (*equipped)->get_rarity();
+					item.width = (*equipped)->get_width();
+					item.height = (*equipped)->get_height();
+					item.modifier1_id = (*equipped)->get_modifier1_id();
+					item.modifier1_value = (*equipped)->get_modifier1_value();
+					item.modifier2_id = (*equipped)->get_modifier2_id();
+					item.modifier2_value = (*equipped)->get_modifier2_value();
+					item.modifier3_id = (*equipped)->get_modifier3_id();
+					item.modifier3_value = (*equipped)->get_modifier3_value();
+					item.modifier4_id = (*equipped)->get_modifier4_id();
+					item.modifier4_value = (*equipped)->get_modifier4_value();
+					(void)equipped->destroy();
+					delete equipped;
+					staged.push_back(item);
+				}
+				else
+				{
+					(void)equipped->destroy();
+					delete equipped;
+				}
+			}
+	}
+	catch (const std::bad_alloc &)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	equipment_out.swap(staged);
+	return (FT_ERR_SUCCESS);
+}
+	static void game_session_hash_u64(uint64_t *hash,
+		uint64_t value) noexcept
+	{
+		for (uint32_t index = 0U; index < 8U; ++index)
+		{
+			*hash ^= static_cast<uint8_t>(value >> (index * 8U));
+			*hash *= UINT64_C(1099511628211);
+		}
+	}
+	static uint64_t game_session_equipment_revision(
+		const std::vector<game_inventory_item_snapshot> &equipment) noexcept
+	{
+		uint64_t hash = UINT64_C(14695981039346656037);
+		game_session_hash_u64(&hash, equipment.size());
+		for (const game_inventory_item_snapshot &item : equipment)
+		{
+			game_session_hash_u64(&hash, static_cast<uint32_t>(item.slot));
+			game_session_hash_u64(&hash, static_cast<uint32_t>(item.item_id));
+			game_session_hash_u64(&hash, item.instance_id);
+			game_session_hash_u64(&hash, static_cast<uint32_t>(item.stack_size));
+			game_session_hash_u64(&hash, static_cast<uint32_t>(item.max_stack));
+			game_session_hash_u64(&hash, static_cast<uint32_t>(item.rarity));
+			game_session_hash_u64(&hash, static_cast<uint32_t>(item.width));
+			game_session_hash_u64(&hash, static_cast<uint32_t>(item.height));
+			game_session_hash_u64(&hash, static_cast<uint32_t>(item.modifier1_id));
+			game_session_hash_u64(&hash, static_cast<uint32_t>(item.modifier1_value));
+			game_session_hash_u64(&hash, static_cast<uint32_t>(item.modifier2_id));
+			game_session_hash_u64(&hash, static_cast<uint32_t>(item.modifier2_value));
+			game_session_hash_u64(&hash, static_cast<uint32_t>(item.modifier3_id));
+			game_session_hash_u64(&hash, static_cast<uint32_t>(item.modifier3_value));
+			game_session_hash_u64(&hash, static_cast<uint32_t>(item.modifier4_id));
+			game_session_hash_u64(&hash, static_cast<uint32_t>(item.modifier4_value));
+		}
+		return (hash == 0U ? UINT64_C(1) : hash);
 	}
 	static int32_t game_session_validate_equipped_catalog(
 		const game_character &character,
@@ -810,6 +1021,96 @@ namespace
 		return (value);
 	}
 
+	static bool game_session_host_output_payload_matches(
+		const std::vector<uint8_t> &payload, uint64_t session_id,
+		const card_game_host_intent_record &expected,
+		const uint8_t world_id[32]) noexcept
+	{
+		uint32_t version;
+		uint32_t field_count;
+		std::size_t header_size;
+
+		if (world_id == nullptr || payload.size() < 40U
+			|| payload[0] != 'R' || payload[1] != 'H'
+			|| payload[2] != 'O')
+			return (false);
+		version = game_session_read_u32(payload, 4U);
+		if (version == 3U && payload[3] == '3')
+		{
+			header_size = 80U;
+			if (payload.size() < header_size
+				|| game_session_read_u64(payload, 8U) != session_id
+				|| game_session_read_u64(payload, 16U) != expected.sequence
+				|| game_session_read_u64(payload, 24U)
+					!= expected.action_request_id
+				|| std::memcmp(payload.data() + 32U, world_id, 32U) != 0)
+				return (false);
+			field_count = game_session_read_u32(payload, 72U);
+		}
+		else if (version == 2U && payload[3] == '2')
+		{
+			header_size = 48U;
+			if (payload.size() < header_size
+				|| game_session_read_u64(payload, 8U) != session_id
+				|| game_session_read_u64(payload, 16U) != expected.sequence
+				|| game_session_read_u64(payload, 24U)
+					!= expected.action_request_id)
+				return (false);
+			field_count = game_session_read_u32(payload, 40U);
+		}
+		else if (version == 1U && payload[3] == '1')
+		{
+			header_size = 40U;
+			if (payload.size() < header_size
+				|| game_session_read_u64(payload, 8U) != session_id
+				|| game_session_read_u64(payload, 16U) != expected.sequence)
+				return (false);
+			field_count = game_session_read_u32(payload, 32U);
+		}
+		else
+			return (false);
+		if (field_count > FT_CARD_GAME_MAX_HOST_INTENT_FIELDS
+			|| field_count != expected.intent.field_count
+			|| payload.size() != header_size
+				+ static_cast<std::size_t>(field_count) * 16U
+			|| game_session_read_u32(payload, version == 1U ? 24U
+				: (version == 2U ? 32U : 64U))
+				!= expected.intent.type_id
+			|| game_session_read_u32(payload, version == 1U ? 28U
+				: (version == 2U ? 36U : 68U))
+				!= expected.intent.version)
+			return (false);
+		for (uint32_t index = 0U; index < field_count; ++index)
+		{
+			const std::size_t offset = header_size
+				+ static_cast<std::size_t>(index) * 16U;
+			if (payload[offset] != static_cast<uint8_t>(
+					expected.intent.fields[index].type)
+				|| payload[offset + 1U] != 0U
+				|| payload[offset + 2U] != 0U
+				|| payload[offset + 3U] != 0U
+				|| game_session_read_u32(payload, offset + 4U) != 0U
+				|| game_session_read_u64(payload, offset + 8U)
+					!= expected.intent.fields[index].value)
+				return (false);
+		}
+		return (true);
+	}
+
+	static uint32_t game_session_host_output_payload_version(
+		const std::vector<uint8_t> &payload) noexcept
+	{
+		if (payload.size() < 8U || payload[0] != 'R' || payload[1] != 'H'
+			|| payload[2] != 'O' || payload[5] != 0U || payload[6] != 0U
+			|| payload[7] != 0U)
+			return (0U);
+		const uint32_t version = game_session_read_u32(payload, 4U);
+		if (version < 1U || version > 3U
+			|| payload[3] != static_cast<uint8_t>('0' + version))
+			return (0U);
+		return (version);
+	}
+
 	static int32_t game_session_read_i32(const std::vector<uint8_t> &bytes,
 		std::size_t offset) noexcept
 	{
@@ -833,22 +1134,30 @@ namespace
 		uint64_t *inventory_revision, uint32_t *station_id,
 		int32_t *station_x, int32_t *station_y, int32_t *station_z,
 		uint64_t *station_revision, uint64_t *random_value,
-		uint32_t *recipe_id) noexcept
+		uint32_t *recipe_id, uint64_t *authenticated_actor_id) noexcept
 	{
 		const std::vector<uint8_t> &payload = record.payload;
+		const uint32_t version = payload.size() >= 8U
+			? game_session_read_u32(payload, 4U) : 0U;
 		if (record.scope_id != RECIPE_RESEARCH_TRANSACTION_SCOPE
 			|| record.transaction_type != RECIPE_RESEARCH_TRANSACTION_TYPE
 			|| record.request_id == 0U
-			|| payload.size() != RECIPE_RESEARCH_PAYLOAD_SIZE
+			|| (payload.size() != RECIPE_RESEARCH_V1_PAYLOAD_SIZE
+				&& payload.size() != RECIPE_RESEARCH_PAYLOAD_SIZE)
 			|| payload[0] != 'R' || payload[1] != 'S'
 			|| payload[2] != 'R' || payload[3] != '1'
-			|| game_session_read_u32(payload, 4U) != 1U
+			|| (version != 1U && version != 2U)
+			|| (version == 1U
+				&& payload.size() != RECIPE_RESEARCH_V1_PAYLOAD_SIZE)
+			|| (version == 2U && payload.size() != RECIPE_RESEARCH_PAYLOAD_SIZE)
 			|| game_session_read_u32(payload, 16U)
 				!= static_cast<uint32_t>(MinecraftRecipeCatalog::CARD_PRESS_STATION_ID)
 			|| game_session_read_u32(payload, 52U)
 				!= static_cast<uint32_t>(RECIPE_RESEARCH_COST_ITEM_ID)
 			|| game_session_read_u32(payload, 56U)
-				!= RECIPE_RESEARCH_COST_QUANTITY)
+				!= RECIPE_RESEARCH_COST_QUANTITY
+			|| authenticated_actor_id == nullptr
+			|| (version == 2U && game_session_read_u64(payload, 60U) == 0U))
 			return (false);
 		*inventory_revision = game_session_read_u64(payload, 8U);
 		*station_id = game_session_read_u32(payload, 16U);
@@ -858,6 +1167,8 @@ namespace
 		*station_revision = game_session_read_u64(payload, 32U);
 		*random_value = game_session_read_u64(payload, 40U);
 		*recipe_id = game_session_read_u32(payload, 48U);
+		*authenticated_actor_id = version >= 2U
+			? game_session_read_u64(payload, 60U) : 0U;
 		return (*inventory_revision != UINT64_MAX && *station_revision != 0U
 			&& game_session_recipe_research_candidate(*recipe_id));
 	}
@@ -979,6 +1290,149 @@ namespace
 			hash *= 1099511628211ULL;
 		}
 		return (hash);
+	}
+
+	static int32_t game_session_host_configuration_hash(
+		const std::vector<RuntimeBlockAcquisitionConfig> &rules,
+		uint64_t trusted_script_manifest_hash,
+		uint64_t *hash_out) noexcept
+	{
+		std::vector<RuntimeBlockAcquisitionConfig> sorted_rules;
+		if (hash_out == nullptr)
+			return (FT_ERR_INVALID_ARGUMENT);
+		try
+		{
+			sorted_rules = rules;
+			std::sort(sorted_rules.begin(), sorted_rules.end(),
+				[](const RuntimeBlockAcquisitionConfig &left,
+					const RuntimeBlockAcquisitionConfig &right)
+				{
+					return (left.block_id < right.block_id);
+				});
+		}
+		catch (const std::bad_alloc &)
+		{
+			return (FT_ERR_NO_MEMORY);
+		}
+		uint64_t hash = UINT64_C(14695981039346656037);
+		game_session_hash_u64(&hash, UINT64_C(0x525442504F4C4943));
+		game_session_hash_u64(&hash, trusted_script_manifest_hash);
+		game_session_hash_u64(&hash, sorted_rules.size());
+		for (const RuntimeBlockAcquisitionConfig &rule : sorted_rules)
+		{
+			game_session_hash_u64(&hash, rule.block_id);
+			game_session_hash_u64(&hash,
+				static_cast<uint32_t>(rule.policy));
+			game_session_hash_u64(&hash,
+				static_cast<uint32_t>(rule.item_id));
+		}
+		*hash_out = hash == 0U ? 1U : hash;
+		return (FT_ERR_SUCCESS);
+	}
+
+	static int32_t game_session_serialize_host_config_state(uint64_t hash,
+		const uint8_t world_id[32], const uint8_t seed_hash[32],
+		const uint8_t character_id[32], uint32_t character_mode,
+		std::vector<uint8_t> &bytes_out) noexcept
+	{
+		std::vector<uint8_t> staged;
+		if (hash == 0U || world_id == nullptr || seed_hash == nullptr
+			|| character_id == nullptr || character_mode < 1U
+			|| character_mode > 2U)
+			return (FT_ERR_INVALID_ARGUMENT);
+	bool has_character_id = false;
+	for (std::size_t index = 0U; index < 32U; ++index)
+		if (character_id[index] != 0U)
+			has_character_id = true;
+	if (!has_character_id)
+		return (FT_ERR_INVALID_ARGUMENT);
+		try
+		{
+			staged.reserve(124U);
+			staged.insert(staged.end(), {'R', 'B', 'H', '1'});
+			game_session_append_u32(staged, 4U);
+			game_session_append_u64(staged, hash);
+			staged.insert(staged.end(), world_id, world_id + 32U);
+			staged.insert(staged.end(), seed_hash, seed_hash + 32U);
+			staged.insert(staged.end(), character_id, character_id + 32U);
+			game_session_append_u32(staged, character_mode);
+			game_session_append_u64(staged,
+				game_session_crop_state_checksum(staged.data(), staged.size()));
+			bytes_out.swap(staged);
+		}
+		catch (const std::bad_alloc &)
+		{
+			return (FT_ERR_NO_MEMORY);
+		}
+		return (FT_ERR_SUCCESS);
+	}
+
+	static int32_t game_session_deserialize_host_config_state(
+		const std::vector<uint8_t> &bytes, const uint8_t expected_world_id[32],
+		const uint8_t expected_seed_hash[32],
+		uint64_t *hash_out, uint32_t *version_out,
+		uint8_t character_id_out[32], uint32_t *character_mode_out) noexcept
+	{
+		if (hash_out == nullptr || version_out == nullptr
+			|| character_id_out == nullptr || character_mode_out == nullptr
+			|| expected_world_id == nullptr || expected_seed_hash == nullptr
+			|| (bytes.size() != 24U && bytes.size() != 56U
+				&& bytes.size() != 88U && bytes.size() != 124U)
+			|| bytes[0] != 'R' || bytes[1] != 'B'
+			|| bytes[2] != 'H' || bytes[3] != '1'
+			|| (game_session_read_u32(bytes, 4U) == 1U
+				&& (bytes.size() != 24U
+					|| game_session_read_u64(bytes, 16U)
+						!= game_session_crop_state_checksum(bytes.data(), 16U)))
+			|| (game_session_read_u32(bytes, 4U) == 2U
+				&& (bytes.size() != 56U
+					|| std::memcmp(bytes.data() + 16U, expected_world_id, 32U) != 0
+					|| game_session_read_u64(bytes, 48U)
+						!= game_session_crop_state_checksum(bytes.data(), 48U)))
+			|| (game_session_read_u32(bytes, 4U) == 3U
+				&& (bytes.size() != 88U
+					|| std::memcmp(bytes.data() + 16U, expected_world_id, 32U) != 0
+					|| std::memcmp(bytes.data() + 48U, expected_seed_hash, 32U) != 0
+					|| game_session_read_u64(bytes, 80U)
+						!= game_session_crop_state_checksum(bytes.data(), 80U)))
+			|| (game_session_read_u32(bytes, 4U) == 4U
+				&& (bytes.size() != 124U
+					|| std::memcmp(bytes.data() + 16U, expected_world_id, 32U) != 0
+					|| std::memcmp(bytes.data() + 48U, expected_seed_hash, 32U) != 0
+					|| game_session_read_u32(bytes, 112U) < 1U
+					|| game_session_read_u32(bytes, 112U) > 2U
+					|| game_session_read_u64(bytes, 116U)
+						!= game_session_crop_state_checksum(bytes.data(), 116U)))
+			|| (game_session_read_u32(bytes, 4U) != 1U
+				&& game_session_read_u32(bytes, 4U) != 2U
+				&& game_session_read_u32(bytes, 4U) != 3U
+				&& game_session_read_u32(bytes, 4U) != 4U)
+			|| (game_session_read_u32(bytes, 4U) < 3U
+				&& std::memcmp(expected_world_id, expected_seed_hash, 32U) != 0)
+			|| game_session_read_u64(bytes, 8U) == 0U)
+			return (FT_ERR_INVALID_ARGUMENT);
+		if (game_session_read_u32(bytes, 4U) == 4U)
+		{
+			bool has_character_id = false;
+			for (std::size_t index = 80U; index < 112U; ++index)
+				if (bytes[index] != 0U)
+					has_character_id = true;
+			if (!has_character_id)
+				return (FT_ERR_INVALID_ARGUMENT);
+		}
+		*hash_out = game_session_read_u64(bytes, 8U);
+		*version_out = game_session_read_u32(bytes, 4U);
+		if (*version_out >= 4U)
+		{
+			std::memcpy(character_id_out, bytes.data() + 80U, 32U);
+			*character_mode_out = game_session_read_u32(bytes, 112U);
+		}
+		else
+		{
+			std::memcpy(character_id_out, expected_world_id, 32U);
+			*character_mode_out = 1U;
+		}
+		return (FT_ERR_SUCCESS);
 	}
 
 	static bool game_session_crop_deadline_less(
@@ -1233,26 +1687,28 @@ namespace
 		return (FT_ERR_SUCCESS);
 	}
 
-	int32_t game_session_item_save_path(const std::string &seed,
+	int32_t game_session_item_save_path(const uint8_t world_id[32],
 		char *path_out, std::size_t path_capacity)
 	{
-		uint8_t digest[32];
-		const char *seed_data = seed.c_str();
-		const std::size_t seed_length = std::strlen(seed_data);
 		int written;
 		std::size_t offset;
 
-		if (path_out == nullptr || path_capacity < 88U)
+		if (world_id == nullptr || path_out == nullptr || path_capacity < 88U)
 			return (FT_ERR_INVALID_ARGUMENT);
-		sha256_hash(seed_data, seed_length, digest);
+		bool has_nonzero_world_id = false;
+		for (std::size_t index = 0U; index < 32U; ++index)
+			if (world_id[index] != 0U)
+				has_nonzero_world_id = true;
+		if (!has_nonzero_world_id)
+			return (FT_ERR_INVALID_ARGUMENT);
 		written = std::snprintf(path_out, path_capacity, "saves/world_items/");
 		if (written < 0 || static_cast<std::size_t>(written) >= path_capacity)
 			return (FT_ERR_OUT_OF_RANGE);
 		offset = static_cast<std::size_t>(written);
-		for (std::size_t index = 0U; index < sizeof(digest); ++index)
+		for (std::size_t index = 0U; index < 32U; ++index)
 		{
 			written = std::snprintf(path_out + offset, path_capacity - offset,
-				"%02x", static_cast<unsigned int>(digest[index]));
+				"%02x", static_cast<unsigned int>(world_id[index]));
 			if (written != 2)
 				return (FT_ERR_OUT_OF_RANGE);
 			offset += 2U;
@@ -1307,7 +1763,7 @@ namespace
 }
 
 GameSession::GameSession()
-		: camera_(), player_character_(), item_catalog_(), recipe_catalog_(), world_items_(), world_entities_(), transaction_journal_(), regeneration_cards_(), regeneration_world_rules_(), regeneration_world_rules_policy_(), regeneration_script_catalog_(), trusted_script_manifest_hash_(0U), regeneration_output_session_id_(0U), configured_regeneration_output_session_id_(0U), chunk_instability_policy_(), chunk_instability_policy_configured_(false), ore_overgrowth_instability_delta_(0), ultimate_greed_instability_delta_(0), biome_rupture_instability_delta_(0), volcano_mark_instability_delta_(0), empty_draw_instability_delta_(0), hand_overflow_instability_delta_(0), volcano_mark_footprint_chunks_(9U), crop_growth_policy_({200U, 3U, 9U, 9U, 4U}), recipe_discovery_authorizer_(nullptr), recipe_discovery_authorizer_user_data_(nullptr), script_catalog_authorizer_(nullptr), script_catalog_authorizer_user_data_(nullptr), processing_station_authorizer_(nullptr), processing_station_authorizer_user_data_(nullptr), processing_station_continuity_validator_(nullptr), processing_station_continuity_user_data_(nullptr), revision_occupancy_provider_(nullptr), revision_occupancy_provider_user_data_(nullptr), revision_clock_provider_(nullptr), revision_clock_provider_user_data_(nullptr), world_(), render_debug_(), revision_occupied_chunks_(), revision_occupied_chunk_x_(0), revision_occupied_chunk_z_(0), revision_occupancy_valid_(false),
+		: camera_(), player_character_(), item_catalog_(), recipe_catalog_(), world_items_(), world_entities_(), transaction_journal_(), regeneration_cards_(), regeneration_world_rules_(), regeneration_world_rules_policy_(), regeneration_script_catalog_(), runtime_block_acquisition_config_(), trusted_script_manifest_hash_(0U), regeneration_output_session_id_(0U), configured_regeneration_output_session_id_(0U), chunk_instability_policy_(), chunk_instability_policy_configured_(false), ore_overgrowth_instability_delta_(0), ultimate_greed_instability_delta_(0), biome_rupture_instability_delta_(0), volcano_mark_instability_delta_(0), empty_draw_instability_delta_(0), hand_overflow_instability_delta_(0), volcano_mark_footprint_chunks_(9U), crop_growth_policy_({200U, 3U, 9U, 9U, 4U}), recipe_discovery_authorizer_(nullptr), recipe_discovery_authorizer_user_data_(nullptr), script_catalog_authorizer_(nullptr), script_catalog_authorizer_user_data_(nullptr), processing_station_authorizer_(nullptr), processing_station_authorizer_user_data_(nullptr), processing_station_continuity_validator_(nullptr), processing_station_continuity_user_data_(nullptr), revision_occupancy_provider_(nullptr), revision_occupancy_provider_user_data_(nullptr), revision_clock_provider_(nullptr), revision_clock_provider_user_data_(nullptr), world_(), render_debug_(), revision_occupied_chunks_(), revision_occupied_chunk_x_(0), revision_occupied_chunk_z_(0), revision_active_player_count_(1U), revision_occupancy_valid_(false),
       active_render_distance_(WorldCoordinates::REQUIRED_VISIBLE_DISTANCE), fps_accumulator_(0.0),
       rd_accumulator_(0.0), display_fps_(0.0), frame_ms_(0.0), performance_frame_ms_(16.67),
       fps_frame_count_(0U),
@@ -1332,7 +1788,7 @@ GameSession::GameSession()
 }
 
 GameSession::GameSession(const GameSession &other)
-	    : camera_(), player_character_(), item_catalog_(), recipe_catalog_(), world_items_(), world_entities_(), transaction_journal_(), regeneration_cards_(), regeneration_world_rules_(), regeneration_world_rules_policy_(), regeneration_script_catalog_(), trusted_script_manifest_hash_(0U), regeneration_output_session_id_(0U), configured_regeneration_output_session_id_(0U), chunk_instability_policy_(), chunk_instability_policy_configured_(false), ore_overgrowth_instability_delta_(0), ultimate_greed_instability_delta_(0), biome_rupture_instability_delta_(0), empty_draw_instability_delta_(0), hand_overflow_instability_delta_(0), volcano_mark_footprint_chunks_(9U), crop_growth_policy_({200U, 3U, 9U, 9U, 4U}), recipe_discovery_authorizer_(nullptr), recipe_discovery_authorizer_user_data_(nullptr), script_catalog_authorizer_(nullptr), script_catalog_authorizer_user_data_(nullptr), processing_station_authorizer_(nullptr), processing_station_authorizer_user_data_(nullptr), processing_station_continuity_validator_(nullptr), processing_station_continuity_user_data_(nullptr), revision_occupancy_provider_(nullptr), revision_occupancy_provider_user_data_(nullptr), revision_clock_provider_(nullptr), revision_clock_provider_user_data_(nullptr), world_(), render_debug_(), revision_occupied_chunks_(), revision_occupied_chunk_x_(0), revision_occupied_chunk_z_(0), revision_occupancy_valid_(false),
+	    : camera_(), player_character_(), item_catalog_(), recipe_catalog_(), world_items_(), world_entities_(), transaction_journal_(), regeneration_cards_(), regeneration_world_rules_(), regeneration_world_rules_policy_(), regeneration_script_catalog_(), runtime_block_acquisition_config_(), trusted_script_manifest_hash_(0U), regeneration_output_session_id_(0U), configured_regeneration_output_session_id_(0U), chunk_instability_policy_(), chunk_instability_policy_configured_(false), ore_overgrowth_instability_delta_(0), ultimate_greed_instability_delta_(0), biome_rupture_instability_delta_(0), empty_draw_instability_delta_(0), hand_overflow_instability_delta_(0), volcano_mark_footprint_chunks_(9U), crop_growth_policy_({200U, 3U, 9U, 9U, 4U}), recipe_discovery_authorizer_(nullptr), recipe_discovery_authorizer_user_data_(nullptr), script_catalog_authorizer_(nullptr), script_catalog_authorizer_user_data_(nullptr), processing_station_authorizer_(nullptr), processing_station_authorizer_user_data_(nullptr), processing_station_continuity_validator_(nullptr), processing_station_continuity_user_data_(nullptr), revision_occupancy_provider_(nullptr), revision_occupancy_provider_user_data_(nullptr), revision_clock_provider_(nullptr), revision_clock_provider_user_data_(nullptr), world_(), render_debug_(), revision_occupied_chunks_(), revision_occupied_chunk_x_(0), revision_occupied_chunk_z_(0), revision_active_player_count_(1U), revision_occupancy_valid_(false),
       active_render_distance_(WorldCoordinates::REQUIRED_VISIBLE_DISTANCE), fps_accumulator_(0.0),
       rd_accumulator_(0.0), display_fps_(0.0), frame_ms_(0.0), performance_frame_ms_(16.67),
       fps_frame_count_(0U),
@@ -1360,7 +1816,7 @@ GameSession::GameSession(const GameSession &other)
 GameSession::~GameSession()
 {
 	if (this->active_)
-		stop();
+		(void)stop();
 }
 
 GameSession &GameSession::operator=(const GameSession &other)
@@ -1398,15 +1854,80 @@ void GameSession::reset_session_state()
 int GameSession::start(const std::string &seed, ApplicationWindow &window,
 	VoxelRenderer &renderer)
 {
+	uint8_t world_id[32];
+	sha256_hash(seed.c_str(), seed.size(), world_id);
+	return (this->start_with_world_id_internal(seed, world_id, window, renderer));
+}
+
+int GameSession::start_with_world_id(const std::string &seed,
+	const uint8_t world_id[32], ApplicationWindow &window,
+	VoxelRenderer &renderer)
+{
+	(void)seed;
+	(void)world_id;
+	(void)window;
+	(void)renderer;
+	return (FT_ERR_PERMISSION_DENIED);
+}
+
+int GameSession::start_with_world_id_internal(const std::string &seed,
+	const uint8_t world_id[32], ApplicationWindow &window,
+	VoxelRenderer &renderer)
+{
+	bool has_nonzero_world_id = false;
+	if (world_id == nullptr || seed.size() >= sizeof(this->world_.seed)
+		|| seed.find('\0') != std::string::npos)
+		return (FT_ERR_INVALID_ARGUMENT);
+	for (std::size_t index = 0U; index < 32U; ++index)
+		if (world_id[index] != 0U)
+			has_nonzero_world_id = true;
+	if (!has_nonzero_world_id)
+		return (FT_ERR_INVALID_ARGUMENT);
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
+	if (this->active_)
+		return (FT_ERR_INVALID_STATE);
+	GameSessionWorldReservationGuard world_reservation(world_id);
+	if (world_reservation.result() != FT_ERR_SUCCESS)
+		return (world_reservation.result());
+	const bool configured_identity = this->character_identity_configured_;
+	if (!this->character_identity_configured_)
+	{
+		bool identity_created = false;
+		for (uint32_t attempt = 0U; attempt < 4U && !identity_created;
+			++attempt)
+		{
+			const int32_t random_result = rng_secure_bytes(
+				this->character_id_, sizeof(this->character_id_));
+			if (random_result != FT_ERR_SUCCESS)
+				return (random_result);
+			for (uint8_t byte : this->character_id_)
+				if (byte != 0U)
+				{
+					identity_created = true;
+					break ;
+				}
+		}
+		if (!identity_created)
+			return (FT_ERR_IO);
+		this->character_mode_ = WORLD_SAVE_CHARACTER_WORLD_BOUND;
+	}
 	std::vector<uint8_t> card_session_bytes;
 	std::vector<uint8_t> regeneration_rules_bytes;
 	std::vector<uint8_t> chunk_instability_bytes;
 	std::vector<uint8_t> revision_metadata_bytes;
 	std::vector<uint8_t> crop_growth_policy_bytes;
+	std::vector<uint8_t> host_config_state_bytes;
 	this->revision_server_checkpoint_state_.clear();
 	uint64_t restored_output_session_id = 0U;
+	uint32_t restored_host_config_version = 0U;
+	uint8_t restored_character_id[32] = {};
+	uint32_t restored_character_mode =
+		WORLD_SAVE_CHARACTER_WORLD_BOUND;
 	const uint64_t card_seed = game_session_card_seed(seed);
 	const char *startup_restore_stage = "item-catalog-initialization";
+	sha256_hash(seed.c_str(), seed.size(), this->world_seed_hash_);
+	std::memcpy(this->world_id_, world_id, sizeof(this->world_id_));
 
 	processing_tick_accumulator_ = 0.0;
 	crop_chunk_growth_deadlines_.clear();
@@ -1417,6 +1938,28 @@ int GameSession::start(const std::string &seed, ApplicationWindow &window,
 	{
 		std::fprintf(stderr, "[Session] startup failed stage=%s error=%d\n",
 			startup_restore_stage, error_code_);
+		return (error_code_);
+	}
+	for (const RuntimeBlockAcquisitionConfig &rule
+		: this->runtime_block_acquisition_config_)
+	{
+		error_code_ = this->item_catalog_.register_runtime_block_rule(
+			rule.block_id, rule.policy, rule.item_id);
+		if (error_code_ != FT_ERR_SUCCESS)
+			break ;
+	}
+	if (error_code_ == FT_ERR_SUCCESS)
+	{
+		uint32_t runtime_rule_count = 0U;
+		error_code_ = this->item_catalog_.validate_runtime_coverage(
+			&runtime_rule_count);
+	}
+	if (error_code_ != FT_ERR_SUCCESS)
+	{
+		std::fprintf(stderr,
+			"[Session] startup failed stage=runtime-block-acquisition error=%d\n",
+			error_code_);
+		(void)this->item_catalog_.destroy();
 		return (error_code_);
 	}
 	startup_restore_stage = "recipe-catalog-initialization";
@@ -1523,13 +2066,17 @@ int GameSession::start(const std::string &seed, ApplicationWindow &window,
 		return (error_code_);
 	}
 	startup_restore_stage = "save-path-setup";
-	error_code_ = game_session_item_save_path(seed, world_item_save_path_,
+	error_code_ = game_session_item_save_path(this->world_id_,
+		world_item_save_path_,
 		sizeof(world_item_save_path_));
 	if (error_code_ == FT_ERR_SUCCESS)
 		error_code_ = game_session_revision_save_path(world_item_save_path_,
 			world_revision_save_path_, sizeof(world_revision_save_path_));
 	if (error_code_ == FT_ERR_SUCCESS)
 		error_code_ = file_create_directories("saves/world_items", 0700);
+	if (error_code_ == FT_ERR_SUCCESS)
+		error_code_ = GameSessionPersistence::recover_world_bundle_import(
+			world_item_save_path_, world_revision_save_path_);
 	if (error_code_ != FT_ERR_SUCCESS)
 	{
 		std::fprintf(stderr, "[Session] startup failed stage=%s error=%d\n",
@@ -1545,7 +2092,7 @@ int GameSession::start(const std::string &seed, ApplicationWindow &window,
 	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
 	std::fprintf(stderr, "World startup: initializing world\n");
 	#endif
-    error_code_ = world_.initialize(seed.c_str());
+	    error_code_ = world_.initialize_for_world(seed.c_str(), this->world_id_);
     if (error_code_ != FT_ERR_SUCCESS)
     {
 		std::fprintf(stderr, "[Session] startup failed stage=%s error=%d\n",
@@ -1652,13 +2199,14 @@ int GameSession::start(const std::string &seed, ApplicationWindow &window,
 		const file_type save_type = file_get_type(world_item_save_path_);
 		if (save_type == FILE_TYPE_REGULAR)
 			error_code_ = GameSessionPersistence::
-				load_file_with_revision_server_checkpoint(
+				load_file_with_revision_server_checkpoint_and_host_config(
 				world_item_save_path_, player_character_, world_items_,
 				recipe_catalog_, transaction_journal_, card_session_bytes,
 				regeneration_rules_bytes, chunk_instability_bytes,
 				revision_metadata_bytes, fluid_state_, entity_state_,
 				crop_growth_policy_bytes, &restored_output_session_id,
-				this->revision_server_checkpoint_state_);
+				this->revision_server_checkpoint_state_,
+				host_config_state_bytes);
 		if (error_code_ == FT_ERR_SUCCESS
 			&& restored_output_session_id != 0U)
 		{
@@ -1672,6 +2220,59 @@ int GameSession::start(const std::string &seed, ApplicationWindow &window,
 		else if (save_type != FILE_TYPE_REGULAR
 			&& save_type != FILE_TYPE_MISSING)
 			error_code_ = FT_ERR_INVALID_PATH;
+	}
+	if (error_code_ == FT_ERR_SUCCESS && !host_config_state_bytes.empty())
+	{
+		uint64_t persisted_policy_hash = 0U;
+		uint64_t configured_policy_hash = 0U;
+		error_code_ = game_session_deserialize_host_config_state(
+			host_config_state_bytes, this->world_id_, this->world_seed_hash_,
+			&persisted_policy_hash,
+			&restored_host_config_version, restored_character_id,
+			&restored_character_mode);
+		if (error_code_ == FT_ERR_SUCCESS
+			&& configured_identity
+			&& (std::memcmp(this->character_id_, restored_character_id, 32U) != 0
+				|| this->character_mode_ != restored_character_mode))
+			error_code_ = FT_ERR_CONFIGURATION;
+		if (error_code_ == FT_ERR_SUCCESS)
+		{
+			std::memcpy(this->character_id_, restored_character_id, 32U);
+			this->character_mode_ = restored_character_mode;
+		}
+		if (error_code_ == FT_ERR_SUCCESS)
+			error_code_ = game_session_host_configuration_hash(
+				this->runtime_block_acquisition_config_,
+				this->trusted_script_manifest_hash_,
+				&configured_policy_hash);
+		if (error_code_ == FT_ERR_SUCCESS
+			&& persisted_policy_hash != configured_policy_hash)
+			error_code_ = FT_ERR_CONFIGURATION;
+		if (error_code_ != FT_ERR_SUCCESS)
+			startup_restore_stage = "host-configuration-restore";
+	}
+	if (error_code_ == FT_ERR_SUCCESS && restored_host_config_version < 2U)
+	{
+		const uint64_t legacy_session_id = restored_output_session_id != 0U
+			? restored_output_session_id
+			: (this->regeneration_output_session_id_ != 0U
+				? this->regeneration_output_session_id_ : card_seed);
+		GameTransactionJournal::Record latest_host_output = {};
+		const int32_t history_result = this->transaction_journal_.latest(
+			game_session_regeneration_host_output_scope(legacy_session_id),
+			REGENERATION_HOST_OUTPUT_TRANSACTION_TYPE, &latest_host_output);
+		if (history_result == FT_ERR_SUCCESS)
+		{
+			if (this->legacy_host_output_world_authorizer_ == nullptr
+				|| !this->legacy_host_output_world_authorizer_(this->world_id_,
+					legacy_session_id,
+					this->regeneration_host_output_user_data_))
+				error_code_ = FT_ERR_CONFIGURATION;
+		}
+		else if (history_result != FT_ERR_NOT_FOUND)
+			error_code_ = history_result;
+		if (error_code_ != FT_ERR_SUCCESS)
+			startup_restore_stage = "legacy-host-output-world-binding";
 	}
 	if (error_code_ == FT_ERR_SUCCESS
 		&& regeneration_output_session_id_ == 0U)
@@ -1883,9 +2484,11 @@ int GameSession::start(const std::string &seed, ApplicationWindow &window,
 	if (error_code_ == FT_ERR_SUCCESS)
 		world_loom_start_committed_ = world_.revision_barriers_active();
 	if (error_code_ == FT_ERR_SUCCESS && world_loom_start_committed_
+		&& !world_.revision_replaying_completed_generation()
 		&& revision_clock_provider_ == nullptr)
 		error_code_ = FT_ERR_CONFIGURATION;
-	if (error_code_ == FT_ERR_SUCCESS && world_loom_start_committed_)
+	if (error_code_ == FT_ERR_SUCCESS && world_loom_start_committed_
+		&& !world_.revision_replaying_completed_generation())
 		error_code_ = update_revision_occupancy();
 	if (error_code_ == FT_ERR_SUCCESS)
 	{
@@ -1895,6 +2498,37 @@ int GameSession::start(const std::string &seed, ApplicationWindow &window,
 	if (error_code_ == FT_ERR_SUCCESS)
 		error_code_ = WorldItemPickupTransaction::next_request_id(
 			transaction_journal_, &pickup_request_id_);
+	if (error_code_ == FT_ERR_SUCCESS)
+	{
+		camera_.initialize();
+		if (world_.revision_barriers_active()
+			&& game_session_revision_barrier_blocks_position(world_, camera_.x,
+				camera_.z))
+		{
+			/* A restored committed revision can reserve the default spawn when
+			 * the player was elsewhere at commit time. Resume from the saved
+			 * player position rather than teleporting through that barrier. */
+			camera_.x = static_cast<double>(player_character_.get_x());
+			camera_.z = static_cast<double>(player_character_.get_z());
+			if (game_session_revision_barrier_blocks_position(world_, camera_.x,
+					camera_.z))
+				error_code_ = FT_ERR_INVALID_STATE;
+		}
+		if (error_code_ == FT_ERR_SUCCESS)
+		{
+			PlayerController::spawn_player_on_ground(&camera_, world_);
+			if (world_.revision_barriers_active()
+				&& game_session_revision_barrier_blocks_position(world_, camera_.x,
+					camera_.z))
+				error_code_ = FT_ERR_INVALID_STATE;
+		}
+		if (error_code_ == FT_ERR_SUCCESS)
+		{
+			player_spawn_x_ = camera_.x;
+			player_spawn_z_ = camera_.z;
+			sync_player_character_location();
+		}
+	}
 	if (error_code_ != FT_ERR_SUCCESS)
 	{
 		std::fprintf(stderr,
@@ -1923,11 +2557,6 @@ int GameSession::start(const std::string &seed, ApplicationWindow &window,
     }
     std::strncpy(seed_, seed.c_str(), sizeof(seed_) - 1);
     seed_[sizeof(seed_) - 1] = '\0';
-    camera_.initialize();
-    PlayerController::spawn_player_on_ground(&camera_, world_);
-    player_spawn_x_ = camera_.x;
-    player_spawn_z_ = camera_.z;
-    sync_player_character_location();
     /* Only the minimum playable envelope is needed while loading. Streaming
      * the full configured distance here competes with the chunks that gate
      * startup and can make the loading screen appear hung. */
@@ -1950,7 +2579,7 @@ int GameSession::start(const std::string &seed, ApplicationWindow &window,
     performance_frame_ms_ = 16.67;
     error_code_ = FT_ERR_SUCCESS;
 		processing_tick_accumulator_ = 0.0;
-    active_ = true;
+	active_ = true;
 	if (this->regeneration_host_output_prepare_ != nullptr)
 	{
 		error_code_ = this->recover_regeneration_host_outputs();
@@ -1967,11 +2596,178 @@ int GameSession::start(const std::string &seed, ApplicationWindow &window,
         if (error_code_ != FT_ERR_SUCCESS)
         {
             stop();
-            return error_code_;
+			return (error_code_);
         }
     }
     renderer.preload_assets();
+	world_reservation.commit();
     return FT_ERR_SUCCESS;
+}
+
+int32_t GameSession::start_from_catalog_admitted(WorldSaveCatalog &catalog,
+	const uint8_t world_id[32], uint64_t actor_id, uint64_t request_id,
+	bool host_reports_friend, const uint8_t character_id[32],
+	uint32_t character_mode, const uint8_t source_world_id[32],
+	bool character_is_new, ApplicationWindow &window,
+	VoxelRenderer &renderer)
+{
+	WorldSaveDefinition definition = {};
+	if (world_id == nullptr || character_id == nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
+	if (this->active_ || this->active_join_catalog_ != nullptr)
+		return (FT_ERR_INVALID_STATE);
+	int32_t find_result =
+		GameSessionPersistence::recover_catalog_world_deletions(catalog,
+			world_id);
+	if (find_result == FT_ERR_SUCCESS)
+		find_result = catalog.find(world_id, &definition);
+	if (find_result != FT_ERR_SUCCESS)
+		return (find_result);
+	if (definition.generator_version != VOXEL_GENERATOR_VERSION
+		|| definition.ruleset_version != WORLD_SAVE_CURRENT_RULESET_VERSION)
+		return (FT_ERR_CONFIGURATION);
+	if (this->character_identity_configured_
+		&& (std::memcmp(this->character_id_, character_id, 32U) != 0
+			|| this->character_mode_ != character_mode))
+		return (FT_ERR_INVALID_STATE);
+	const bool identity_was_configured = this->character_identity_configured_;
+	uint8_t lease_id[32] = {};
+	int32_t result = catalog.reserve_join(world_id, actor_id, request_id,
+		host_reports_friend, character_id, character_mode, source_world_id,
+		character_is_new, VOXEL_GENERATOR_VERSION,
+		WORLD_SAVE_CURRENT_RULESET_VERSION, lease_id);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	if (!identity_was_configured)
+	{
+		result = this->configure_character_identity(character_id,
+			character_mode);
+		if (result != FT_ERR_SUCCESS)
+		{
+			(void)catalog.release_join(lease_id);
+			return (result);
+		}
+	}
+	result = this->start_with_world_id_internal(definition.seed,
+		definition.world_id,
+		window, renderer);
+	if (result == FT_ERR_SUCCESS)
+		result = catalog.validate_join_lease(lease_id);
+	if (result == FT_ERR_SUCCESS)
+	{
+		this->active_join_catalog_ = &catalog;
+		std::memcpy(this->active_join_lease_id_, lease_id, 32U);
+		return (FT_ERR_SUCCESS);
+	}
+	if (this->active_)
+	{
+		this->active_join_catalog_ = &catalog;
+		std::memcpy(this->active_join_lease_id_, lease_id, 32U);
+		const int32_t stop_result = this->stop();
+		if (stop_result != FT_ERR_SUCCESS)
+			return (stop_result);
+	}
+	else
+		(void)catalog.release_join(lease_id);
+	if (!identity_was_configured)
+	{
+		std::memset(this->character_id_, 0, sizeof(this->character_id_));
+		this->character_mode_ = WORLD_SAVE_CHARACTER_WORLD_BOUND;
+		this->character_identity_configured_ = false;
+	}
+	return (result);
+}
+
+int32_t GameSession::create_and_start_catalog_world(
+	WorldSaveCatalog &catalog, const std::string &name, const std::string &seed,
+	uint64_t owner_actor_id, uint32_t difficulty, uint32_t ownership_mode,
+	uint32_t access_policy, uint32_t spawn_policy,
+	uint32_t character_admission, uint32_t maximum_players,
+	ApplicationWindow &window, VoxelRenderer &renderer,
+	WorldSaveDefinition *definition_out) noexcept
+{
+	WorldSaveDefinition definition = {};
+	uint8_t character_id[32] = {};
+	uint8_t request_id_bytes[8] = {};
+	uint64_t request_id = 0U;
+	if (definition_out == nullptr || owner_actor_id == 0U)
+		return (FT_ERR_INVALID_ARGUMENT);
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
+	if (this->active_ || this->active_join_catalog_ != nullptr
+		|| this->character_identity_configured_)
+		return (FT_ERR_INVALID_STATE);
+	int32_t result = rng_secure_bytes(character_id, sizeof(character_id));
+	if (result == FT_ERR_SUCCESS)
+		result = rng_secure_bytes(request_id_bytes, sizeof(request_id_bytes));
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	bool character_id_nonzero = false;
+	for (uint8_t byte : character_id)
+		if (byte != 0U)
+			character_id_nonzero = true;
+	for (uint32_t index = 0U; index < sizeof(request_id_bytes); ++index)
+		request_id |= static_cast<uint64_t>(request_id_bytes[index])
+			<< (index * 8U);
+	if (!character_id_nonzero || request_id == 0U)
+		return (FT_ERR_IO);
+	result = catalog.create(name, seed, owner_actor_id, difficulty,
+		ownership_mode, access_policy, spawn_policy, character_admission,
+		maximum_players, &definition);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	*definition_out = std::move(definition);
+	result = this->configure_character_identity(character_id,
+		WORLD_SAVE_CHARACTER_WORLD_BOUND);
+	if (result == FT_ERR_SUCCESS)
+		result = this->start_from_catalog_admitted(catalog,
+			definition_out->world_id, owner_actor_id, request_id, false,
+			character_id, WORLD_SAVE_CHARACTER_WORLD_BOUND, nullptr, true,
+			window, renderer);
+	if (result != FT_ERR_SUCCESS && !this->active_)
+	{
+		std::memset(this->character_id_, 0, sizeof(this->character_id_));
+		this->character_mode_ = WORLD_SAVE_CHARACTER_WORLD_BOUND;
+		this->character_identity_configured_ = false;
+	}
+	return (result);
+}
+
+int GameSession::start_from_catalog(const WorldSaveCatalog &catalog,
+	const uint8_t world_id[32], ApplicationWindow &window,
+	VoxelRenderer &renderer)
+{
+	(void)catalog;
+	(void)world_id;
+	(void)window;
+	(void)renderer;
+	return (FT_ERR_PERMISSION_DENIED);
+}
+
+int32_t GameSession::configure_character_identity(
+	const uint8_t character_id[32], uint32_t character_mode) noexcept
+{
+	if (character_id == nullptr
+		|| (character_mode != WORLD_SAVE_CHARACTER_WORLD_BOUND
+			&& character_mode != WORLD_SAVE_CHARACTER_PORTABLE))
+		return (FT_ERR_INVALID_ARGUMENT);
+	for (std::size_t index = 0U; index < 32U; ++index)
+		if (character_id[index] != 0U)
+		{
+			if (this->active_)
+				return (FT_ERR_INVALID_STATE);
+			if (this->character_identity_configured_)
+				return (std::memcmp(this->character_id_, character_id, 32U) == 0
+					&& this->character_mode_ == character_mode
+					? FT_ERR_SUCCESS : FT_ERR_INVALID_STATE);
+			std::memcpy(this->character_id_, character_id, 32U);
+			this->character_mode_ = character_mode;
+			this->character_identity_configured_ = true;
+			return (FT_ERR_SUCCESS);
+		}
+	return (FT_ERR_INVALID_ARGUMENT);
 }
 
 void GameSession::set_voxel_generation_config(const voxel_generation_config &config)
@@ -1979,17 +2775,47 @@ void GameSession::set_voxel_generation_config(const voxel_generation_config &con
 	this->world_.set_voxel_config(config);
 }
 
-void GameSession::stop()
+int32_t GameSession::stop()
 {
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
 	if (this->active_)
 	{
-		int32_t save_error = save_session_snapshot();
+		/* A revoked lease blocks ordinary checkpoints, but shutdown must still
+		 * persist the last authoritative state before releasing capacity. */
+		const int32_t save_error = save_session_snapshot(false);
 		if (save_error != FT_ERR_SUCCESS)
 		{
 			error_code_ = save_error;
 			std::fprintf(stderr,
-				"World item save failed path=%s error=%d\n",
+				"World session save failed path=%s error=%d; session remains active\n",
 				world_item_save_path_, save_error);
+			return (save_error);
+		}
+		if (this->active_join_catalog_ != nullptr)
+		{
+			const int32_t release_error = this->active_join_catalog_->
+				release_join(this->active_join_lease_id_);
+			if (release_error != FT_ERR_SUCCESS
+				&& release_error != FT_ERR_NOT_FOUND)
+			{
+				error_code_ = release_error;
+				std::fprintf(stderr,
+					"World session join lease release failed error=%d; session remains active\n",
+					release_error);
+				return (release_error);
+			}
+			this->active_join_catalog_ = nullptr;
+			std::memset(this->active_join_lease_id_, 0,
+				sizeof(this->active_join_lease_id_));
+		}
+		const int32_t registry_result = game_session_unregister_world(
+			this->world_id_);
+		if (registry_result != FT_ERR_SUCCESS
+			&& registry_result != FT_ERR_NOT_FOUND)
+		{
+			error_code_ = registry_result;
+			return (registry_result);
 		}
 		(void)regeneration_world_rules_.destroy();
 		int32_t analytics_error = RuntimeAnalytics::end_world_session();
@@ -2013,9 +2839,10 @@ void GameSession::stop()
 	revision_occupancy_valid_ = false;
 	active_ = false;
 	world_loom_start_committed_ = false;
+	return (FT_ERR_SUCCESS);
 }
 
-MinecraftItemCatalog &GameSession::item_catalog()
+const MinecraftItemCatalog &GameSession::item_catalog() const
 {
 	return (item_catalog_);
 }
@@ -2025,7 +2852,7 @@ const MinecraftRecipeCatalog &GameSession::recipe_catalog() const
 	return (recipe_catalog_);
 }
 
-WorldItemStore &GameSession::world_items()
+const WorldItemStore &GameSession::world_items() const
 {
 	return (world_items_);
 }
@@ -2035,12 +2862,12 @@ const WorldEntityStore &GameSession::world_entities() const
 	return (world_entities_);
 }
 
-WorldSpawnerStore &GameSession::world_spawners()
+const WorldSpawnerStore &GameSession::world_spawners() const
 {
 	return (world_spawners_);
 }
 
-GameTransactionJournal &GameSession::transaction_journal()
+const GameTransactionJournal &GameSession::transaction_journal() const
 {
 	return (transaction_journal_);
 }
@@ -2048,6 +2875,64 @@ GameTransactionJournal &GameSession::transaction_journal()
 const RegenerationCardSession &GameSession::regeneration_cards() const
 {
 	return (regeneration_cards_);
+}
+
+int32_t GameSession::query_regeneration_card_hand(uint64_t actor_id,
+	RegenerationCardHandView &view_out) const noexcept
+{
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
+	RegenerationCardHandView staged = {};
+	uint32_t hand_count = 0U;
+	int32_t result;
+	if (actor_id == 0U || this->authenticated_actor_authorizer_ == nullptr
+		|| !this->authenticated_actor_authorizer_(actor_id,
+			this->authenticated_actor_authorizer_user_data_))
+		return (FT_ERR_PERMISSION_DENIED);
+	if (!this->active_ || !this->world_loom_start_committed_
+		|| !this->world_.world_revision().pending
+		|| !this->regeneration_cards_.is_initialized())
+		return (FT_ERR_INVALID_OPERATION);
+	result = this->regeneration_cards_.get_hand_count(&hand_count);
+	if (result == FT_ERR_SUCCESS)
+		result = this->regeneration_cards_.get_pending_required_discard_count(
+			&staged.required_discard_count);
+	if (result == FT_ERR_SUCCESS)
+		result = this->regeneration_cards_.engine_.query_pending_choices(
+			RegenerationCardSession::PLAYER_ID, staged.pending_choices);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	if (hand_count > FT_CARD_GAME_MAX_CARDS)
+		return (FT_ERR_INVALID_STATE);
+	try
+	{
+		staged.cards.reserve(hand_count);
+		for (uint32_t index = 0U; index < hand_count; ++index)
+		{
+			card_game_deck_card card = {};
+			result = this->regeneration_cards_.hand_inspect(index, &card);
+			if (result != FT_ERR_SUCCESS
+				|| card.instance_id == 0U
+				|| !RegenerationCardSession::is_supported_card_definition(
+					card.card_id))
+				return (result == FT_ERR_SUCCESS
+					? FT_ERR_INVALID_STATE : result);
+			staged.cards.push_back({card.instance_id, card.card_id});
+		}
+	}
+	catch (const std::bad_alloc &)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	if (this->authenticated_actor_authorizer_ == nullptr
+		|| !this->authenticated_actor_authorizer_(actor_id,
+			this->authenticated_actor_authorizer_user_data_))
+		return (FT_ERR_PERMISSION_DENIED);
+	staged.card_session_id = this->regeneration_cards_.action_session_id_;
+	view_out.cards.swap(staged.cards);
+	view_out.card_session_id = staged.card_session_id;
+	view_out.required_discard_count = staged.required_discard_count;
+	return (FT_ERR_SUCCESS);
 }
 
 const RegenerationWorldRules &GameSession::regeneration_world_rules() const
@@ -2059,6 +2944,26 @@ int32_t GameSession::play_regeneration_card(uint64_t request_id,
 	uint32_t card_instance_id, const RegenerationCardChoice &choice,
 	RegenerationPolicyIntent *intent_out) noexcept
 {
+	return (this->play_regeneration_card_internal(0U, request_id,
+		card_instance_id, choice, intent_out));
+}
+
+int32_t GameSession::play_regeneration_card(uint64_t authenticated_actor_id,
+	uint64_t request_id, uint32_t card_instance_id,
+	const RegenerationCardChoice &choice,
+	RegenerationPolicyIntent *intent_out) noexcept
+{
+	return (this->play_regeneration_card_internal(authenticated_actor_id,
+		request_id, card_instance_id, choice, intent_out));
+}
+
+int32_t GameSession::play_regeneration_card_internal(
+	uint64_t authenticated_actor_id, uint64_t request_id,
+	uint32_t card_instance_id, const RegenerationCardChoice &choice,
+	RegenerationPolicyIntent *intent_out) noexcept
+{
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
 	std::vector<uint8_t> previous_state;
 	uint32_t hand_count = 0U;
 	uint32_t hand_index = 0U;
@@ -2079,6 +2984,15 @@ int32_t GameSession::play_regeneration_card(uint64_t request_id,
 		|| !this->world_loom_start_committed_
 		|| !this->world_.world_revision().pending)
 		return (FT_ERR_INVALID_OPERATION);
+	if (authenticated_actor_id == 0U)
+	{
+		if (this->authenticated_actor_authorizer_ != nullptr)
+			return (FT_ERR_PERMISSION_DENIED);
+	}
+	else if (this->authenticated_actor_authorizer_ == nullptr
+		|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+			this->authenticated_actor_authorizer_user_data_))
+		return (FT_ERR_PERMISSION_DENIED);
 	*intent_out = {};
 	if (this->world_.world_revision().regenerating)
 		return (FT_ERR_INVALID_OPERATION);
@@ -2539,11 +3453,21 @@ int32_t GameSession::play_regeneration_card(uint64_t request_id,
 	action_result = this->regeneration_cards_.serialize_snapshot(previous_state);
 	if (action_result != FT_ERR_SUCCESS)
 		return (action_result);
+	if (authenticated_actor_id != 0U
+		&& (this->authenticated_actor_authorizer_ == nullptr
+			|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+				this->authenticated_actor_authorizer_user_data_)))
+		return (FT_ERR_PERMISSION_DENIED);
 	action_result = this->regeneration_cards_.play_card(request_id,
 		card_instance_id, choice, this->world_.voxel_generation_settings(),
 		intent_out, stabilizer_risk_basis_points, stabilizer_ordinal,
 		catalyst_option_count == 0U ? nullptr : catalyst_options,
-		catalyst_option_count);
+		catalyst_option_count, authenticated_actor_id);
+	if (action_result == FT_ERR_SUCCESS && authenticated_actor_id != 0U
+		&& (this->authenticated_actor_authorizer_ == nullptr
+			|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+				this->authenticated_actor_authorizer_user_data_)))
+		action_result = FT_ERR_PERMISSION_DENIED;
 	if (action_result == FT_ERR_SUCCESS && !cached_play
 		&& card_definition_id
 			== RegenerationCardSession::VOLATILE_STABILIZER_CARD_DEFINITION_ID)
@@ -2615,6 +3539,8 @@ int32_t GameSession::query_regeneration_card_effect_status(
 	uint32_t *card_definition_id_out, int32_t *status_out,
 	uint32_t *no_effect_choice_mask_out) const noexcept
 {
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
 	return (this->query_regeneration_card_effect_status(card_instance_id,
 		choice, card_definition_id_out, status_out,
 		no_effect_choice_mask_out, nullptr));
@@ -2626,6 +3552,8 @@ int32_t GameSession::query_regeneration_card_effect_status(
 	uint32_t *no_effect_choice_mask_out,
 	const char **reason_out) const noexcept
 {
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
 	uint32_t hand_count = 0U;
 	uint32_t hand_index = 0U;
 	uint32_t definition_id = 0U;
@@ -3195,6 +4123,8 @@ int32_t GameSession::query_regeneration_card_effect_choices(
 	const std::vector<RegenerationTargetChunk> &chunk_candidates,
 	std::vector<RegenerationCardChoice> &choices_out) const noexcept
 {
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
 	std::vector<RegenerationCardChoice> staged;
 	std::vector<RegenerationTargetChunk> eligible_candidates;
 	uint32_t hand_count = 0U;
@@ -3315,6 +4245,18 @@ int32_t GameSession::draw_regeneration_cards(uint64_t request_id,
 	uint32_t required_discard_count,
 	RegenerationCardActionResult *result_out) noexcept
 {
+	return (this->draw_regeneration_cards(0U, request_id,
+		source_host_intent_sequence, draw_count, required_discard_count,
+		result_out));
+}
+
+int32_t GameSession::draw_regeneration_cards(uint64_t authenticated_actor_id,
+	uint64_t request_id, uint64_t source_host_intent_sequence,
+	uint32_t draw_count, uint32_t required_discard_count,
+	RegenerationCardActionResult *result_out) noexcept
+{
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
 	std::vector<uint8_t> previous_state;
 	int32_t action_result;
 	int32_t save_result;
@@ -3323,6 +4265,15 @@ int32_t GameSession::draw_regeneration_cards(uint64_t request_id,
 		|| !this->world_loom_start_committed_
 		|| !this->world_.world_revision().pending)
 		return (FT_ERR_INVALID_OPERATION);
+	if (authenticated_actor_id == 0U)
+	{
+		if (this->authenticated_actor_authorizer_ != nullptr)
+			return (FT_ERR_PERMISSION_DENIED);
+	}
+	else if (this->authenticated_actor_authorizer_ == nullptr
+		|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+			this->authenticated_actor_authorizer_user_data_))
+		return (FT_ERR_PERMISSION_DENIED);
 	*result_out = {};
 	if (this->world_.world_revision().regenerating)
 		return (FT_ERR_INVALID_OPERATION);
@@ -3331,7 +4282,12 @@ int32_t GameSession::draw_regeneration_cards(uint64_t request_id,
 		return (action_result);
 	action_result = this->regeneration_cards_.draw_cards(request_id,
 		source_host_intent_sequence, draw_count, required_discard_count,
-		result_out);
+		result_out, authenticated_actor_id);
+	if (action_result == FT_ERR_SUCCESS && authenticated_actor_id != 0U
+		&& (this->authenticated_actor_authorizer_ == nullptr
+			|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+				this->authenticated_actor_authorizer_user_data_)))
+		action_result = FT_ERR_PERMISSION_DENIED;
 	save_result = this->save_session_snapshot();
 	if (save_result != FT_ERR_SUCCESS)
 	{
@@ -3348,6 +4304,27 @@ int32_t GameSession::discard_regeneration_hand_card(uint64_t request_id,
 	uint64_t source_draw_request_id, uint32_t card_instance_id,
 	RegenerationCardActionResult *result_out) noexcept
 {
+	return (this->discard_regeneration_hand_card_internal(0U, request_id,
+		source_draw_request_id, card_instance_id, result_out));
+}
+
+int32_t GameSession::discard_regeneration_hand_card(
+	uint64_t authenticated_actor_id, uint64_t request_id,
+	uint64_t source_draw_request_id, uint32_t card_instance_id,
+	RegenerationCardActionResult *result_out) noexcept
+{
+	return (this->discard_regeneration_hand_card_internal(
+		authenticated_actor_id, request_id, source_draw_request_id,
+		card_instance_id, result_out));
+}
+
+int32_t GameSession::discard_regeneration_hand_card_internal(
+	uint64_t authenticated_actor_id, uint64_t request_id,
+	uint64_t source_draw_request_id, uint32_t card_instance_id,
+	RegenerationCardActionResult *result_out) noexcept
+{
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
 	std::vector<uint8_t> previous_state;
 	int32_t action_result;
 	int32_t save_result;
@@ -3356,14 +4333,40 @@ int32_t GameSession::discard_regeneration_hand_card(uint64_t request_id,
 		|| !this->world_loom_start_committed_
 		|| !this->world_.world_revision().pending)
 		return (FT_ERR_INVALID_OPERATION);
+	if (authenticated_actor_id == 0U)
+	{
+		if (this->authenticated_actor_authorizer_ != nullptr)
+			return (FT_ERR_PERMISSION_DENIED);
+	}
+	else if (this->authenticated_actor_authorizer_ == nullptr
+		|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+			this->authenticated_actor_authorizer_user_data_))
+		return (FT_ERR_PERMISSION_DENIED);
 	*result_out = {};
 	if (this->world_.world_revision().regenerating)
 		return (FT_ERR_INVALID_OPERATION);
 	action_result = this->regeneration_cards_.serialize_snapshot(previous_state);
 	if (action_result != FT_ERR_SUCCESS)
 		return (action_result);
+	if (authenticated_actor_id != 0U
+		&& (this->authenticated_actor_authorizer_ == nullptr
+			|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+				this->authenticated_actor_authorizer_user_data_)))
+		return (FT_ERR_PERMISSION_DENIED);
 	action_result = this->regeneration_cards_.discard_hand_card(request_id,
-		source_draw_request_id, card_instance_id, result_out);
+		source_draw_request_id, card_instance_id, result_out,
+		authenticated_actor_id);
+	if (action_result == FT_ERR_SUCCESS && authenticated_actor_id != 0U
+		&& (this->authenticated_actor_authorizer_ == nullptr
+			|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+				this->authenticated_actor_authorizer_user_data_)))
+	{
+		if (this->regeneration_cards_.restore_snapshot(previous_state.data(),
+				previous_state.size()) != FT_ERR_SUCCESS)
+			return (FT_ERR_INVALID_STATE);
+		*result_out = {};
+		return (FT_ERR_PERMISSION_DENIED);
+	}
 	save_result = this->save_session_snapshot();
 	if (save_result != FT_ERR_SUCCESS)
 	{
@@ -3380,7 +4383,7 @@ int32_t GameSession::import_regeneration_card_item_to_deck(
 	int32_t inventory_slot, uint64_t expected_inventory_revision,
 	uint64_t request_id, card_game_deck_card *card_out) noexcept
 {
-	std::lock_guard<std::mutex> item_transaction_lock(
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
 		this->item_instance_transaction_mutex_);
 	if (!this->active_ || card_out == nullptr
 		|| this->world_.world_revision().pending
@@ -3401,7 +4404,7 @@ int32_t GameSession::export_regeneration_card_to_inventory(
 	uint64_t request_id,
 	RegenerationCardTransferResult *result_out) noexcept
 {
-	std::lock_guard<std::mutex> item_transaction_lock(
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
 		this->item_instance_transaction_mutex_);
 	if (!this->active_ || result_out == nullptr
 		|| this->world_.world_revision().pending
@@ -3485,16 +4488,38 @@ int32_t GameSession::initialize_regeneration_world_rules() noexcept
 		this->regeneration_world_rules_policy_));
 }
 
-int32_t GameSession::save_session_snapshot() noexcept
+int32_t GameSession::save_session_snapshot(bool enforce_join_admission) noexcept
 {
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
+	if (enforce_join_admission && this->active_join_catalog_ != nullptr)
+	{
+		const int32_t admission_result =
+			this->active_join_catalog_->validate_join_lease(
+				this->active_join_lease_id_);
+		if (admission_result != FT_ERR_SUCCESS)
+			return (admission_result);
+	}
 	std::vector<uint8_t> card_session_bytes;
 	std::vector<uint8_t> regeneration_rules_bytes;
 	std::vector<uint8_t> chunk_instability_bytes;
 	std::vector<uint8_t> revision_metadata_bytes;
 	std::vector<uint8_t> crop_growth_policy_bytes;
+	std::vector<uint8_t> host_config_state_bytes;
 	int32_t result = game_session_serialize_crop_growth_state(
 		crop_growth_policy_, world_.current_tick,
 		crop_chunk_growth_deadlines_, crop_growth_policy_bytes);
+	uint64_t host_configuration_hash = 0U;
+	if (result == FT_ERR_SUCCESS)
+		result = game_session_host_configuration_hash(
+			this->runtime_block_acquisition_config_,
+			this->trusted_script_manifest_hash_,
+			&host_configuration_hash);
+	if (result == FT_ERR_SUCCESS)
+		result = game_session_serialize_host_config_state(
+			host_configuration_hash, this->world_id_, this->world_seed_hash_,
+			this->character_id_, this->character_mode_,
+			host_config_state_bytes);
 	if (result == FT_ERR_SUCCESS)
 		result = this->regeneration_cards_.serialize_snapshot(
 		card_session_bytes);
@@ -3514,7 +4539,7 @@ int32_t GameSession::save_session_snapshot() noexcept
 			world_spawners_, entity_state_);
 	if (result == FT_ERR_SUCCESS)
 		result = GameSessionPersistence::
-			save_file_with_revision_server_checkpoint(
+			save_file_with_revision_server_checkpoint_and_host_config(
 			this->world_item_save_path_,
 			this->player_character_, this->world_items_, this->recipe_catalog_,
 			this->transaction_journal_, card_session_bytes,
@@ -3522,7 +4547,8 @@ int32_t GameSession::save_session_snapshot() noexcept
 			revision_metadata_bytes, fluid_state_, entity_state_,
 			crop_growth_policy_bytes,
 			this->regeneration_output_session_id_,
-			this->revision_server_checkpoint_state_);
+			this->revision_server_checkpoint_state_,
+			host_config_state_bytes);
 	return (result);
 }
 
@@ -3531,6 +4557,119 @@ int32_t GameSession::save_snapshot_callback(void *context) noexcept
 	if (context == nullptr)
 		return (FT_ERR_INVALID_ARGUMENT);
 	return (static_cast<GameSession *>(context)->save_session_snapshot());
+}
+
+bool GameSession::character_state_revision_provider_callback(
+	const game_character &character, uint64_t *revision_out,
+	void *user_data) noexcept
+{
+	if (revision_out == nullptr || user_data == nullptr)
+		return (false);
+	GameSession *session = static_cast<GameSession *>(user_data);
+	if (&session->player_character_ != &character)
+		return (false);
+	std::vector<game_inventory_item_snapshot> equipment;
+	if (game_session_snapshot_equipment(character, equipment) != FT_ERR_SUCCESS)
+		return (false);
+	*revision_out = game_session_equipment_revision(equipment);
+	return (true);
+}
+
+bool GameSession::processing_start_precommit_authorizer_callback(
+	uint64_t authenticated_actor_id, int32_t station_x, int32_t station_y,
+	int32_t station_z, uint64_t expected_station_revision,
+	void *user_data) noexcept
+{
+	GameSession *session = static_cast<GameSession *>(user_data);
+
+	if (session == nullptr || authenticated_actor_id == 0U
+		|| session->authenticated_actor_authorizer_ == nullptr
+		|| session->actor_processing_station_authorizer_ == nullptr
+		|| !session->authenticated_actor_authorizer_(authenticated_actor_id,
+			session->authenticated_actor_authorizer_user_data_))
+		return (false);
+	return (session->actor_processing_station_authorizer_(
+		authenticated_actor_id,
+		static_cast<uint32_t>(MinecraftRecipeCatalog::FURNACE_STATION_ID),
+		station_x, station_y, station_z, expected_station_revision,
+		session->actor_processing_station_authorizer_user_data_));
+}
+
+bool GameSession::authenticated_actor_precommit_authorizer_callback(
+	uint64_t authenticated_actor_id, void *user_data) noexcept
+{
+	GameSession *session = static_cast<GameSession *>(user_data);
+
+	return (session != nullptr && authenticated_actor_id != 0U
+		&& session->authenticated_actor_authorizer_ != nullptr
+		&& session->authenticated_actor_authorizer_(authenticated_actor_id,
+			session->authenticated_actor_authorizer_user_data_));
+}
+
+bool GameSession::craft_precommit_authorizer_callback(
+	uint64_t authenticated_actor_id, uint32_t station_id, int32_t station_x,
+	int32_t station_y, int32_t station_z,
+	uint64_t expected_station_revision, uint64_t expected_session_id,
+	uint64_t expected_session_revision, void *user_data) noexcept
+{
+	GameSession *session = static_cast<GameSession *>(user_data);
+
+	if (session == nullptr || authenticated_actor_id == 0U
+		|| session->authenticated_actor_authorizer_ == nullptr
+		|| !session->authenticated_actor_authorizer_(authenticated_actor_id,
+			session->authenticated_actor_authorizer_user_data_))
+		return (false);
+	if ((expected_session_id == 0U) != (expected_session_revision == 0U))
+		return (false);
+	if (expected_session_id != 0U)
+	{
+		card_game_snapshot current_session = {};
+		if (expected_session_id != session->regeneration_cards_.action_session_id_
+			|| session->regeneration_cards_.engine_.get_snapshot(
+				&current_session) != FT_ERR_SUCCESS
+			|| current_session.state_sequence != expected_session_revision)
+			return (false);
+	}
+	if (station_id == static_cast<uint32_t>(
+			MinecraftRecipeCatalog::HAND_STATION_ID))
+		return (true);
+	if (expected_station_revision == 0U)
+		return (false);
+	return (session->actor_processing_station_authorizer_ != nullptr
+		&& session->actor_processing_station_authorizer_(authenticated_actor_id,
+			station_id, station_x, station_y, station_z,
+			expected_station_revision,
+			session->actor_processing_station_authorizer_user_data_));
+}
+
+bool GameSession::equipment_repair_precommit_authorizer_callback(
+	uint64_t authenticated_actor_id, int32_t station_x, int32_t station_y,
+	int32_t station_z, uint64_t expected_station_revision,
+	void *user_data) noexcept
+{
+	GameSession *session = static_cast<GameSession *>(user_data);
+	uint32_t station_block_id = GAME_VOXEL_AIR_BLOCK;
+
+	if (session == nullptr
+		|| !GameSession::authenticated_actor_precommit_authorizer_callback(
+			authenticated_actor_id, user_data)
+		|| session->actor_processing_station_authorizer_ == nullptr
+		|| !session->actor_processing_station_authorizer_(authenticated_actor_id,
+			static_cast<uint32_t>(MinecraftRecipeCatalog::WORKBENCH_STATION_ID),
+			station_x, station_y, station_z, expected_station_revision,
+			session->actor_processing_station_authorizer_user_data_)
+		|| !session->world_.block_id_at(station_x, station_y, station_z,
+			&station_block_id)
+		|| station_block_id != VOXEL_GENERATOR_WORKBENCH_BLOCK_ID)
+		return (false);
+	const int32_t chunk_x = WorldCoordinates::floor_divide(station_x,
+		GAME_VOXEL_CHUNK_WIDTH);
+	const int32_t chunk_z = WorldCoordinates::floor_divide(station_z,
+		GAME_VOXEL_CHUNK_DEPTH);
+	const WorldChunk *station_chunk = session->world_.find_chunk(chunk_x,
+		chunk_z);
+	return (station_chunk != nullptr
+		&& station_chunk->voxel_revision == expected_station_revision);
 }
 
 int32_t GameSession::revision_start_commit_callback(uint64_t actor_id,
@@ -3546,19 +4685,328 @@ int32_t GameSession::revision_start_commit_callback(uint64_t actor_id,
 		expected_policy_revision, opening_card_count));
 }
 
+int32_t GameSession::revision_start_policy_status_callback(
+	uint64_t actor_id, uint64_t loom_id,
+	WorldRevisionStartPolicyStatus &status_out,
+	void *user_data) noexcept
+{
+	if (user_data == nullptr || actor_id == 0U || loom_id == 0U)
+		return (FT_ERR_INVALID_ARGUMENT);
+	GameSession *session = static_cast<GameSession *>(user_data);
+	std::lock_guard<std::recursive_mutex> session_lock(
+		session->item_instance_transaction_mutex_);
+	GameTransactionJournal::Record record = {};
+	WorldRevisionStartPolicyStatus staged = {};
+	int32_t result = session->transaction_journal_.latest(
+		WORLD_LOOM_START_SCOPE, WORLD_LOOM_START_TRANSACTION_TYPE, &record);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	if (record.state != GameTransactionJournal::COMMITTED
+		|| record.payload.size() < 56U
+		|| record.payload[0] != 'W' || record.payload[1] != 'L'
+		|| record.payload[2] != 'S' || record.payload[3] != 'T')
+		return (FT_ERR_NOT_FOUND);
+	if (game_session_read_u64(record.payload, 8U) != actor_id
+		|| game_session_read_u64(record.payload, 16U) != loom_id)
+		return (FT_ERR_NOT_FOUND);
+	const uint32_t version = game_session_read_u32(record.payload, 4U);
+	if ((version == 1U && record.payload.size() != 56U)
+		|| (version == 2U && record.payload.size() != 72U)
+		|| (version == 3U && record.payload.size() != 80U)
+		|| (version == 4U && record.payload.size() != 92U)
+		|| (version == 5U && record.payload.size() < 100U)
+		|| (version == 6U && record.payload.size() < 120U)
+		|| version < 1U || version > 6U)
+		return (FT_ERR_INVALID_STATE);
+	if (version >= 2U)
+	{
+		staged.decision_timeout_ms = game_session_read_u64(
+			record.payload, 64U);
+		staged.currency_item_id = game_session_read_u32(record.payload, 44U);
+		staged.committed_currency_amount = game_session_read_u64(
+			record.payload, 48U);
+	}
+	if (version >= 3U)
+	{
+		staged.mode = game_session_read_u32(record.payload, 72U);
+		staged.active_player_count = game_session_read_u32(
+			record.payload, 76U);
+		if ((staged.mode != 1U && staged.mode != 2U)
+			|| staged.active_player_count == 0U
+			|| (staged.mode == 1U && staged.active_player_count != 1U)
+			|| (staged.mode == 2U && staged.active_player_count < 2U)
+			|| staged.decision_timeout_ms
+				< MINIMUM_REVISION_DECISION_TIMEOUT_MS
+			|| staged.decision_timeout_ms
+				> MAXIMUM_REVISION_DECISION_TIMEOUT_MS)
+			return (FT_ERR_INVALID_STATE);
+	}
+	if (version >= 4U
+		&& (game_session_read_u32(record.payload, 80U) > 256U
+			|| game_session_read_u32(record.payload, 84U) > 256U
+			|| game_session_read_u32(record.payload, 80U)
+				+ game_session_read_u32(record.payload, 84U) == 0U
+			|| game_session_read_u32(record.payload, 80U)
+				+ game_session_read_u32(record.payload, 84U) > 256U
+			|| game_session_read_u32(record.payload, 88U)
+				!= WORLD_REVISION_SETTLEMENT_RETAIN_COMMITTED_COST))
+		return (FT_ERR_INVALID_STATE);
+	if (version >= 4U)
+	{
+		staged.selected_paid_chunks = game_session_read_u32(
+			record.payload, 80U);
+		staged.selected_bonus_chunks = game_session_read_u32(
+			record.payload, 84U);
+		staged.settlement_policy = game_session_read_u32(
+			record.payload, 88U);
+	}
+	if (version >= 5U)
+	{
+		const std::size_t participant_count_offset =
+			version == 5U ? 92U : 96U;
+		const std::size_t participants_offset =
+			version == 5U ? 96U : 100U;
+		const std::size_t payload_fixed_size = version == 5U ? 100U : 120U;
+		const uint32_t participant_count = game_session_read_u32(
+			record.payload, participant_count_offset);
+		if (version >= 6U)
+			staged.revision_identifier = game_session_read_u32(
+				record.payload, 92U);
+		if (participant_count != staged.active_player_count
+			|| (version >= 6U && staged.revision_identifier == 0U)
+			|| participant_count > 4096U
+			|| record.payload.size() != payload_fixed_size
+				+ static_cast<std::size_t>(participant_count) * 8U)
+			return (FT_ERR_INVALID_STATE);
+		try
+		{
+			staged.participant_actor_ids.reserve(participant_count);
+			for (uint32_t index = 0U; index < participant_count; ++index)
+				staged.participant_actor_ids.push_back(game_session_read_u64(
+					record.payload, participants_offset
+						+ static_cast<std::size_t>(index) * 8U));
+		}
+		catch (const std::bad_alloc &)
+		{
+			return (FT_ERR_NO_MEMORY);
+		}
+		if (!std::is_sorted(staged.participant_actor_ids.begin(),
+				staged.participant_actor_ids.end())
+			|| !std::binary_search(staged.participant_actor_ids.begin(),
+				staged.participant_actor_ids.end(),
+				game_session_read_u64(record.payload, 8U))
+			|| game_session_validate_revision_actor_ids(
+				staged.participant_actor_ids) != FT_ERR_SUCCESS)
+			return (FT_ERR_INVALID_STATE);
+		if (version == 6U)
+		{
+			uint64_t card_deal_request_id = 0U;
+			uint32_t card_deal_count = 0U;
+			const std::size_t metadata_offset = participants_offset
+				+ static_cast<std::size_t>(participant_count) * 8U;
+			staged.card_content_version = game_session_read_u32(
+				record.payload, metadata_offset);
+			staged.generation_manifest_hash = game_session_read_u64(
+				record.payload, metadata_offset + 4U);
+			staged.trusted_script_manifest_hash = game_session_read_u64(
+				record.payload, metadata_offset + 12U);
+			if (staged.card_content_version
+					!= RegenerationCardSession::CONTENT_VERSION
+				|| staged.generation_manifest_hash == 0U
+				|| staged.generation_manifest_hash
+					!= session->regeneration_world_rules_policy_
+						.generation_manifest_hash
+				|| staged.trusted_script_manifest_hash
+					!= session->trusted_script_manifest_hash_)
+				return (FT_ERR_INVALID_STATE);
+			result = session->regeneration_cards_.get_starting_hand_deal_identity(
+				&card_deal_request_id, &card_deal_count);
+			if (result != FT_ERR_SUCCESS
+				|| card_deal_request_id != record.request_id
+				|| card_deal_count != game_session_read_u32(record.payload, 40U))
+				return (FT_ERR_INVALID_STATE);
+		}
+		if (version >= 6U)
+		{
+			const World::WorldRevision current_revision =
+				session->world_.world_revision();
+			if (current_revision.identifier != staged.revision_identifier)
+				return (FT_ERR_NOT_FOUND);
+			if (current_revision.pending)
+			{
+				if (!session->world_.revision_barriers_active()
+					|| session->world_.revision_decision_deadline_epoch()
+						!= game_session_read_u64(record.payload, 56U))
+					return (FT_ERR_NOT_FOUND);
+			}
+			else if (!current_revision.regenerating
+				&& !session->world_.revision_generation_requested()
+				&& !session->world_.revision_barriers_active())
+			{
+				std::vector<WorldRevisionManager::RevisionChunk> completed_chunks;
+				uint32_t completed_revision_id = 0U;
+				bool completed = false;
+				result = session->world_.revision_manager.copy_status_chunks(
+					completed_chunks, &completed_revision_id, &completed);
+				if (result != FT_ERR_SUCCESS)
+					return (result);
+				if (!completed
+					|| completed_revision_id != staged.revision_identifier)
+					return (FT_ERR_NOT_FOUND);
+			}
+		}
+	}
+	status_out.mode = staged.mode;
+	status_out.active_player_count = staged.active_player_count;
+	status_out.decision_timeout_ms = staged.decision_timeout_ms;
+	status_out.currency_item_id = staged.currency_item_id;
+	status_out.committed_currency_amount = staged.committed_currency_amount;
+	status_out.selected_paid_chunks = staged.selected_paid_chunks;
+	status_out.selected_bonus_chunks = staged.selected_bonus_chunks;
+	status_out.settlement_policy = staged.settlement_policy;
+	status_out.revision_identifier = staged.revision_identifier;
+	status_out.card_content_version = staged.card_content_version;
+	status_out.generation_manifest_hash = staged.generation_manifest_hash;
+	status_out.trusted_script_manifest_hash =
+		staged.trusted_script_manifest_hash;
+	status_out.participant_actor_ids.swap(staged.participant_actor_ids);
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t GameSession::revision_card_play_callback(uint64_t actor_id,
+	uint64_t loom_id, uint64_t request_id, uint32_t card_instance_id,
+	const RegenerationCardChoice &choice,
+	RegenerationPolicyIntent *intent_out, void *user_data) noexcept
+{
+	if (user_data == nullptr || actor_id == 0U || loom_id == 0U)
+		return (FT_ERR_INVALID_ARGUMENT);
+	return (static_cast<GameSession *>(user_data)->play_regeneration_card(
+		actor_id, request_id, card_instance_id, choice, intent_out));
+}
+
+int32_t GameSession::revision_card_discard_callback(uint64_t actor_id,
+	uint64_t loom_id, uint64_t request_id,
+	uint64_t source_draw_request_id, uint32_t card_instance_id,
+	RegenerationCardActionResult *result_out, void *user_data) noexcept
+{
+	if (user_data == nullptr || actor_id == 0U || loom_id == 0U)
+		return (FT_ERR_INVALID_ARGUMENT);
+	return (static_cast<GameSession *>(user_data)->
+		discard_regeneration_hand_card(actor_id, request_id,
+			source_draw_request_id, card_instance_id, result_out));
+}
+
+int32_t GameSession::revision_card_draw_callback(uint64_t actor_id,
+	uint64_t loom_id, uint64_t request_id,
+	uint64_t source_host_intent_sequence, uint32_t draw_count,
+	uint32_t required_discard_count,
+	RegenerationCardActionResult *result_out, void *user_data) noexcept
+{
+	if (user_data == nullptr || actor_id == 0U || loom_id == 0U)
+		return (FT_ERR_INVALID_ARGUMENT);
+	return (static_cast<GameSession *>(user_data)->draw_regeneration_cards(
+		actor_id, request_id, source_host_intent_sequence, draw_count,
+		required_discard_count, result_out));
+}
+
+int32_t GameSession::revision_card_expiry_callback(uint64_t actor_id,
+	uint64_t loom_id, uint64_t request_id, uint32_t *resolved_count_out,
+	bool *replayed_out, void *user_data) noexcept
+{
+	if (user_data == nullptr || actor_id == 0U || loom_id == 0U
+		|| replayed_out == nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
+	GameSession *session = static_cast<GameSession *>(user_data);
+	bool was_cached = false;
+	uint32_t cached_count = 0U;
+	int32_t result = session->regeneration_cards_.query_expiry_result(
+		request_id, &was_cached, &cached_count);
+	(void)cached_count;
+	if (result == FT_ERR_SUCCESS)
+		result = session->resolve_expired_regeneration_choices(actor_id,
+			request_id, resolved_count_out);
+	if (result == FT_ERR_SUCCESS)
+		*replayed_out = was_cached;
+	return (result);
+}
+
+int32_t GameSession::revision_card_hand_query_callback(uint64_t actor_id,
+	uint64_t loom_id, RegenerationCardHandView &view_out,
+	void *user_data) noexcept
+{
+	if (user_data == nullptr || actor_id == 0U || loom_id == 0U)
+		return (FT_ERR_INVALID_ARGUMENT);
+	return (static_cast<GameSession *>(user_data)->query_regeneration_card_hand(
+		actor_id, view_out));
+}
+
+int32_t GameSession::revision_card_choice_callback(uint64_t actor_id,
+	uint64_t loom_id, uint64_t request_id, uint32_t choice_id,
+	uint32_t option_id, RegenerationCardActionResult *result_out,
+	void *user_data) noexcept
+{
+	if (user_data == nullptr || actor_id == 0U || loom_id == 0U)
+		return (FT_ERR_INVALID_ARGUMENT);
+	return (static_cast<GameSession *>(user_data)->
+		choose_regeneration_card_option(actor_id, request_id, choice_id,
+			option_id, result_out));
+}
+
 int32_t GameSession::revision_occupancy_provider_callback(
-	std::vector<World::RevisionChunkCoordinate> &chunks_out,
+	WorldRevisionOccupancySample &sample_out,
 	void *user_data)
 {
 	GameSession *session;
+	WorldRevisionOccupancySample staged_sample = {};
+	uint64_t current_epoch_ms = 0U;
+	int32_t result;
 
 	if (user_data == nullptr)
 		return (FT_ERR_INVALID_POINTER);
 	session = static_cast<GameSession *>(user_data);
-	if (session->revision_occupancy_provider_ == nullptr)
+	if (session->revision_occupancy_provider_ == nullptr
+		|| session->revision_clock_provider_ == nullptr)
 		return (FT_ERR_PERMISSION_DENIED);
-	return (session->revision_occupancy_provider_(chunks_out,
-		session->revision_occupancy_provider_user_data_));
+	result = session->revision_occupancy_provider_(staged_sample,
+		session->revision_occupancy_provider_user_data_);
+	if (result == FT_ERR_SUCCESS
+		&& (staged_sample.sampled_epoch_ms == 0U
+			|| staged_sample.active_player_count >
+				WorldRevisionManager::MAXIMUM_OCCUPIED_CHUNKS
+			|| staged_sample.active_player_count
+				!= staged_sample.player_chunks.size()
+			|| staged_sample.active_player_count
+				!= staged_sample.player_actor_ids.size()))
+		result = FT_ERR_INVALID_STATE;
+	if (result == FT_ERR_SUCCESS)
+		result = game_session_validate_revision_actor_ids(
+			staged_sample.player_actor_ids);
+	if (result == FT_ERR_SUCCESS)
+		result = session->revision_clock_provider_(&current_epoch_ms,
+			session->revision_clock_provider_user_data_);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	if (current_epoch_ms < staged_sample.sampled_epoch_ms
+		|| current_epoch_ms - staged_sample.sampled_epoch_ms
+			> WORLD_REVISION_OCCUPANCY_MAX_AGE_MS)
+		return (FT_ERR_INVALID_STATE);
+	sample_out.player_chunks.swap(staged_sample.player_chunks);
+	sample_out.player_actor_ids.swap(staged_sample.player_actor_ids);
+	sample_out.active_player_count = staged_sample.active_player_count;
+	sample_out.sampled_epoch_ms = staged_sample.sampled_epoch_ms;
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t GameSession::revision_epoch_provider_callback(uint64_t *epoch_ms_out,
+	void *user_data) noexcept
+{
+	if (user_data == nullptr || epoch_ms_out == nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
+	GameSession *session = static_cast<GameSession *>(user_data);
+	if (session->revision_clock_provider_ == nullptr)
+		return (FT_ERR_PERMISSION_DENIED);
+	return (session->revision_clock_provider_(epoch_ms_out,
+		session->revision_clock_provider_user_data_));
 }
 
 int32_t GameSession::bind_world_revision_server(
@@ -3566,13 +5014,38 @@ int32_t GameSession::bind_world_revision_server(
 {
 	if (!this->active_)
 		return (FT_ERR_INVALID_OPERATION);
-	if (this->revision_occupancy_provider_ == nullptr)
+	if (this->revision_occupancy_provider_ == nullptr
+		|| this->revision_clock_provider_ == nullptr)
 		return (FT_ERR_PERMISSION_DENIED);
-	int32_t result = server.set_occupancy_provider(
-		&GameSession::revision_occupancy_provider_callback, this);
+	int32_t result = server.set_epoch_provider(
+		&GameSession::revision_epoch_provider_callback, this);
+	if (result == FT_ERR_SUCCESS)
+		result = server.set_occupancy_provider(
+			&GameSession::revision_occupancy_provider_callback, this);
 	if (result == FT_ERR_SUCCESS)
 		result = server.set_start_committer(
 			&GameSession::revision_start_commit_callback, this);
+	if (result == FT_ERR_SUCCESS)
+		result = server.set_start_policy_query(
+			&GameSession::revision_start_policy_status_callback, this);
+	if (result == FT_ERR_SUCCESS)
+		result = server.set_card_play_handler(
+			&GameSession::revision_card_play_callback, this);
+	if (result == FT_ERR_SUCCESS)
+		result = server.set_card_discard_handler(
+			&GameSession::revision_card_discard_callback, this);
+	if (result == FT_ERR_SUCCESS)
+		result = server.set_card_draw_handler(
+			&GameSession::revision_card_draw_callback, this);
+	if (result == FT_ERR_SUCCESS)
+		result = server.set_card_expiry_handler(
+			&GameSession::revision_card_expiry_callback, this);
+	if (result == FT_ERR_SUCCESS)
+		result = server.set_card_hand_query(
+			&GameSession::revision_card_hand_query_callback, this);
+	if (result == FT_ERR_SUCCESS)
+		result = server.set_card_choice_handler(
+			&GameSession::revision_card_choice_callback, this);
 	if (result == FT_ERR_SUCCESS
 		&& !this->revision_server_checkpoint_state_.empty())
 		result = server.restore_checkpoint(
@@ -3581,6 +5054,36 @@ int32_t GameSession::bind_world_revision_server(
 	if (result == FT_ERR_SUCCESS)
 		result = server.set_checkpoint_committer(
 			&GameSession::revision_checkpoint_committer_callback, this);
+	return (result);
+}
+
+int32_t GameSession::bind_world_revision_server(
+	WorldRevisionServer &server,
+	WorldRevisionServerAuthorizer authorizer,
+	void *authorizer_user_data,
+	WorldRevisionServerStationAccessAuthorizer station_authorizer,
+	void *station_authorizer_user_data,
+	WorldRevisionServerInstabilityViewAuthorizer instability_authorizer,
+	void *instability_authorizer_user_data) noexcept
+{
+	if (authorizer == nullptr || station_authorizer == nullptr
+		|| (instability_authorizer == nullptr
+			&& instability_authorizer_user_data != nullptr))
+		return (FT_ERR_INVALID_ARGUMENT);
+	if (!this->active_)
+		return (FT_ERR_INVALID_OPERATION);
+	if (this->revision_occupancy_provider_ == nullptr
+		|| this->revision_clock_provider_ == nullptr)
+		return (FT_ERR_PERMISSION_DENIED);
+	int32_t result = server.set_authorizer(authorizer, authorizer_user_data);
+	if (result == FT_ERR_SUCCESS)
+		result = server.set_station_access_authorizer(station_authorizer,
+			station_authorizer_user_data);
+	if (result == FT_ERR_SUCCESS && instability_authorizer != nullptr)
+		result = server.set_instability_view_authorizer(
+			instability_authorizer, instability_authorizer_user_data);
+	if (result == FT_ERR_SUCCESS)
+		result = this->bind_world_revision_server(server);
 	return (result);
 }
 
@@ -3613,9 +5116,13 @@ int32_t GameSession::commit_regeneration_start(uint64_t actor_id,
 	uint64_t expected_selection_revision,
 	uint64_t expected_policy_revision, uint32_t opening_card_count) noexcept
 {
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
 	std::vector<uint8_t> payload;
 	std::vector<uint8_t> card_state_before;
 	std::vector<uint8_t> journal_state_before;
+	std::vector<uint64_t> persisted_participant_ids;
+	std::vector<uint64_t> start_participant_ids;
 	game_inventory_snapshot inventory_before = {};
 	game_inventory_quantity_result currency_result = {};
 	RegenerationCardActionResult opening_deal_result = {};
@@ -3624,23 +5131,59 @@ int32_t GameSession::commit_regeneration_start(uint64_t actor_id,
 	uint64_t journal_sequence = 0U;
 	uint64_t inventory_revision = 0U;
 	uint64_t deadline_epoch_ms = 0U;
+	uint64_t current_epoch_ms = 0U;
+	uint64_t precommit_epoch_ms = 0U;
+	uint64_t persisted_timeout_ms = 0U;
+	uint32_t existing_payload_version = 0U;
+	uint32_t start_mode = 0U;
+	uint32_t start_player_count = 0U;
+	bool persisted_deadline = false;
 	bool replayed = false;
 	int32_t result;
 
 	if (!this->active_ || actor_id == 0U || loom_id == 0U
 		|| request_id == 0U)
 		return (FT_ERR_INVALID_ARGUMENT);
+	if (!this->regeneration_cards_.is_initialized()
+		|| this->regeneration_world_rules_policy_.generation_manifest_hash == 0U)
+		return (FT_ERR_CONFIGURATION);
+	const auto actor_is_authorized = [this, actor_id]() noexcept
+	{
+		return (this->authenticated_actor_authorizer_ != nullptr
+			&& this->authenticated_actor_authorizer_(actor_id,
+				this->authenticated_actor_authorizer_user_data_));
+	};
+	if (!actor_is_authorized())
+		return (FT_ERR_PERMISSION_DENIED);
 	if (this->revision_clock_provider_ == nullptr)
 		return (FT_ERR_INVALID_STATE);
 	result = this->transaction_journal_.find(WORLD_LOOM_START_SCOPE,
 		request_id, &existing);
 	if (result == FT_ERR_SUCCESS)
 	{
+		existing_payload_version = existing.payload.size() >= 8U
+			? game_session_read_u32(existing.payload, 4U) : 0U;
 		if (existing.transaction_type != WORLD_LOOM_START_TRANSACTION_TYPE
-			|| existing.payload.size() != 56U
+			|| (existing_payload_version == 1U
+				&& existing.payload.size() != 56U)
+			|| (existing_payload_version == 2U
+				&& existing.payload.size() != 72U)
+			|| (existing_payload_version == 3U
+				&& existing.payload.size() != 80U)
+			|| (existing_payload_version == 4U
+				&& existing.payload.size() != 92U)
+			|| (existing_payload_version == 5U
+				&& existing.payload.size() < 100U)
+			|| (existing_payload_version == 6U
+				&& existing.payload.size() < 120U)
+			|| (existing_payload_version != 1U
+				&& existing_payload_version != 2U
+				&& existing_payload_version != 3U
+				&& existing_payload_version != 4U
+				&& existing_payload_version != 5U
+				&& existing_payload_version != 6U)
 			|| existing.payload[0] != 'W' || existing.payload[1] != 'L'
 			|| existing.payload[2] != 'S' || existing.payload[3] != 'T'
-			|| game_session_read_u32(existing.payload, 4U) != 1U
 			|| game_session_read_u64(existing.payload, 8U) != actor_id
 			|| game_session_read_u64(existing.payload, 16U) != loom_id
 			|| game_session_read_u64(existing.payload, 24U)
@@ -3650,12 +5193,105 @@ int32_t GameSession::commit_regeneration_start(uint64_t actor_id,
 			|| game_session_read_u32(existing.payload, 40U)
 				!= opening_card_count)
 			return (FT_ERR_INVALID_ARGUMENT);
+		if (existing_payload_version >= 2U)
+		{
+			deadline_epoch_ms = game_session_read_u64(existing.payload, 56U);
+			persisted_timeout_ms = game_session_read_u64(existing.payload, 64U);
+			if (deadline_epoch_ms == 0U
+				|| persisted_timeout_ms
+					< MINIMUM_REVISION_DECISION_TIMEOUT_MS
+				|| persisted_timeout_ms
+					> MAXIMUM_REVISION_DECISION_TIMEOUT_MS)
+				return (FT_ERR_INVALID_STATE);
+			persisted_deadline = true;
+		}
+		if (existing_payload_version >= 3U)
+		{
+			start_mode = game_session_read_u32(existing.payload, 72U);
+			start_player_count = game_session_read_u32(existing.payload, 76U);
+			if (start_player_count == 0U
+				|| (start_mode != 1U && start_mode != 2U)
+				|| (start_mode == 1U && start_player_count != 1U)
+				|| (start_mode == 2U && start_player_count < 2U))
+				return (FT_ERR_INVALID_STATE);
+		}
+		if (existing_payload_version >= 4U
+			&& (game_session_read_u32(existing.payload, 80U) > 256U
+				|| game_session_read_u32(existing.payload, 84U) > 256U
+				|| game_session_read_u32(existing.payload, 80U)
+					+ game_session_read_u32(existing.payload, 84U) == 0U
+				|| game_session_read_u32(existing.payload, 80U)
+					+ game_session_read_u32(existing.payload, 84U) > 256U
+				|| game_session_read_u32(existing.payload, 88U)
+					!= WORLD_REVISION_SETTLEMENT_RETAIN_COMMITTED_COST))
+			return (FT_ERR_INVALID_STATE);
+		if (existing_payload_version >= 5U)
+		{
+			const uint32_t participant_count = game_session_read_u32(
+				existing.payload, existing_payload_version == 5U ? 92U : 96U);
+			const std::size_t participants_offset =
+				existing_payload_version == 5U ? 96U : 100U;
+			const std::size_t fixed_size =
+				existing_payload_version == 5U ? 100U : 120U;
+			if (participant_count != start_player_count
+				|| participant_count > 4096U
+				|| existing.payload.size() != fixed_size
+					+ static_cast<std::size_t>(participant_count) * 8U)
+				return (FT_ERR_INVALID_STATE);
+			try
+			{
+				persisted_participant_ids.reserve(participant_count);
+				for (uint32_t index = 0U; index < participant_count; ++index)
+					persisted_participant_ids.push_back(game_session_read_u64(
+						existing.payload, participants_offset
+							+ static_cast<std::size_t>(index) * 8U));
+			}
+			catch (const std::bad_alloc &)
+			{
+				return (FT_ERR_NO_MEMORY);
+			}
+			if (game_session_validate_revision_actor_ids(
+					persisted_participant_ids) != FT_ERR_SUCCESS
+				|| !std::is_sorted(persisted_participant_ids.begin(),
+					persisted_participant_ids.end())
+				|| !std::binary_search(persisted_participant_ids.begin(),
+					persisted_participant_ids.end(), actor_id))
+				return (FT_ERR_INVALID_STATE);
+			if (existing_payload_version == 6U)
+			{
+				uint64_t card_deal_request_id = 0U;
+				uint32_t card_deal_count = 0U;
+				const std::size_t metadata_offset = participants_offset
+					+ static_cast<std::size_t>(participant_count) * 8U;
+				if (game_session_read_u32(existing.payload, 92U) == 0U
+					|| game_session_read_u32(existing.payload, metadata_offset)
+						!= RegenerationCardSession::CONTENT_VERSION
+					|| game_session_read_u64(existing.payload, metadata_offset + 4U)
+						== 0U
+					|| game_session_read_u64(existing.payload, metadata_offset + 4U)
+						!= this->regeneration_world_rules_policy_
+							.generation_manifest_hash
+					|| game_session_read_u64(existing.payload, metadata_offset + 12U)
+						!= this->trusted_script_manifest_hash_)
+					return (FT_ERR_INVALID_STATE);
+				result = this->regeneration_cards_.get_starting_hand_deal_identity(
+					&card_deal_request_id, &card_deal_count);
+				if (result != FT_ERR_SUCCESS
+					|| card_deal_request_id != request_id
+					|| card_deal_count != opening_card_count)
+					return (FT_ERR_INVALID_STATE);
+			}
+		}
 		if (existing.state == GameTransactionJournal::ABORTED)
 			return (FT_ERR_INVALID_OPERATION);
 		if (existing.state == GameTransactionJournal::COMMITTED)
 		{
 			const World::WorldRevision committed_revision =
 				this->world_.world_revision();
+			if (existing_payload_version >= 6U
+				&& committed_revision.identifier
+					!= game_session_read_u32(existing.payload, 92U))
+				return (FT_ERR_INVALID_STATE);
 			if (committed_revision.pending
 				&& !committed_revision.regenerating
 				&& this->world_.revision_decision_deadline_epoch() == 0U)
@@ -3679,19 +5315,93 @@ int32_t GameSession::commit_regeneration_start(uint64_t actor_id,
 		}
 		if (existing.state != GameTransactionJournal::PREPARED)
 			return (FT_ERR_INVALID_STATE);
+		/* WLS1-WLS5 lack the full participant/content binding. Retire those
+		 * prepared records rather than resume them under a different contract. */
+		if (existing_payload_version < 6U)
+		{
+			result = this->transaction_journal_.mark_aborted(
+				WORLD_LOOM_START_SCOPE, request_id);
+			if (result == FT_ERR_SUCCESS)
+				result = this->save_session_snapshot();
+			return (result == FT_ERR_SUCCESS ? FT_ERR_INVALID_STATE : result);
+		}
 	}
 	else if (result != FT_ERR_NOT_FOUND)
 		return (result);
 	result = this->update_revision_occupancy();
 	if (result != FT_ERR_SUCCESS)
 		return (result);
-	result = this->revision_clock_provider_(&deadline_epoch_ms,
-		this->revision_clock_provider_user_data_);
-	if (result != FT_ERR_SUCCESS || deadline_epoch_ms == 0U)
+	if (this->revision_active_player_count_ == 0U)
+		return (FT_ERR_INVALID_STATE);
+	if (this->revision_occupancy_provider_ == nullptr)
+	{
+		try
+		{
+			this->revision_participant_actor_ids_.assign(1U, actor_id);
+		}
+		catch (const std::bad_alloc &)
+		{
+			return (FT_ERR_NO_MEMORY);
+		}
+	}
+	else if (std::find(this->revision_participant_actor_ids_.begin(),
+		this->revision_participant_actor_ids_.end(), actor_id)
+		== this->revision_participant_actor_ids_.end())
+		return (FT_ERR_PERMISSION_DENIED);
+	try
+	{
+		start_participant_ids = this->revision_participant_actor_ids_;
+	}
+	catch (const std::bad_alloc &)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	std::sort(start_participant_ids.begin(), start_participant_ids.end());
+	if (start_participant_ids.empty()
+		|| start_participant_ids.size() != this->revision_active_player_count_
+		|| start_participant_ids.size()
+			> WorldRevisionManager::MAXIMUM_OCCUPIED_CHUNKS)
+		return (FT_ERR_INVALID_STATE);
+	if (existing.sequence != 0U && existing_payload_version >= 3U)
+	{
+		if (this->revision_active_player_count_ != start_player_count)
+		{
+			result = this->transaction_journal_.mark_aborted(
+				WORLD_LOOM_START_SCOPE, request_id);
+			if (result == FT_ERR_SUCCESS)
+				result = this->save_session_snapshot();
+			return (result == FT_ERR_SUCCESS ? FT_ERR_INVALID_STATE : result);
+		}
+	}
+	if (existing_payload_version >= 5U
+		&& start_participant_ids != persisted_participant_ids)
+	{
+		result = this->transaction_journal_.mark_aborted(
+			WORLD_LOOM_START_SCOPE, request_id);
+		if (result == FT_ERR_SUCCESS)
+			result = this->save_session_snapshot();
 		return (result == FT_ERR_SUCCESS ? FT_ERR_INVALID_STATE : result);
-	if (deadline_epoch_ms > std::numeric_limits<uint64_t>::max() - 300000U)
-		return (FT_ERR_OUT_OF_RANGE);
-	deadline_epoch_ms += 300000U;
+	}
+	else
+	{
+		start_player_count = this->revision_active_player_count_;
+		start_mode = start_player_count > 1U ? 2U : 1U;
+	}
+	const uint64_t decision_timeout_ms = start_mode == 2U
+		? this->revision_multiplayer_decision_timeout_ms_
+		: this->revision_solo_decision_timeout_ms_;
+	result = this->revision_clock_provider_(&current_epoch_ms,
+		this->revision_clock_provider_user_data_);
+	if (result != FT_ERR_SUCCESS || current_epoch_ms == 0U)
+		return (result == FT_ERR_SUCCESS ? FT_ERR_INVALID_STATE : result);
+	if (!persisted_deadline)
+	{
+		if (current_epoch_ms > std::numeric_limits<uint64_t>::max()
+			- decision_timeout_ms)
+			return (FT_ERR_OUT_OF_RANGE);
+		deadline_epoch_ms = current_epoch_ms
+			+ decision_timeout_ms;
+	}
 	World::WorldRevision revision = this->world_.world_revision();
 	if (!revision.pending || revision.regenerating
 		|| this->world_.revision_barriers_active()
@@ -3707,17 +5417,18 @@ int32_t GameSession::commit_regeneration_start(uint64_t actor_id,
 		return (result);
 	if (quote.total_currency_cost
 		> static_cast<uint64_t>(std::numeric_limits<int32_t>::max())
+		|| quote.revision_identifier == 0U
 		|| quote.currency_item_id > static_cast<uint32_t>(
 			std::numeric_limits<int32_t>::max()))
 		return (FT_ERR_OUT_OF_RANGE);
 	try
 	{
-		payload.reserve(48U);
+		payload.reserve(120U + start_participant_ids.size() * 8U);
 		payload.push_back('W');
 		payload.push_back('L');
 		payload.push_back('S');
 		payload.push_back('T');
-		game_session_append_u32(payload, 1U);
+		game_session_append_u32(payload, 6U);
 		game_session_append_u64(payload, actor_id);
 		game_session_append_u64(payload, loom_id);
 		game_session_append_u64(payload, expected_selection_revision);
@@ -3725,13 +5436,45 @@ int32_t GameSession::commit_regeneration_start(uint64_t actor_id,
 		game_session_append_u32(payload, opening_card_count);
 		game_session_append_u32(payload, quote.currency_item_id);
 		game_session_append_u64(payload, quote.total_currency_cost);
+		game_session_append_u64(payload, deadline_epoch_ms);
+		game_session_append_u64(payload,
+			persisted_deadline ? persisted_timeout_ms : decision_timeout_ms);
+		game_session_append_u32(payload, start_mode);
+		game_session_append_u32(payload, start_player_count);
+		game_session_append_u32(payload, quote.selected_paid_chunks);
+		game_session_append_u32(payload, quote.selected_bonus_chunks);
+		game_session_append_u32(payload,
+			WORLD_REVISION_SETTLEMENT_RETAIN_COMMITTED_COST);
+		game_session_append_u32(payload, quote.revision_identifier);
+		game_session_append_u32(payload,
+			static_cast<uint32_t>(start_participant_ids.size()));
+		for (uint64_t participant_actor_id : start_participant_ids)
+			game_session_append_u64(payload, participant_actor_id);
+		game_session_append_u32(payload,
+			RegenerationCardSession::CONTENT_VERSION);
+		game_session_append_u64(payload,
+			this->regeneration_world_rules_policy_.generation_manifest_hash);
+		game_session_append_u64(payload,
+			this->trusted_script_manifest_hash_);
 	}
 	catch (const std::bad_alloc &)
 	{
 		return (FT_ERR_NO_MEMORY);
 	}
 	if (existing.sequence != 0U && existing.payload != payload)
+	{
+		if (existing.state == GameTransactionJournal::PREPARED
+			&& existing_payload_version == 6U)
+		{
+			result = this->transaction_journal_.mark_aborted(
+				WORLD_LOOM_START_SCOPE, request_id);
+			if (result == FT_ERR_SUCCESS)
+				result = this->save_session_snapshot();
+			return (result == FT_ERR_SUCCESS
+				? FT_ERR_INVALID_STATE : result);
+		}
 		return (FT_ERR_INVALID_ARGUMENT);
+	}
 	result = this->player_character_.get_inventory().get_snapshot(
 		inventory_before);
 	if (result == FT_ERR_SUCCESS)
@@ -3746,6 +5489,8 @@ int32_t GameSession::commit_regeneration_start(uint64_t actor_id,
 		return (result);
 	if (existing.sequence == 0U)
 	{
+		if (!actor_is_authorized())
+			return (FT_ERR_PERMISSION_DENIED);
 		result = this->transaction_journal_.prepare(WORLD_LOOM_START_SCOPE,
 			request_id, WORLD_LOOM_START_TRANSACTION_TYPE, payload.data(),
 			static_cast<uint32_t>(payload.size()), &journal_sequence,
@@ -3755,14 +5500,116 @@ int32_t GameSession::commit_regeneration_start(uint64_t actor_id,
 		result = this->save_session_snapshot();
 		if (result != FT_ERR_SUCCESS)
 		{
-			(void)this->transaction_journal_.mark_aborted(
-				WORLD_LOOM_START_SCOPE, request_id);
-			(void)this->save_session_snapshot();
-			return (result);
+			const int32_t restore_result = this->transaction_journal_.deserialize(
+				journal_state_before.data(), journal_state_before.size());
+			return (restore_result == FT_ERR_SUCCESS
+				? result : restore_result);
 		}
 	}
 	(void)journal_sequence;
 	(void)replayed;
+	/* Occupancy and pricing can change while the prepared checkpoint is being
+	 * written. Refresh both immediately before the debit/deal boundary. */
+	WorldRevisionCostQuote fresh_quote = {};
+	std::vector<uint64_t> fresh_participant_ids;
+	result = this->update_revision_occupancy();
+	if (result == FT_ERR_SUCCESS)
+	{
+		if (this->revision_occupancy_provider_ == nullptr)
+		{
+			try
+			{
+				this->revision_participant_actor_ids_.assign(1U, actor_id);
+			}
+			catch (const std::bad_alloc &)
+			{
+				result = FT_ERR_NO_MEMORY;
+			}
+		}
+		if (result == FT_ERR_SUCCESS)
+		{
+			try
+			{
+				fresh_participant_ids = this->revision_participant_actor_ids_;
+			}
+			catch (const std::bad_alloc &)
+			{
+				result = FT_ERR_NO_MEMORY;
+			}
+		}
+		std::sort(fresh_participant_ids.begin(), fresh_participant_ids.end());
+		const World::WorldRevision fresh_revision =
+			this->world_.world_revision();
+		if (result == FT_ERR_SUCCESS
+			&& (this->revision_active_player_count_ != start_player_count
+			|| fresh_participant_ids != start_participant_ids
+			|| std::find(fresh_participant_ids.begin(),
+				fresh_participant_ids.end(), actor_id)
+				== fresh_participant_ids.end()
+			|| !fresh_revision.pending || fresh_revision.regenerating
+			|| this->world_.revision_barriers_active()
+			|| fresh_revision.selection_revision != expected_selection_revision
+			|| fresh_revision.cost_policy_revision != expected_policy_revision))
+			result = FT_ERR_INVALID_STATE;
+	}
+	if (result == FT_ERR_SUCCESS)
+		result = this->world_.query_revision_start_cost(
+			expected_selection_revision, expected_policy_revision,
+			opening_card_count, &fresh_quote);
+	if (result == FT_ERR_SUCCESS
+		&& (fresh_quote.revision_identifier != quote.revision_identifier
+			|| fresh_quote.selection_revision != quote.selection_revision
+			|| fresh_quote.cost_policy_revision != quote.cost_policy_revision
+			|| fresh_quote.selected_paid_chunks != quote.selected_paid_chunks
+			|| fresh_quote.selected_bonus_chunks != quote.selected_bonus_chunks
+			|| fresh_quote.opening_card_count != quote.opening_card_count
+			|| fresh_quote.currency_item_id != quote.currency_item_id
+			|| fresh_quote.chunk_currency_cost != quote.chunk_currency_cost
+			|| fresh_quote.opening_card_currency_cost
+				!= quote.opening_card_currency_cost
+			|| fresh_quote.total_currency_cost != quote.total_currency_cost))
+		result = FT_ERR_INVALID_STATE;
+	if (result == FT_ERR_SUCCESS)
+		result = this->revision_clock_provider_(&precommit_epoch_ms,
+			this->revision_clock_provider_user_data_);
+	if (result == FT_ERR_SUCCESS
+		&& (precommit_epoch_ms == 0U
+			|| precommit_epoch_ms >= deadline_epoch_ms))
+		result = FT_ERR_INVALID_STATE;
+	if (result != FT_ERR_SUCCESS)
+	{
+		const int32_t operation_result = result;
+		const int32_t abort_result = this->transaction_journal_.mark_aborted(
+			WORLD_LOOM_START_SCOPE, request_id);
+		if (abort_result != FT_ERR_SUCCESS)
+			return (abort_result);
+		const int32_t checkpoint_result = this->save_session_snapshot();
+		return (checkpoint_result == FT_ERR_SUCCESS
+			? operation_result : checkpoint_result);
+	}
+	if (!actor_is_authorized())
+	{
+		const int32_t abort_result = this->transaction_journal_.mark_aborted(
+			WORLD_LOOM_START_SCOPE, request_id);
+		if (abort_result != FT_ERR_SUCCESS)
+			return (abort_result);
+		const int32_t checkpoint_result = this->save_session_snapshot();
+		return (checkpoint_result == FT_ERR_SUCCESS
+			? FT_ERR_PERMISSION_DENIED : checkpoint_result);
+	}
+	result = this->regeneration_cards_.preflight_starting_hand_deal(
+		request_id, opening_card_count);
+	if (result != FT_ERR_SUCCESS)
+	{
+		const int32_t operation_result = result;
+		const int32_t abort_result = this->transaction_journal_.mark_aborted(
+			WORLD_LOOM_START_SCOPE, request_id);
+		if (abort_result != FT_ERR_SUCCESS)
+			return (abort_result);
+		const int32_t checkpoint_result = this->save_session_snapshot();
+		return (checkpoint_result == FT_ERR_SUCCESS
+			? operation_result : checkpoint_result);
+	}
 	if (quote.total_currency_cost != 0U)
 	{
 		result = this->player_character_.get_inventory().remove_item_quantity(
@@ -3796,10 +5643,15 @@ int32_t GameSession::commit_regeneration_start(uint64_t actor_id,
 			rollback_result = save_result;
 		return (rollback_result == FT_ERR_SUCCESS ? result : rollback_result);
 	}
-	result = this->world_.set_revision_barriers_active(true);
+	if (!actor_is_authorized())
+		result = FT_ERR_PERMISSION_DENIED;
+	else
+		result = this->world_.set_revision_barriers_active(true);
 	if (result == FT_ERR_SUCCESS)
 		result = this->world_.set_revision_decision_deadline_epoch(
 			deadline_epoch_ms);
+	if (result == FT_ERR_SUCCESS && !actor_is_authorized())
+		result = FT_ERR_PERMISSION_DENIED;
 	if (result == FT_ERR_SUCCESS)
 		result = this->transaction_journal_.mark_committed(
 			WORLD_LOOM_START_SCOPE, request_id);
@@ -3823,6 +5675,11 @@ int32_t GameSession::commit_regeneration_start(uint64_t actor_id,
 		if (rollback_result == FT_ERR_SUCCESS
 			&& barrier_result != FT_ERR_SUCCESS)
 			rollback_result = barrier_result;
+		const int32_t deadline_result =
+			this->world_.clear_revision_decision_deadline_epoch();
+		if (rollback_result == FT_ERR_SUCCESS
+			&& deadline_result != FT_ERR_SUCCESS)
+			rollback_result = deadline_result;
 		const int32_t abort_result = this->transaction_journal_.mark_aborted(
 			WORLD_LOOM_START_SCOPE, request_id);
 		if (rollback_result == FT_ERR_SUCCESS && abort_result != FT_ERR_SUCCESS)
@@ -3839,6 +5696,8 @@ int32_t GameSession::commit_regeneration_start(uint64_t actor_id,
 int32_t GameSession::finalize_regeneration_start(
 	uint64_t authoritative_epoch) noexcept
 {
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
 	World::WorldRevision revision;
 	uint32_t resolved_count = 0U;
 	uint32_t required_discard_count = 0U;
@@ -3943,7 +5802,11 @@ int32_t GameSession::finalize_regeneration_start(
 		if (required_discard_count != 0U)
 			return (FT_ERR_INVALID_STATE);
 	}
-	result = this->world_.start_revision_regeneration();
+	result = this->world_.set_revision_generation_requested(true);
+	if (result == FT_ERR_SUCCESS)
+		result = this->save_session_snapshot();
+	if (result == FT_ERR_SUCCESS)
+		result = this->world_.start_revision_regeneration();
 	if (result == FT_ERR_SUCCESS)
 		result = this->save_session_snapshot();
 	return (result);
@@ -3951,12 +5814,53 @@ int32_t GameSession::finalize_regeneration_start(
 
 int32_t GameSession::retry_failed_regeneration() noexcept
 {
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
 	if (!this->active_ || !this->world_.revision_barriers_active())
 		return (FT_ERR_INVALID_OPERATION);
 	const World::WorldRevision revision = this->world_.world_revision();
 	if (revision.pending || revision.regenerating)
 		return (FT_ERR_INVALID_OPERATION);
-	int32_t result = this->world_.retry_failed_revision_regeneration();
+	/* Persist the committed barrier/request and the latest per-chunk receipts
+	 * before workers can publish another chunk. */
+	int32_t result = this->save_session_snapshot();
+	if (result == FT_ERR_SUCCESS)
+		result = this->world_.retry_failed_revision_regeneration();
+	if (result == FT_ERR_SUCCESS)
+		result = this->save_session_snapshot();
+	return (result);
+}
+
+int32_t GameSession::resume_requested_regeneration() noexcept
+{
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
+	if (!this->world_.revision_generation_requested())
+		return (FT_ERR_SUCCESS);
+	const World::WorldRevision revision = this->world_.world_revision();
+	if (revision.regenerating)
+		return (FT_ERR_SUCCESS);
+	bool selected_chunks_ready = false;
+	int32_t result = this->world_.load_selected_revision_chunks(1U,
+		&selected_chunks_ready);
+	if (result != FT_ERR_SUCCESS || !selected_chunks_ready)
+		return (result);
+	if (revision.pending)
+	{
+		if (this->world_.revision_completed_rules_pending())
+			result = this->world_.rehydrate_completed_revision_rules(
+				this->regeneration_world_rules_);
+		if (result == FT_ERR_SUCCESS)
+			result = this->world_.start_revision_regeneration();
+	}
+	else
+	{
+		/* The loaded request remains committed and barriered. Re-checkpoint it
+		 * before clearing in-memory failure progress and scheduling replay. */
+		result = this->save_session_snapshot();
+		if (result == FT_ERR_SUCCESS)
+			result = this->world_.retry_failed_revision_regeneration();
+	}
 	if (result == FT_ERR_SUCCESS)
 		result = this->save_session_snapshot();
 	return (result);
@@ -3965,6 +5869,8 @@ int32_t GameSession::retry_failed_regeneration() noexcept
 int32_t GameSession::apply_pending_regeneration_card_intent(
 	bool *replayed_out) noexcept
 {
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
 	std::vector<uint8_t> previous_card_state;
 	std::vector<uint8_t> previous_rules_state;
 	std::vector<uint8_t> previous_instability_state;
@@ -4271,6 +6177,8 @@ int32_t GameSession::apply_pending_regeneration_card_intent(
 int32_t GameSession::consume_pending_regeneration_draw_notice(
 	card_game_host_intent_record *notice_out) noexcept
 {
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
 	std::vector<uint8_t> card_state_before;
 	std::vector<uint8_t> instability_state_before;
 	std::vector<World::RevisionChunkCoordinate> selected_chunks;
@@ -4467,6 +6375,8 @@ int32_t GameSession::consume_pending_regeneration_draw_notice(
 int32_t GameSession::query_pending_regeneration_host_intents(
 	std::vector<card_game_host_intent_record> &records_out) const noexcept
 {
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
 	if (!this->active_ || !this->regeneration_cards_.is_initialized())
 		return (FT_ERR_INVALID_OPERATION);
 	return (this->regeneration_cards_.copy_pending_intents(records_out));
@@ -4498,6 +6408,8 @@ int32_t GameSession::get_regeneration_output_session_id(
 int32_t GameSession::query_pending_regeneration_host_outputs(
 	std::vector<RegenerationHostOutput> &outputs_out) const noexcept
 {
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
 	std::vector<card_game_host_intent_record> records;
 	std::vector<RegenerationHostOutput> staged;
 	int32_t result;
@@ -4513,6 +6425,8 @@ int32_t GameSession::query_pending_regeneration_host_outputs(
 		for (const card_game_host_intent_record &record : records)
 		{
 			RegenerationHostOutput output = {};
+			std::memcpy(output.world_id, this->world_id_,
+				sizeof(output.world_id));
 			output.session_id = this->regeneration_output_session_id_;
 			output.record = record;
 			staged.push_back(output);
@@ -4529,7 +6443,10 @@ int32_t GameSession::query_pending_regeneration_host_outputs(
 int32_t GameSession::acknowledge_regeneration_host_output(
 	uint64_t session_id, uint64_t host_intent_sequence) noexcept
 {
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
 	ft_bool is_pending = FT_FALSE;
+	card_game_host_intent_record pending = {};
 	int32_t result;
 
 	if (session_id == 0U || session_id != this->regeneration_output_session_id_)
@@ -4540,6 +6457,9 @@ int32_t GameSession::acknowledge_regeneration_host_output(
 		return (result);
 	if (is_pending == FT_FALSE)
 		return (FT_ERR_SUCCESS);
+	result = this->regeneration_cards_.peek_pending_intent(&pending);
+	if (result != FT_ERR_SUCCESS || pending.sequence != host_intent_sequence)
+		return (result == FT_ERR_SUCCESS ? FT_ERR_INVALID_STATE : result);
 	{
 		GameTransactionJournal::Record transaction = {};
 		result = this->transaction_journal_.find(
@@ -4549,12 +6469,22 @@ int32_t GameSession::acknowledge_regeneration_host_output(
 		{
 			if (transaction.transaction_type
 				!= REGENERATION_HOST_OUTPUT_TRANSACTION_TYPE
-				|| transaction.state != GameTransactionJournal::COMMITTED)
+				|| transaction.state != GameTransactionJournal::COMMITTED
+				|| !game_session_host_output_payload_matches(
+					transaction.payload, session_id, pending,
+					this->world_id_))
 				return (FT_ERR_PERMISSION_DENIED);
+			if (game_session_host_output_payload_version(
+					transaction.payload) < 3U
+				&& (this->legacy_host_output_world_authorizer_ == nullptr
+					|| !this->legacy_host_output_world_authorizer_(
+						this->world_id_, session_id,
+						this->regeneration_host_output_user_data_)))
+				return (FT_ERR_CONFIGURATION);
 		}
 		else if (result != FT_ERR_NOT_FOUND)
 			return (result);
-		else if (this->regeneration_host_output_prepare_ != nullptr)
+		else
 			return (FT_ERR_PERMISSION_DENIED);
 	}
 	return (this->acknowledge_regeneration_host_intent_internal(
@@ -4564,7 +6494,8 @@ int32_t GameSession::acknowledge_regeneration_host_output(
 int32_t GameSession::configure_regeneration_host_output_consumer(
 	RegenerationHostOutputPrepare prepare,
 	RegenerationHostOutputCommit commit,
-	RegenerationHostOutputAbort abort, void *user_data) noexcept
+	RegenerationHostOutputAbort abort, void *user_data,
+	LegacyHostOutputWorldAuthorizer legacy_world_authorizer) noexcept
 {
 	if (this->active_)
 		return (FT_ERR_INVALID_OPERATION);
@@ -4573,17 +6504,24 @@ int32_t GameSession::configure_regeneration_host_output_consumer(
 		return (FT_ERR_INVALID_ARGUMENT);
 	if (prepare == nullptr && user_data != nullptr)
 		return (FT_ERR_INVALID_ARGUMENT);
+	if (prepare == nullptr && legacy_world_authorizer != nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
 	this->regeneration_host_output_prepare_ = prepare;
 	this->regeneration_host_output_commit_ = commit;
 	this->regeneration_host_output_abort_ = abort;
 	this->regeneration_host_output_user_data_ = user_data;
+	this->legacy_host_output_world_authorizer_ = legacy_world_authorizer;
 	return (FT_ERR_SUCCESS);
 }
 
 int32_t GameSession::process_regeneration_host_output_transaction(
 	const RegenerationHostOutput &output) noexcept
 {
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
 	std::vector<uint8_t> payload;
+	std::vector<uint8_t> legacy_v2_payload;
+	std::vector<uint8_t> legacy_payload;
 	GameTransactionJournal::Record transaction = {};
 	uint64_t journal_sequence = 0U;
 	bool replayed = false;
@@ -4591,7 +6529,9 @@ int32_t GameSession::process_regeneration_host_output_transaction(
 	bool is_draw_notice = false;
 	int32_t result;
 
-	if (output.session_id == 0U || output.session_id
+	if (std::memcmp(output.world_id, this->world_id_,
+			sizeof(output.world_id)) != 0
+		|| output.session_id == 0U || output.session_id
 		!= this->regeneration_output_session_id_
 		|| output.record.sequence == 0U
 		|| this->regeneration_host_output_prepare_ == nullptr
@@ -4611,15 +6551,19 @@ int32_t GameSession::process_regeneration_host_output_transaction(
 		return (FT_ERR_PERMISSION_DENIED);
 	try
 	{
-		payload.reserve(40U + static_cast<std::size_t>(
+		payload.reserve(80U + static_cast<std::size_t>(
 			output.record.intent.field_count) * 16U);
 		payload.push_back('R');
 		payload.push_back('H');
 		payload.push_back('O');
-		payload.push_back('1');
-		game_session_append_u32(payload, 1U);
+		payload.push_back('3');
+		game_session_append_u32(payload, 3U);
 		game_session_append_u64(payload, output.session_id);
 		game_session_append_u64(payload, output.record.sequence);
+		game_session_append_u64(payload,
+			output.record.action_request_id);
+		payload.insert(payload.end(), output.world_id,
+			output.world_id + sizeof(output.world_id));
 		game_session_append_u32(payload, output.record.intent.type_id);
 		game_session_append_u32(payload, output.record.intent.version);
 		game_session_append_u32(payload, output.record.intent.field_count);
@@ -4634,6 +6578,64 @@ int32_t GameSession::process_regeneration_host_output_transaction(
 			payload.push_back(0U);
 			game_session_append_u32(payload, 0U);
 			game_session_append_u64(payload,
+				output.record.intent.fields[index].value);
+		}
+		legacy_v2_payload.reserve(48U + static_cast<std::size_t>(
+			output.record.intent.field_count) * 16U);
+		legacy_v2_payload.push_back('R');
+		legacy_v2_payload.push_back('H');
+		legacy_v2_payload.push_back('O');
+		legacy_v2_payload.push_back('2');
+		game_session_append_u32(legacy_v2_payload, 2U);
+		game_session_append_u64(legacy_v2_payload, output.session_id);
+		game_session_append_u64(legacy_v2_payload, output.record.sequence);
+		game_session_append_u64(legacy_v2_payload,
+			output.record.action_request_id);
+		game_session_append_u32(legacy_v2_payload,
+			output.record.intent.type_id);
+		game_session_append_u32(legacy_v2_payload,
+			output.record.intent.version);
+		game_session_append_u32(legacy_v2_payload,
+			output.record.intent.field_count);
+		game_session_append_u32(legacy_v2_payload, 0U);
+		for (uint32_t index = 0U;
+			index < output.record.intent.field_count; ++index)
+		{
+			legacy_v2_payload.push_back(static_cast<uint8_t>(
+				output.record.intent.fields[index].type));
+			legacy_v2_payload.push_back(0U);
+			legacy_v2_payload.push_back(0U);
+			legacy_v2_payload.push_back(0U);
+			game_session_append_u32(legacy_v2_payload, 0U);
+			game_session_append_u64(legacy_v2_payload,
+				output.record.intent.fields[index].value);
+		}
+		legacy_payload.reserve(40U + static_cast<std::size_t>(
+			output.record.intent.field_count) * 16U);
+		legacy_payload.push_back('R');
+		legacy_payload.push_back('H');
+		legacy_payload.push_back('O');
+		legacy_payload.push_back('1');
+		game_session_append_u32(legacy_payload, 1U);
+		game_session_append_u64(legacy_payload, output.session_id);
+		game_session_append_u64(legacy_payload, output.record.sequence);
+		game_session_append_u32(legacy_payload,
+			output.record.intent.type_id);
+		game_session_append_u32(legacy_payload,
+			output.record.intent.version);
+		game_session_append_u32(legacy_payload,
+			output.record.intent.field_count);
+		game_session_append_u32(legacy_payload, 0U);
+		for (uint32_t index = 0U;
+			index < output.record.intent.field_count; ++index)
+		{
+			legacy_payload.push_back(static_cast<uint8_t>(
+				output.record.intent.fields[index].type));
+			legacy_payload.push_back(0U);
+			legacy_payload.push_back(0U);
+			legacy_payload.push_back(0U);
+			game_session_append_u32(legacy_payload, 0U);
+			game_session_append_u64(legacy_payload,
 				output.record.intent.fields[index].value);
 		}
 	}
@@ -4653,13 +6655,47 @@ int32_t GameSession::process_regeneration_host_output_transaction(
 	else if (result == FT_ERR_SUCCESS
 		&& (transaction.transaction_type
 			!= REGENERATION_HOST_OUTPUT_TRANSACTION_TYPE
-			|| transaction.payload != payload))
+			|| (transaction.payload != payload
+				&& transaction.payload != legacy_v2_payload
+				&& transaction.payload != legacy_payload)))
+		result = FT_ERR_INVALID_STATE;
+	if (result == FT_ERR_SUCCESS)
+		result = this->transaction_journal_.find(transaction_scope,
+			output.record.sequence, &transaction);
+	if (result == FT_ERR_SUCCESS
+		&& (transaction.transaction_type
+			!= REGENERATION_HOST_OUTPUT_TRANSACTION_TYPE
+			|| (transaction.payload != payload
+				&& transaction.payload != legacy_v2_payload
+				&& transaction.payload != legacy_payload)
+			|| (transaction.state != GameTransactionJournal::PREPARED
+				&& transaction.state != GameTransactionJournal::COMMITTED)))
 		result = FT_ERR_INVALID_STATE;
 	if (result != FT_ERR_SUCCESS)
 		return (result);
+	if (game_session_host_output_payload_version(transaction.payload) < 3U
+		&& (this->legacy_host_output_world_authorizer_ == nullptr
+			|| !this->legacy_host_output_world_authorizer_(this->world_id_,
+				output.session_id,
+				this->regeneration_host_output_user_data_)))
+		return (FT_ERR_CONFIGURATION);
 	result = this->save_session_snapshot();
 	if (result != FT_ERR_SUCCESS)
 		return (result);
+	if (transaction.state == GameTransactionJournal::COMMITTED)
+	{
+		result = this->regeneration_cards_.is_host_intent_pending(
+			output.record.sequence, &is_pending);
+		if (result == FT_ERR_SUCCESS && is_pending != FT_FALSE)
+			result = this->acknowledge_regeneration_host_output(
+				output.session_id, output.record.sequence);
+		if (result == FT_ERR_SUCCESS)
+			result = this->transaction_journal_.prune_terminal_scope(
+				transaction_scope, output.record.sequence);
+		if (result == FT_ERR_SUCCESS)
+			result = this->save_session_snapshot();
+		return (result);
+	}
 	result = this->regeneration_host_output_prepare_(output,
 		this->regeneration_host_output_user_data_);
 	if (result != FT_ERR_SUCCESS)
@@ -4669,12 +6705,50 @@ int32_t GameSession::process_regeneration_host_output_transaction(
 			this->regeneration_host_output_user_data_);
 		if (abort_result != FT_ERR_SUCCESS)
 			return (abort_result);
+		/* Authorization and payload/configuration failures cannot heal through
+		 * automatic retries. Persist them as terminal until the host explicitly
+		 * requests a retry after repairing the external consumer. */
+		if (result == FT_ERR_PERMISSION_DENIED
+			|| result == FT_ERR_INVALID_ARGUMENT
+			|| result == FT_ERR_CONFIGURATION)
+		{
+			const int32_t abort_record_result =
+				this->transaction_journal_.mark_aborted(transaction_scope,
+					output.record.sequence);
+			if (abort_record_result != FT_ERR_SUCCESS)
+				return (abort_record_result);
+			const int32_t checkpoint_result = this->save_session_snapshot();
+			if (checkpoint_result != FT_ERR_SUCCESS)
+				return (checkpoint_result);
+		}
 		return (result);
 	}
 	result = this->regeneration_host_output_commit_(output,
 		this->regeneration_host_output_user_data_);
 	if (result != FT_ERR_SUCCESS)
+	{
+		/* A permanent commit rejection is terminal only after the consumer has
+		 * released its prepared reservation and that decision is checkpointed. */
+		if (result == FT_ERR_PERMISSION_DENIED
+			|| result == FT_ERR_INVALID_ARGUMENT
+			|| result == FT_ERR_CONFIGURATION)
+		{
+			const int32_t abort_result =
+				this->regeneration_host_output_abort_(output,
+				this->regeneration_host_output_user_data_);
+			if (abort_result != FT_ERR_SUCCESS)
+				return (abort_result);
+			const int32_t abort_record_result =
+				this->transaction_journal_.mark_aborted(transaction_scope,
+					output.record.sequence);
+			if (abort_record_result != FT_ERR_SUCCESS)
+				return (abort_record_result);
+			const int32_t checkpoint_result = this->save_session_snapshot();
+			if (checkpoint_result != FT_ERR_SUCCESS)
+				return (checkpoint_result);
+		}
 		return (result);
+	}
 	result = this->transaction_journal_.mark_committed(transaction_scope,
 		output.record.sequence);
 	if (result == FT_ERR_SUCCESS)
@@ -4695,6 +6769,8 @@ int32_t GameSession::process_regeneration_host_output_transaction(
 
 int32_t GameSession::deliver_next_regeneration_host_output() noexcept
 {
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
 	std::vector<RegenerationHostOutput> outputs;
 	int32_t result = this->recover_regeneration_host_outputs();
 	if (result != FT_ERR_SUCCESS)
@@ -4709,6 +6785,8 @@ int32_t GameSession::deliver_next_regeneration_host_output() noexcept
 
 int32_t GameSession::recover_regeneration_host_outputs() noexcept
 {
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
 	int32_t result;
 	if (this->regeneration_host_output_prepare_ == nullptr
 		|| this->regeneration_host_output_commit_ == nullptr
@@ -4730,14 +6808,62 @@ int32_t GameSession::recover_regeneration_host_outputs() noexcept
 			return (FT_ERR_SUCCESS);
 		if (result != FT_ERR_SUCCESS
 			|| record.transaction_type
-				!= REGENERATION_HOST_OUTPUT_TRANSACTION_TYPE
-			|| (record.state != GameTransactionJournal::PREPARED
-				&& record.state != GameTransactionJournal::COMMITTED))
+				!= REGENERATION_HOST_OUTPUT_TRANSACTION_TYPE)
+			return (FT_ERR_INVALID_STATE);
+		/* Keep the session available for an explicit operator retry while
+		 * preserving ordered delivery behind the failed output. */
+		if (record.state == GameTransactionJournal::ABORTED)
+			return (FT_ERR_SUCCESS);
+		if (record.state != GameTransactionJournal::PREPARED
+			&& record.state != GameTransactionJournal::COMMITTED)
 			return (FT_ERR_INVALID_STATE);
 		result = this->process_regeneration_host_output_transaction(output);
 		if (result != FT_ERR_SUCCESS)
 			return (result);
 	}
+}
+
+int32_t GameSession::retry_regeneration_host_output(uint64_t session_id,
+	uint64_t host_intent_sequence) noexcept
+{
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
+	std::vector<RegenerationHostOutput> outputs;
+	GameTransactionJournal::Record transaction = {};
+	const uint64_t scope =
+		game_session_regeneration_host_output_scope(session_id);
+	int32_t result;
+	if (!this->active_ || session_id == 0U
+		|| session_id != this->regeneration_output_session_id_
+		|| host_intent_sequence == 0U)
+		return (FT_ERR_INVALID_ARGUMENT);
+	result = this->query_pending_regeneration_host_outputs(outputs);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	const auto output = std::find_if(outputs.begin(), outputs.end(),
+		[host_intent_sequence](const RegenerationHostOutput &candidate)
+		{
+			return (candidate.record.sequence == host_intent_sequence);
+		});
+	if (output == outputs.end())
+		return (FT_ERR_NOT_FOUND);
+	if (outputs.empty() || outputs[0].record.sequence != host_intent_sequence)
+		return (FT_ERR_INVALID_OPERATION);
+	result = this->transaction_journal_.find(scope, host_intent_sequence,
+		&transaction);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	if (transaction.transaction_type
+		!= REGENERATION_HOST_OUTPUT_TRANSACTION_TYPE
+		|| transaction.state != GameTransactionJournal::ABORTED)
+		return (FT_ERR_INVALID_OPERATION);
+	result = this->transaction_journal_.retry_aborted(scope,
+		host_intent_sequence);
+	if (result == FT_ERR_SUCCESS)
+		result = this->save_session_snapshot();
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	return (this->process_regeneration_host_output_transaction(*output));
 }
 
 int32_t GameSession::acknowledge_regeneration_host_intent_internal(
@@ -4789,6 +6915,8 @@ int32_t GameSession::acknowledge_regeneration_host_intent_internal(
 
 int32_t GameSession::begin_card_regeneration_revision() noexcept
 {
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
 	int32_t result;
 
 	if (!this->active_ || !this->regeneration_world_rules_.is_initialized()
@@ -4806,6 +6934,8 @@ int32_t GameSession::begin_card_regeneration_revision() noexcept
 int32_t GameSession::resolve_expired_regeneration_choices(
 	uint64_t request_id, uint32_t *resolved_count_out) noexcept
 {
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
 	uint64_t authoritative_epoch = 0U;
 	int32_t result;
 
@@ -4819,6 +6949,125 @@ int32_t GameSession::resolve_expired_regeneration_choices(
 		return (result == FT_ERR_SUCCESS ? FT_ERR_INVALID_STATE : result);
 	return (this->resolve_expired_regeneration_choices_internal(request_id,
 		authoritative_epoch, resolved_count_out));
+}
+
+int32_t GameSession::resolve_expired_regeneration_choices(
+	uint64_t authenticated_actor_id, uint64_t request_id,
+	uint32_t *resolved_count_out) noexcept
+{
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
+	std::vector<uint8_t> previous_card_state;
+	std::vector<card_game_pending_choice_view> pending_choices;
+	uint64_t authoritative_epoch = 0U;
+	bool has_expired_choice = false;
+	bool cached_expiry = false;
+	uint32_t cached_resolved_count = 0U;
+	if (authenticated_actor_id == 0U || request_id == UINT64_MAX
+		|| resolved_count_out == nullptr
+		|| this->authenticated_actor_authorizer_ == nullptr
+		|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+			this->authenticated_actor_authorizer_user_data_))
+		return (FT_ERR_PERMISSION_DENIED);
+	*resolved_count_out = 0U;
+	if (this->revision_clock_provider_ == nullptr)
+		return (FT_ERR_INVALID_STATE);
+	int32_t result = this->revision_clock_provider_(&authoritative_epoch,
+		this->revision_clock_provider_user_data_);
+	if (result != FT_ERR_SUCCESS || authoritative_epoch == 0U)
+		return (result == FT_ERR_SUCCESS ? FT_ERR_INVALID_STATE : result);
+	result = this->regeneration_cards_.query_expiry_result(request_id,
+		&cached_expiry, &cached_resolved_count);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	if (cached_expiry)
+	{
+		if (this->authenticated_actor_authorizer_ == nullptr
+			|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+				this->authenticated_actor_authorizer_user_data_))
+			return (FT_ERR_PERMISSION_DENIED);
+		*resolved_count_out = cached_resolved_count;
+		return (FT_ERR_SUCCESS);
+	}
+	result = this->regeneration_cards_.engine_.query_pending_choices(
+		RegenerationCardSession::PLAYER_ID, pending_choices);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	for (const card_game_pending_choice_view &choice : pending_choices)
+		if (authoritative_epoch >= choice.deadline_epoch)
+			has_expired_choice = true;
+	if (!has_expired_choice)
+		return (FT_ERR_INVALID_OPERATION);
+	result = this->regeneration_cards_.serialize_snapshot(previous_card_state);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	result = this->resolve_expired_regeneration_choices_internal(request_id,
+		authoritative_epoch, resolved_count_out);
+	if (result == FT_ERR_SUCCESS
+		&& (this->authenticated_actor_authorizer_ == nullptr
+			|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+				this->authenticated_actor_authorizer_user_data_)))
+	{
+		result = this->regeneration_cards_.restore_snapshot(
+			previous_card_state.data(), previous_card_state.size());
+		if (result == FT_ERR_SUCCESS)
+			result = this->save_session_snapshot();
+		if (result == FT_ERR_SUCCESS)
+			result = FT_ERR_PERMISSION_DENIED;
+		*resolved_count_out = 0U;
+	}
+	return (result);
+}
+
+int32_t GameSession::choose_regeneration_card_option(
+	uint64_t authenticated_actor_id, uint64_t request_id,
+	uint32_t choice_id, uint32_t option_id,
+	RegenerationCardActionResult *result_out) noexcept
+{
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
+	std::vector<uint8_t> previous_state;
+	RegenerationCardActionResult staged_result = {};
+	uint64_t authoritative_epoch = 0U;
+	int32_t result;
+	if (authenticated_actor_id == 0U || request_id == 0U || choice_id == 0U
+		|| option_id == 0U || result_out == nullptr
+		|| this->authenticated_actor_authorizer_ == nullptr
+		|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+			this->authenticated_actor_authorizer_user_data_))
+		return (FT_ERR_PERMISSION_DENIED);
+	*result_out = {};
+	if (!this->active_ || !this->world_loom_start_committed_
+		|| !this->world_.world_revision().pending
+		|| !this->regeneration_cards_.is_initialized()
+		|| this->revision_clock_provider_ == nullptr)
+		return (FT_ERR_INVALID_OPERATION);
+	result = this->revision_clock_provider_(&authoritative_epoch,
+		this->revision_clock_provider_user_data_);
+	if (result != FT_ERR_SUCCESS || authoritative_epoch == 0U)
+		return (result == FT_ERR_SUCCESS ? FT_ERR_INVALID_STATE : result);
+	result = this->regeneration_cards_.serialize_snapshot(previous_state);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	result = this->regeneration_cards_.choose_pending_option(
+		authenticated_actor_id, request_id, choice_id, option_id,
+		authoritative_epoch, &staged_result);
+	if (result == FT_ERR_SUCCESS
+		&& (this->authenticated_actor_authorizer_ == nullptr
+			|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+				this->authenticated_actor_authorizer_user_data_)))
+		result = FT_ERR_PERMISSION_DENIED;
+	if (result == FT_ERR_SUCCESS)
+		result = this->save_session_snapshot();
+	if (result != FT_ERR_SUCCESS)
+	{
+		if (this->regeneration_cards_.restore_snapshot(previous_state.data(),
+				previous_state.size()) != FT_ERR_SUCCESS)
+			return (FT_ERR_INVALID_STATE);
+		return (result);
+	}
+	*result_out = staged_result;
+	return (FT_ERR_SUCCESS);
 }
 
 int32_t GameSession::resolve_expired_regeneration_choices_internal(
@@ -4844,11 +7093,109 @@ int32_t GameSession::resolve_expired_regeneration_choices_internal(
 		result = this->save_session_snapshot();
 	if (result != FT_ERR_SUCCESS && !previous_card_state.empty())
 	{
-		(void)this->regeneration_cards_.restore_snapshot(
+		const int32_t rollback_result =
+			this->regeneration_cards_.restore_snapshot(
 			previous_card_state.data(), previous_card_state.size());
-		return (result);
+		return (rollback_result == FT_ERR_SUCCESS
+			? result : FT_ERR_INVALID_STATE);
 	}
 	*resolved_count_out = resolved_count;
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t GameSession::process_due_regeneration_choice_expiry() noexcept
+{
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
+	std::vector<card_game_pending_choice_view> pending_choices;
+	uint64_t authoritative_epoch = 0U;
+	uint64_t session_id = 0U;
+	uint64_t earliest_deadline = UINT64_MAX;
+	uint32_t earliest_choice_id = 0U;
+	uint32_t resolved_count = 0U;
+	int32_t result;
+
+	if (!this->active_ || !this->world_loom_start_committed_
+		|| !this->world_.world_revision().pending
+		|| !this->regeneration_cards_.is_initialized())
+		return (FT_ERR_SUCCESS);
+	result = this->regeneration_cards_.engine_.query_pending_choices(
+		RegenerationCardSession::PLAYER_ID, pending_choices);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	if (pending_choices.empty())
+		return (FT_ERR_SUCCESS);
+	if (this->revision_clock_provider_ == nullptr)
+		return (FT_ERR_INVALID_STATE);
+	result = this->revision_clock_provider_(&authoritative_epoch,
+		this->revision_clock_provider_user_data_);
+	if (result != FT_ERR_SUCCESS || authoritative_epoch == 0U)
+		return (result == FT_ERR_SUCCESS ? FT_ERR_INVALID_STATE : result);
+	for (const card_game_pending_choice_view &choice : pending_choices)
+	{
+		if (choice.deadline_epoch <= authoritative_epoch
+			&& (choice.deadline_epoch < earliest_deadline
+				|| (choice.deadline_epoch == earliest_deadline
+					&& (earliest_choice_id == 0U
+						|| choice.choice_id < earliest_choice_id))))
+		{
+			earliest_deadline = choice.deadline_epoch;
+			earliest_choice_id = choice.choice_id;
+		}
+	}
+	if (earliest_choice_id == 0U)
+		return (FT_ERR_SUCCESS);
+	session_id = this->regeneration_cards_.action_session_id_;
+	if (session_id == 0U)
+		return (FT_ERR_INVALID_STATE);
+	/* Domain-separated and derived from persisted deadline identity so restart
+	 * retries reuse the same request. Deterministic probing avoids a collision
+	 * with a client-chosen action ID without making the retry ID ephemeral. */
+	for (uint64_t probe = 0U; probe < 64U; ++probe)
+	{
+		uint64_t request_id = UINT64_C(14695981039346656037);
+		game_session_hash_u64(&request_id, UINT64_C(0x43484F4943454558));
+		game_session_hash_u64(&request_id, session_id);
+		game_session_hash_u64(&request_id, earliest_deadline);
+		game_session_hash_u64(&request_id, earliest_choice_id);
+		game_session_hash_u64(&request_id, probe);
+		if (request_id == 0U || request_id == UINT64_MAX)
+			continue ;
+		result = this->resolve_expired_regeneration_choices_internal(request_id,
+			authoritative_epoch, &resolved_count);
+		if (result != FT_ERR_ALREADY_EXISTS)
+			return (result);
+	}
+	return (FT_ERR_FULL);
+}
+
+int32_t GameSession::query_inventory_view(uint64_t authenticated_actor_id,
+	MinecraftInventoryView &view_out) const noexcept
+{
+	MinecraftInventoryView staged_view = {};
+	int32_t result;
+
+	if (!this->active_)
+		return (FT_ERR_INVALID_OPERATION);
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
+		this->item_instance_transaction_mutex_);
+	if (authenticated_actor_id == 0U
+		|| this->authenticated_actor_authorizer_ == nullptr
+		|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+			this->authenticated_actor_authorizer_user_data_))
+		return (FT_ERR_PERMISSION_DENIED);
+	result = this->player_character_.get_inventory().get_snapshot(
+		staged_view.inventory);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	result = game_session_snapshot_equipment(this->player_character_,
+		staged_view.equipment);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	staged_view.character_state_revision =
+		game_session_equipment_revision(staged_view.equipment);
+	view_out.inventory = std::move(staged_view.inventory);
+	view_out.equipment.swap(staged_view.equipment);
 	return (FT_ERR_SUCCESS);
 }
 
@@ -4858,6 +7205,8 @@ int32_t GameSession::query_hand_recipe(uint32_t recipe_id,
 {
 	if (!this->active_)
 		return (FT_ERR_INVALID_OPERATION);
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
+		this->item_instance_transaction_mutex_);
 	return (this->recipe_catalog_.query_hand_recipe(
 		this->player_character_.get_inventory(), recipe_id, result,
 		missing_groups));
@@ -4878,6 +7227,8 @@ int32_t GameSession::query_station_recipe(uint32_t recipe_id,
 		|| station_id > static_cast<uint32_t>(
 			MinecraftRecipeCatalog::FURNACE_STATION_ID))
 		return (FT_ERR_INVALID_ARGUMENT);
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
+		this->item_instance_transaction_mutex_);
 	if (expected_station_revision == 0U
 		|| this->processing_station_authorizer_ == nullptr
 		|| !this->processing_station_authorizer_(station_id, station_x,
@@ -4885,10 +7236,448 @@ int32_t GameSession::query_station_recipe(uint32_t recipe_id,
 			this->camera_.x, this->camera_.y, this->camera_.z,
 			this->processing_station_authorizer_user_data_))
 		return (FT_ERR_PERMISSION_DENIED);
-	return (this->recipe_catalog_.query_recipe_at_station(
+	int32_t query_result = this->recipe_catalog_.query_recipe_at_station(
 		this->player_character_.get_inventory(), recipe_id,
 		static_cast<MinecraftRecipeCatalog::StationId>(station_id), result,
-		missing_groups));
+		missing_groups);
+	if (query_result != FT_ERR_SUCCESS)
+		return (query_result);
+	if (!this->processing_station_authorizer_(station_id, station_x,
+		station_y, station_z, expected_station_revision,
+		this->camera_.x, this->camera_.y, this->camera_.z,
+		this->processing_station_authorizer_user_data_))
+		return (FT_ERR_PERMISSION_DENIED);
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t GameSession::query_station_recipes(uint32_t station_id,
+	int32_t station_x, int32_t station_y, int32_t station_z,
+	uint64_t expected_station_revision,
+	std::vector<MinecraftRecipeQueryEntry> &entries_out,
+	std::vector<MinecraftRecipeMissingGroup> &missing_out) const noexcept
+{
+	return (this->query_station_recipes(station_id, station_x, station_y,
+		station_z, expected_station_revision, 1, entries_out, missing_out));
+}
+
+int32_t GameSession::query_station_recipes(uint32_t station_id,
+	int32_t station_x, int32_t station_y, int32_t station_z,
+	uint64_t expected_station_revision, int32_t batch_count,
+	std::vector<MinecraftRecipeQueryEntry> &entries_out,
+	std::vector<MinecraftRecipeMissingGroup> &missing_out) const noexcept
+{
+	return (this->query_station_recipes_internal(0U, station_id, station_x,
+		station_y, station_z, expected_station_revision, batch_count,
+		entries_out, missing_out));
+}
+
+int32_t GameSession::query_station_recipes_internal(
+	uint64_t authenticated_actor_id, uint32_t station_id,
+	int32_t station_x, int32_t station_y, int32_t station_z,
+	uint64_t expected_station_revision, int32_t batch_count,
+	std::vector<MinecraftRecipeQueryEntry> &entries_out,
+	std::vector<MinecraftRecipeMissingGroup> &missing_out) const noexcept
+{
+	if (!this->active_)
+		return (FT_ERR_INVALID_OPERATION);
+	if (batch_count <= 0 || station_id > static_cast<uint32_t>(
+			MinecraftRecipeCatalog::FURNACE_STATION_ID))
+		return (FT_ERR_INVALID_ARGUMENT);
+	const bool hand_station = station_id == static_cast<uint32_t>(
+		MinecraftRecipeCatalog::HAND_STATION_ID);
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
+		this->item_instance_transaction_mutex_);
+	if (authenticated_actor_id != 0U
+		&& (this->authenticated_actor_authorizer_ == nullptr
+			|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+				this->authenticated_actor_authorizer_user_data_)))
+		return (FT_ERR_PERMISSION_DENIED);
+	if (hand_station && (station_x != 0 || station_y != 0 || station_z != 0
+		|| expected_station_revision != 0U))
+		return (FT_ERR_PERMISSION_DENIED);
+	if (!hand_station && expected_station_revision == 0U)
+		return (FT_ERR_PERMISSION_DENIED);
+	if (!hand_station && authenticated_actor_id != 0U
+		&& (this->actor_processing_station_authorizer_ == nullptr
+			|| !this->actor_processing_station_authorizer_(
+				authenticated_actor_id, station_id, station_x, station_y,
+				station_z, expected_station_revision,
+				this->actor_processing_station_authorizer_user_data_)))
+		return (FT_ERR_PERMISSION_DENIED);
+	if (!hand_station && authenticated_actor_id == 0U
+		&& (this->processing_station_authorizer_ == nullptr
+			|| !this->processing_station_authorizer_(station_id, station_x,
+				station_y, station_z, expected_station_revision,
+				this->camera_.x, this->camera_.y, this->camera_.z,
+				this->processing_station_authorizer_user_data_)))
+		return (FT_ERR_PERMISSION_DENIED);
+	std::vector<game_inventory_item_snapshot> equipment_snapshot;
+	std::vector<MinecraftRecipeQueryEntry> staged_entries;
+	std::vector<MinecraftRecipeMissingGroup> staged_missing;
+	int32_t result = this->recipe_catalog_.query_recipes(
+		this->player_character_.get_inventory(), 0U,
+		static_cast<MinecraftRecipeCatalog::StationId>(station_id),
+		batch_count, staged_entries, staged_missing);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	result = game_session_snapshot_equipment(this->player_character_,
+		equipment_snapshot);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	const uint64_t character_state_revision =
+		game_session_equipment_revision(equipment_snapshot);
+	if (authenticated_actor_id != 0U
+		&& (this->authenticated_actor_authorizer_ == nullptr
+			|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+				this->authenticated_actor_authorizer_user_data_)))
+		return (FT_ERR_PERMISSION_DENIED);
+	if (!hand_station && authenticated_actor_id != 0U
+		&& (this->actor_processing_station_authorizer_ == nullptr
+			|| !this->actor_processing_station_authorizer_(
+				authenticated_actor_id, station_id, station_x, station_y,
+				station_z, expected_station_revision,
+				this->actor_processing_station_authorizer_user_data_)))
+		return (FT_ERR_PERMISSION_DENIED);
+	if (!hand_station && authenticated_actor_id == 0U
+		&& (this->processing_station_authorizer_ == nullptr
+			|| !this->processing_station_authorizer_(station_id, station_x,
+				station_y, station_z, expected_station_revision,
+				this->camera_.x, this->camera_.y, this->camera_.z,
+				this->processing_station_authorizer_user_data_)))
+		return (FT_ERR_PERMISSION_DENIED);
+	for (MinecraftRecipeQueryEntry &entry : staged_entries)
+	{
+		entry.station_id = station_id;
+		entry.station_x = station_x;
+		entry.station_y = station_y;
+		entry.station_z = station_z;
+		entry.station_revision = expected_station_revision;
+		entry.character_state_revision = character_state_revision;
+	}
+	entries_out.swap(staged_entries);
+	missing_out.swap(staged_missing);
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t GameSession::query_station_recipes(uint64_t authenticated_actor_id,
+	uint32_t station_id, int32_t station_x, int32_t station_y,
+	int32_t station_z, uint64_t expected_station_revision,
+	std::vector<MinecraftRecipeQueryEntry> &entries_out,
+	std::vector<MinecraftRecipeMissingGroup> &missing_out) const noexcept
+{
+	return (this->query_station_recipes(authenticated_actor_id, station_id,
+		station_x, station_y, station_z, expected_station_revision, 1,
+		entries_out, missing_out));
+}
+
+int32_t GameSession::query_station_recipes(uint64_t authenticated_actor_id,
+	uint32_t station_id, int32_t station_x, int32_t station_y,
+	int32_t station_z, uint64_t expected_station_revision,
+	int32_t batch_count,
+	std::vector<MinecraftRecipeQueryEntry> &entries_out,
+	std::vector<MinecraftRecipeMissingGroup> &missing_out) const noexcept
+{
+	if (authenticated_actor_id == 0U)
+		return (FT_ERR_PERMISSION_DENIED);
+	return (this->query_station_recipes_internal(authenticated_actor_id,
+		station_id, station_x, station_y, station_z,
+		expected_station_revision, batch_count, entries_out, missing_out));
+}
+
+int32_t GameSession::query_recipe_snapshot(uint32_t recipe_id,
+	uint32_t station_id, int32_t station_x, int32_t station_y,
+	int32_t station_z, uint64_t expected_station_revision,
+	int32_t batch_count, MinecraftRecipeQueryEntry *entry_out,
+	std::vector<MinecraftRecipeMissingGroup> &missing_out) const noexcept
+{
+	return (this->query_recipe_snapshot_internal(0U, recipe_id, station_id,
+		station_x, station_y, station_z, expected_station_revision,
+		batch_count, entry_out, missing_out));
+}
+
+int32_t GameSession::query_recipe_snapshot_internal(
+	uint64_t authenticated_actor_id, uint32_t recipe_id,
+	uint32_t station_id, int32_t station_x, int32_t station_y,
+	int32_t station_z, uint64_t expected_station_revision,
+	int32_t batch_count, MinecraftRecipeQueryEntry *entry_out,
+	std::vector<MinecraftRecipeMissingGroup> &missing_out) const noexcept
+{
+	if (!this->active_)
+		return (FT_ERR_INVALID_OPERATION);
+	if (recipe_id == 0U || batch_count <= 0 || entry_out == nullptr
+		|| station_id > static_cast<uint32_t>(
+			MinecraftRecipeCatalog::FURNACE_STATION_ID))
+		return (FT_ERR_INVALID_ARGUMENT);
+	const bool hand_station = station_id == static_cast<uint32_t>(
+		MinecraftRecipeCatalog::HAND_STATION_ID);
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
+		this->item_instance_transaction_mutex_);
+	if (authenticated_actor_id != 0U
+		&& (this->authenticated_actor_authorizer_ == nullptr
+			|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+				this->authenticated_actor_authorizer_user_data_)))
+		return (FT_ERR_PERMISSION_DENIED);
+	if (hand_station && (station_x != 0 || station_y != 0 || station_z != 0
+		|| expected_station_revision != 0U))
+		return (FT_ERR_PERMISSION_DENIED);
+	if (!hand_station && expected_station_revision == 0U)
+		return (FT_ERR_PERMISSION_DENIED);
+	if (!hand_station && authenticated_actor_id != 0U
+		&& (this->actor_processing_station_authorizer_ == nullptr
+			|| !this->actor_processing_station_authorizer_(
+				authenticated_actor_id, station_id, station_x, station_y,
+				station_z, expected_station_revision,
+				this->actor_processing_station_authorizer_user_data_)))
+		return (FT_ERR_PERMISSION_DENIED);
+	if (!hand_station && authenticated_actor_id == 0U
+		&& (this->processing_station_authorizer_ == nullptr
+			|| !this->processing_station_authorizer_(station_id, station_x,
+				station_y, station_z, expected_station_revision,
+				this->camera_.x, this->camera_.y, this->camera_.z,
+				this->processing_station_authorizer_user_data_)))
+		return (FT_ERR_PERMISSION_DENIED);
+	std::vector<game_inventory_item_snapshot> equipment_snapshot;
+	std::vector<MinecraftRecipeQueryEntry> staged_entries;
+	std::vector<MinecraftRecipeMissingGroup> staged_missing;
+	int32_t result = this->recipe_catalog_.query_recipes(
+		this->player_character_.get_inventory(), recipe_id,
+		static_cast<MinecraftRecipeCatalog::StationId>(station_id),
+		batch_count, staged_entries, staged_missing);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	if (staged_entries.size() != 1U)
+		return (FT_ERR_INVALID_STATE);
+	result = game_session_snapshot_equipment(this->player_character_,
+		equipment_snapshot);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	const uint64_t character_state_revision =
+		game_session_equipment_revision(equipment_snapshot);
+	if (authenticated_actor_id != 0U
+		&& (this->authenticated_actor_authorizer_ == nullptr
+			|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+				this->authenticated_actor_authorizer_user_data_)))
+		return (FT_ERR_PERMISSION_DENIED);
+	if (!hand_station && authenticated_actor_id != 0U
+		&& (this->actor_processing_station_authorizer_ == nullptr
+			|| !this->actor_processing_station_authorizer_(
+				authenticated_actor_id, station_id, station_x, station_y,
+				station_z, expected_station_revision,
+				this->actor_processing_station_authorizer_user_data_)))
+		return (FT_ERR_PERMISSION_DENIED);
+	if (!hand_station && authenticated_actor_id == 0U
+		&& (this->processing_station_authorizer_ == nullptr
+			|| !this->processing_station_authorizer_(station_id, station_x,
+				station_y, station_z, expected_station_revision,
+				this->camera_.x, this->camera_.y, this->camera_.z,
+				this->processing_station_authorizer_user_data_)))
+		return (FT_ERR_PERMISSION_DENIED);
+	MinecraftRecipeQueryEntry staged_entry = staged_entries[0];
+	staged_entry.station_id = station_id;
+	staged_entry.station_x = station_x;
+	staged_entry.station_y = station_y;
+	staged_entry.station_z = station_z;
+	staged_entry.station_revision = expected_station_revision;
+	staged_entry.character_state_revision = character_state_revision;
+	*entry_out = staged_entry;
+	missing_out.swap(staged_missing);
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t GameSession::query_recipe_snapshot(uint64_t authenticated_actor_id,
+	uint32_t recipe_id, uint32_t station_id, int32_t station_x,
+	int32_t station_y, int32_t station_z,
+	uint64_t expected_station_revision, int32_t batch_count,
+	MinecraftRecipeQueryEntry *entry_out,
+	std::vector<MinecraftRecipeMissingGroup> &missing_out) const noexcept
+{
+	if (authenticated_actor_id == 0U)
+		return (FT_ERR_PERMISSION_DENIED);
+	return (this->query_recipe_snapshot_internal(authenticated_actor_id,
+		recipe_id, station_id, station_x, station_y, station_z,
+		expected_station_revision, batch_count, entry_out, missing_out));
+}
+
+int32_t GameSession::query_station_recipe_snapshot(
+	uint64_t authenticated_actor_id, uint32_t station_id, int32_t station_x,
+	int32_t station_y, int32_t station_z,
+	uint64_t expected_station_revision, int32_t batch_count,
+	MinecraftStationRecipeSnapshot *snapshot_out) const noexcept
+{
+	MinecraftStationRecipeSnapshot staged = {};
+	game_inventory_snapshot inventory_after = {};
+	card_game_snapshot session_before = {};
+	card_game_snapshot session_after = {};
+	std::vector<game_inventory_item_snapshot> equipment_after;
+	uint64_t catalog_revision_before = 0U;
+	uint64_t catalog_revision_after = 0U;
+	uint64_t recipe_book_revision_before = 0U;
+	uint64_t recipe_book_revision_after = 0U;
+	uint64_t session_id_before = 0U;
+	uint64_t session_id_after = 0U;
+	int32_t result;
+
+	if (snapshot_out == nullptr || authenticated_actor_id == 0U
+		|| batch_count <= 0)
+		return (FT_ERR_INVALID_ARGUMENT);
+	std::lock_guard<std::recursive_mutex> session_lock(
+		this->item_instance_transaction_mutex_);
+	if (!this->active_)
+		return (FT_ERR_INVALID_OPERATION);
+	result = this->player_character_.get_inventory().get_snapshot(
+		staged.inventory);
+	if (result == FT_ERR_SUCCESS)
+		result = this->recipe_catalog_.get_catalog_revision(
+			&catalog_revision_before);
+	if (result == FT_ERR_SUCCESS)
+		result = this->recipe_catalog_.recipe_book().get_revision(
+			&recipe_book_revision_before);
+	if (result == FT_ERR_SUCCESS)
+		result = this->regeneration_cards_.engine_.get_snapshot(
+			&session_before);
+	if (result == FT_ERR_SUCCESS)
+		session_id_before = this->regeneration_cards_.action_session_id_;
+	if (result == FT_ERR_SUCCESS)
+		result = this->query_station_recipes_internal(authenticated_actor_id,
+			station_id, station_x, station_y, station_z,
+			expected_station_revision, batch_count, staged.entries,
+			staged.missing);
+	if (result == FT_ERR_SUCCESS)
+		result = this->player_character_.get_inventory().get_snapshot(
+			inventory_after);
+	if (result == FT_ERR_SUCCESS)
+		result = this->recipe_catalog_.get_catalog_revision(
+			&catalog_revision_after);
+	if (result == FT_ERR_SUCCESS)
+		result = this->recipe_catalog_.recipe_book().get_revision(
+			&recipe_book_revision_after);
+	if (result == FT_ERR_SUCCESS)
+		result = this->regeneration_cards_.engine_.get_snapshot(&session_after);
+	if (result == FT_ERR_SUCCESS)
+		session_id_after = this->regeneration_cards_.action_session_id_;
+	if (result == FT_ERR_SUCCESS)
+		result = game_session_snapshot_equipment(this->player_character_,
+			equipment_after);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	staged.character_state_revision =
+		game_session_equipment_revision(equipment_after);
+	if (staged.inventory.revision != inventory_after.revision
+		|| catalog_revision_before != catalog_revision_after
+		|| recipe_book_revision_before != recipe_book_revision_after
+		|| session_before.state_sequence != session_after.state_sequence
+		|| session_id_before != session_id_after)
+		return (FT_ERR_INVALID_STATE);
+	staged.inventory = std::move(inventory_after);
+	staged.inventory_revision = staged.inventory.revision;
+	staged.catalog_revision = catalog_revision_after;
+	staged.recipe_book_revision = recipe_book_revision_after;
+	staged.station_id = station_id;
+	staged.session_id = session_id_after;
+	staged.session_revision = session_id_after != 0U
+		? session_after.state_sequence : 0U;
+	staged.station_x = station_x;
+	staged.station_y = station_y;
+	staged.station_z = station_z;
+	staged.station_revision = expected_station_revision;
+	for (const MinecraftRecipeQueryEntry &entry : staged.entries)
+	{
+		if (entry.inventory_revision != staged.inventory_revision
+			|| entry.catalog_revision != staged.catalog_revision
+			|| entry.recipe_book_revision != staged.recipe_book_revision
+			|| entry.character_state_revision
+				!= staged.character_state_revision
+			|| entry.station_id != station_id || entry.station_x != station_x
+			|| entry.station_y != station_y || entry.station_z != station_z
+			|| entry.station_revision != expected_station_revision)
+			return (FT_ERR_INVALID_STATE);
+	}
+	*snapshot_out = std::move(staged);
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t GameSession::craft_station_recipe_from_snapshot(
+	uint64_t authenticated_actor_id, uint64_t request_id,
+	uint32_t recipe_id, int32_t batch_count,
+	const MinecraftStationRecipeSnapshot &snapshot,
+	MinecraftCraftActionResult *result_out) noexcept
+{
+	if (authenticated_actor_id == 0U || request_id == 0U || recipe_id == 0U
+		|| batch_count <= 0 || snapshot.inventory_revision == 0U
+		|| snapshot.catalog_revision == 0U
+		|| snapshot.recipe_book_revision == 0U
+		|| snapshot.character_state_revision == 0U
+		|| ((snapshot.session_id == 0U)
+			!= (snapshot.session_revision == 0U))
+		|| snapshot.station_id > static_cast<uint32_t>(
+			MinecraftRecipeCatalog::FURNACE_STATION_ID)
+		|| (snapshot.station_id != static_cast<uint32_t>(
+			MinecraftRecipeCatalog::HAND_STATION_ID)
+			&& snapshot.station_revision == 0U))
+		return (FT_ERR_INVALID_ARGUMENT);
+	bool matching_recipe = false;
+	for (const MinecraftRecipeQueryEntry &entry : snapshot.entries)
+	{
+		if (entry.recipe_id == recipe_id
+			&& entry.station_id == snapshot.station_id
+			&& entry.station_x == snapshot.station_x
+			&& entry.station_y == snapshot.station_y
+			&& entry.station_z == snapshot.station_z
+			&& entry.station_revision == snapshot.station_revision
+			&& entry.inventory_revision == snapshot.inventory_revision
+			&& entry.catalog_revision == snapshot.catalog_revision
+			&& entry.recipe_book_revision == snapshot.recipe_book_revision
+			&& entry.character_state_revision
+				== snapshot.character_state_revision
+			&& entry.batch_count == batch_count)
+		{
+			matching_recipe = true;
+			break ;
+		}
+	}
+	if (!matching_recipe)
+		return (FT_ERR_INVALID_STATE);
+	if (snapshot.station_id == static_cast<uint32_t>(
+			MinecraftRecipeCatalog::HAND_STATION_ID))
+	{
+		const GameSessionSnapshotWriter snapshot_writer = {
+			&GameSession::save_snapshot_callback, this};
+		std::lock_guard<std::recursive_mutex> item_transaction_lock(
+			this->item_instance_transaction_mutex_);
+		card_game_snapshot current_session = {};
+		if (!this->active_ || this->authenticated_actor_authorizer_ == nullptr
+			|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+				this->authenticated_actor_authorizer_user_data_))
+			return (FT_ERR_PERMISSION_DENIED);
+		if (snapshot.session_id != this->regeneration_cards_.action_session_id_
+			|| this->regeneration_cards_.engine_.get_snapshot(&current_session)
+				!= FT_ERR_SUCCESS
+			|| current_session.state_sequence != snapshot.session_revision)
+			return (FT_ERR_INVALID_STATE);
+		int32_t sync_result = this->synchronize_item_instance_id_allocator();
+		if (sync_result != FT_ERR_SUCCESS)
+			return (sync_result);
+		return (WorldItemCraftTransaction::execute(
+			this->world_item_save_path_, this->player_character_,
+			this->world_items_, this->recipe_catalog_,
+			this->transaction_journal_, request_id, recipe_id, batch_count,
+			snapshot.inventory_revision, snapshot.catalog_revision,
+			snapshot.recipe_book_revision, authenticated_actor_id,
+			snapshot.character_state_revision,
+			&GameSession::character_state_revision_provider_callback, this,
+			&GameSession::craft_precommit_authorizer_callback, this,
+			snapshot.station_id, snapshot.station_x, snapshot.station_y,
+			snapshot.station_z, snapshot.station_revision, result_out,
+			&snapshot_writer, snapshot.session_id,
+			snapshot.session_revision));
+	}
+	return (this->craft_station_recipe_internal(authenticated_actor_id,
+		request_id, recipe_id, batch_count, snapshot.inventory_revision,
+		snapshot.catalog_revision, snapshot.recipe_book_revision,
+		snapshot.character_state_revision, snapshot.station_id,
+		snapshot.station_x, snapshot.station_y, snapshot.station_z,
+		snapshot.station_revision, snapshot.session_id,
+		snapshot.session_revision, result_out));
 }
 
 bool GameSession::authorize_recipe_discovery_event(
@@ -4974,6 +7763,75 @@ int32_t GameSession::configure_recipe_discovery_authorizer(
 	return (FT_ERR_SUCCESS);
 }
 
+int32_t GameSession::configure_runtime_block_acquisition_rules(
+	const RuntimeBlockAcquisitionConfig *rules, uint32_t rule_count) noexcept
+{
+	std::vector<RuntimeBlockAcquisitionConfig> staged;
+	if (this->active_ || (rule_count != 0U && rules == nullptr)
+		|| rule_count > VOXEL_RUNTIME_BLOCK_CAPACITY)
+		return (FT_ERR_INVALID_ARGUMENT);
+	try
+	{
+		staged.reserve(rule_count);
+		for (uint32_t index = 0U; index < rule_count; ++index)
+		{
+			const RuntimeBlockAcquisitionConfig &rule = rules[index];
+			if (rule.block_id < VOXEL_BUILTIN_BLOCK_COUNT
+				|| rule.block_id >= VOXEL_BUILTIN_BLOCK_COUNT
+					+ VOXEL_RUNTIME_BLOCK_CAPACITY
+				|| voxel_block_is_known(rule.block_id) == FT_FALSE
+				|| rule.policy < MINECRAFT_BLOCK_ACQUISITION_NONE
+				|| rule.policy > MINECRAFT_BLOCK_ACQUISITION_ADMIN_ONLY)
+				return (FT_ERR_INVALID_ARGUMENT);
+			for (const RuntimeBlockAcquisitionConfig &prior : staged)
+				if (prior.block_id == rule.block_id)
+					return (FT_ERR_ALREADY_EXISTS);
+			staged.push_back(rule);
+		}
+	}
+	catch (const std::bad_alloc &)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	this->runtime_block_acquisition_config_.swap(staged);
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t GameSession::register_runtime_block_acquisition_rule(
+	uint32_t block_id, MinecraftBlockAcquisitionPolicy policy,
+	int32_t item_id) noexcept
+{
+	if (!this->active_)
+		return (FT_ERR_INVALID_OPERATION);
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
+		this->item_instance_transaction_mutex_);
+	for (const RuntimeBlockAcquisitionConfig &existing
+		: this->runtime_block_acquisition_config_)
+	{
+		if (existing.block_id != block_id)
+			continue ;
+		if (existing.policy == policy && existing.item_id == item_id)
+			return (this->save_session_snapshot());
+		return (FT_ERR_ALREADY_EXISTS);
+	}
+	try
+	{
+		this->runtime_block_acquisition_config_.reserve(
+			this->runtime_block_acquisition_config_.size() + 1U);
+	}
+	catch (const std::bad_alloc &)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	const int32_t result = this->item_catalog_.register_runtime_block_rule(
+		block_id, policy, item_id);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	this->runtime_block_acquisition_config_.push_back(
+		{block_id, policy, item_id});
+	return (this->save_session_snapshot());
+}
+
 int32_t GameSession::configure_recipe_discovery_source(
 	uint32_t source_type_id, uint32_t source_id, uint32_t recipe_id) noexcept
 {
@@ -5026,6 +7884,18 @@ int32_t GameSession::configure_processing_station_authorizer(
 	return (FT_ERR_SUCCESS);
 }
 
+int32_t GameSession::configure_actor_processing_station_authorizer(
+	ActorProcessingStationAuthorizer authorizer, void *user_data) noexcept
+{
+	if (this->active_)
+		return (FT_ERR_INVALID_OPERATION);
+	if (authorizer == nullptr && user_data != nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
+	this->actor_processing_station_authorizer_ = authorizer;
+	this->actor_processing_station_authorizer_user_data_ = user_data;
+	return (FT_ERR_SUCCESS);
+}
+
 int32_t GameSession::configure_processing_station_continuity_validator(
 	ProcessingStationContinuityValidator validator,
 	void *user_data) noexcept
@@ -5073,6 +7943,28 @@ int32_t GameSession::configure_revision_clock_provider(
 		return (FT_ERR_INVALID_ARGUMENT);
 	this->revision_clock_provider_ = provider;
 	this->revision_clock_provider_user_data_ = user_data;
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t GameSession::configure_revision_decision_timeout_ms(
+	uint64_t timeout_ms) noexcept
+{
+	return (this->configure_revision_decision_timeouts_ms(timeout_ms,
+		timeout_ms));
+}
+
+int32_t GameSession::configure_revision_decision_timeouts_ms(
+	uint64_t solo_timeout_ms, uint64_t multiplayer_timeout_ms) noexcept
+{
+	if (this->active_)
+		return (FT_ERR_INVALID_OPERATION);
+	if (solo_timeout_ms < MINIMUM_REVISION_DECISION_TIMEOUT_MS
+		|| solo_timeout_ms > MAXIMUM_REVISION_DECISION_TIMEOUT_MS
+		|| multiplayer_timeout_ms < MINIMUM_REVISION_DECISION_TIMEOUT_MS
+		|| multiplayer_timeout_ms > MAXIMUM_REVISION_DECISION_TIMEOUT_MS)
+		return (FT_ERR_OUT_OF_RANGE);
+	this->revision_solo_decision_timeout_ms_ = solo_timeout_ms;
+	this->revision_multiplayer_decision_timeout_ms_ = multiplayer_timeout_ms;
 	return (FT_ERR_SUCCESS);
 }
 
@@ -5204,20 +8096,67 @@ int32_t GameSession::validate_physical_item_identity_uniqueness() const noexcept
 		card_instance_ids));
 }
 
+int32_t GameSession::research_card_recipe(uint64_t authenticated_actor_id,
+	uint64_t request_id, uint64_t expected_inventory_revision, int32_t station_x,
+	int32_t station_y, int32_t station_z,
+	uint64_t expected_station_revision,
+	MinecraftRecipeResearchResult *result_out) noexcept
+{
+	if (authenticated_actor_id == 0U)
+		return (FT_ERR_PERMISSION_DENIED);
+	return (this->research_card_recipe_internal(authenticated_actor_id,
+		request_id, expected_inventory_revision, station_x, station_y,
+		station_z, expected_station_revision, result_out));
+}
+
 int32_t GameSession::research_card_recipe(uint64_t request_id,
 	uint64_t expected_inventory_revision, int32_t station_x,
 	int32_t station_y, int32_t station_z,
 	uint64_t expected_station_revision,
 	MinecraftRecipeResearchResult *result_out) noexcept
 {
+	return (this->research_card_recipe_internal(0U, request_id,
+		expected_inventory_revision, station_x, station_y, station_z,
+		expected_station_revision, result_out));
+}
+
+int32_t GameSession::research_card_recipe_internal(
+	uint64_t authenticated_actor_id, uint64_t request_id,
+	uint64_t expected_inventory_revision, int32_t station_x,
+	int32_t station_y, int32_t station_z,
+	uint64_t expected_station_revision,
+	MinecraftRecipeResearchResult *result_out) noexcept
+{
+	std::vector<uint8_t> journal_before;
 	if (!this->active_)
 		return (FT_ERR_INVALID_OPERATION);
 	if (request_id == 0U || result_out == nullptr
 		|| expected_inventory_revision == UINT64_MAX
 		|| expected_station_revision == 0U)
 		return (FT_ERR_INVALID_ARGUMENT);
-	std::lock_guard<std::mutex> item_transaction_lock(
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
 		this->item_instance_transaction_mutex_);
+	if (authenticated_actor_id != 0U)
+	{
+		if (this->authenticated_actor_authorizer_ == nullptr
+			|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+				this->authenticated_actor_authorizer_user_data_)
+			|| this->actor_processing_station_authorizer_ == nullptr
+			|| !this->actor_processing_station_authorizer_(authenticated_actor_id,
+				static_cast<uint32_t>(
+					MinecraftRecipeCatalog::CARD_PRESS_STATION_ID),
+				station_x, station_y, station_z, expected_station_revision,
+				this->actor_processing_station_authorizer_user_data_))
+			return (FT_ERR_PERMISSION_DENIED);
+	}
+	else if (this->processing_station_authorizer_ == nullptr
+		|| !this->processing_station_authorizer_(
+			static_cast<uint32_t>(MinecraftRecipeCatalog::CARD_PRESS_STATION_ID),
+			station_x, station_y, station_z, expected_station_revision,
+			this->player_character_.get_x(), this->player_character_.get_y(),
+			this->player_character_.get_z(),
+			this->processing_station_authorizer_user_data_))
+		return (FT_ERR_PERMISSION_DENIED);
 	GameTransactionJournal::Record record = {};
 	int32_t result = this->transaction_journal_.find(
 		RECIPE_RESEARCH_TRANSACTION_SCOPE, request_id, &record);
@@ -5228,15 +8167,18 @@ int32_t GameSession::research_card_recipe(uint64_t request_id,
 		uint64_t random_value = 0U;
 		uint32_t station_id = 0U;
 		uint32_t recipe_id = 0U;
+		uint64_t recorded_actor_id = 0U;
 		int32_t x = 0;
 		int32_t y = 0;
 		int32_t z = 0;
 		if (!game_session_decode_recipe_research(record,
 				&recorded_inventory_revision, &station_id, &x, &y, &z,
-				&recorded_station_revision, &random_value, &recipe_id)
+				&recorded_station_revision, &random_value, &recipe_id,
+				&recorded_actor_id)
 			|| recorded_inventory_revision != expected_inventory_revision
 			|| recorded_station_revision != expected_station_revision
-			|| x != station_x || y != station_y || z != station_z)
+			|| x != station_x || y != station_y || z != station_z
+			|| recorded_actor_id != authenticated_actor_id)
 			return (FT_ERR_INVALID_ARGUMENT);
 		if (record.state == GameTransactionJournal::ABORTED)
 			return (FT_ERR_INVALID_OPERATION);
@@ -5249,28 +8191,15 @@ int32_t GameSession::research_card_recipe(uint64_t request_id,
 		result = this->save_session_snapshot();
 		if (result != FT_ERR_SUCCESS)
 			return (result);
-		uint64_t inventory_revision = 0U;
-		result = this->player_character_.get_inventory().get_revision(
-			&inventory_revision);
-		if (result != FT_ERR_SUCCESS)
-			return (result);
-		*result_out = {request_id, inventory_revision, random_value,
+		*result_out = {request_id, recorded_inventory_revision + 1U,
+			random_value,
 			recipe_id, true};
 		return (FT_ERR_SUCCESS);
 	}
 	if (result != FT_ERR_NOT_FOUND)
 		return (result);
-	if (this->processing_station_authorizer_ == nullptr)
-		return (FT_ERR_INVALID_OPERATION);
 	if (this->world_.world_revision().regenerating
 		|| this->world_.world_revision().pending)
-		return (FT_ERR_INVALID_OPERATION);
-	if (!this->processing_station_authorizer_(
-			static_cast<uint32_t>(MinecraftRecipeCatalog::CARD_PRESS_STATION_ID),
-			station_x, station_y, station_z, expected_station_revision,
-			this->player_character_.get_x(), this->player_character_.get_y(),
-			this->player_character_.get_z(),
-			this->processing_station_authorizer_user_data_))
 		return (FT_ERR_INVALID_OPERATION);
 	game_inventory_snapshot inventory = {};
 	result = this->player_character_.get_inventory().get_snapshot(inventory);
@@ -5317,7 +8246,8 @@ int32_t GameSession::research_card_recipe(uint64_t request_id,
 	try
 	{
 		payload.insert(payload.end(), {'R', 'S', 'R', '1'});
-		game_session_append_u32(payload, 1U);
+		game_session_append_u32(payload,
+			authenticated_actor_id == 0U ? 1U : 2U);
 		game_session_append_u64(payload, expected_inventory_revision);
 		game_session_append_u32(payload, static_cast<uint32_t>(
 			MinecraftRecipeCatalog::CARD_PRESS_STATION_ID));
@@ -5330,11 +8260,31 @@ int32_t GameSession::research_card_recipe(uint64_t request_id,
 		game_session_append_u32(payload, static_cast<uint32_t>(
 			RECIPE_RESEARCH_COST_ITEM_ID));
 		game_session_append_u32(payload, RECIPE_RESEARCH_COST_QUANTITY);
+		if (authenticated_actor_id != 0U)
+			game_session_append_u64(payload, authenticated_actor_id);
 	}
 	catch (...)
 	{
 		return (FT_ERR_NO_MEMORY);
 	}
+	if (payload.size() != (authenticated_actor_id == 0U
+		? RECIPE_RESEARCH_V1_PAYLOAD_SIZE
+		: RECIPE_RESEARCH_PAYLOAD_SIZE))
+		return (FT_ERR_INVALID_STATE);
+	if (authenticated_actor_id != 0U
+		&& (this->authenticated_actor_authorizer_ == nullptr
+			|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+				this->authenticated_actor_authorizer_user_data_)
+			|| this->actor_processing_station_authorizer_ == nullptr
+			|| !this->actor_processing_station_authorizer_(authenticated_actor_id,
+				static_cast<uint32_t>(
+					MinecraftRecipeCatalog::CARD_PRESS_STATION_ID),
+				station_x, station_y, station_z, expected_station_revision,
+				this->actor_processing_station_authorizer_user_data_)))
+		return (FT_ERR_PERMISSION_DENIED);
+	result = this->transaction_journal_.serialize(journal_before);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
 	uint64_t sequence = 0U;
 	bool replayed = false;
 	result = this->transaction_journal_.prepare(
@@ -5349,10 +8299,11 @@ int32_t GameSession::research_card_recipe(uint64_t request_id,
 	result = this->save_session_snapshot();
 	if (result != FT_ERR_SUCCESS)
 	{
-		(void)this->transaction_journal_.mark_aborted(
-			RECIPE_RESEARCH_TRANSACTION_SCOPE, request_id);
-		(void)this->save_session_snapshot();
-		return (result);
+		const int32_t rollback_result =
+			this->transaction_journal_.deserialize(journal_before.data(),
+				journal_before.size());
+		return (rollback_result == FT_ERR_SUCCESS
+			? result : FT_ERR_INVALID_STATE);
 	}
 	result = this->recover_pending_recipe_research();
 	if (result != FT_ERR_SUCCESS)
@@ -5372,9 +8323,29 @@ int32_t GameSession::craft_hand_recipe(uint64_t request_id,
 	uint64_t expected_inventory_revision,
 	MinecraftCraftActionResult *result_out) noexcept
 {
+	uint64_t catalog_revision = 0U;
+	uint64_t recipe_book_revision = 0U;
+	int32_t result = this->recipe_catalog_.get_catalog_revision(
+		&catalog_revision);
+	if (result == FT_ERR_SUCCESS)
+		result = this->recipe_catalog_.recipe_book().get_revision(
+			&recipe_book_revision);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	return (this->craft_hand_recipe(request_id, recipe_id, batch_count,
+		expected_inventory_revision, catalog_revision, recipe_book_revision,
+		result_out));
+}
+
+int32_t GameSession::craft_hand_recipe(uint64_t request_id,
+	uint32_t recipe_id, int32_t batch_count,
+	uint64_t expected_inventory_revision, uint64_t expected_catalog_revision,
+	uint64_t expected_recipe_book_revision,
+	MinecraftCraftActionResult *result_out) noexcept
+{
 	const GameSessionSnapshotWriter snapshot_writer = {
 		&GameSession::save_snapshot_callback, this};
-	std::lock_guard<std::mutex> item_transaction_lock(
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
 		this->item_instance_transaction_mutex_);
 	int32_t result;
 
@@ -5386,9 +8357,53 @@ int32_t GameSession::craft_hand_recipe(uint64_t request_id,
 	return (WorldItemCraftTransaction::execute(this->world_item_save_path_,
 		this->player_character_, this->world_items_, this->recipe_catalog_,
 		this->transaction_journal_, request_id, recipe_id, batch_count,
-		expected_inventory_revision,
+		expected_inventory_revision, expected_catalog_revision,
+		expected_recipe_book_revision,
 		static_cast<uint32_t>(MinecraftRecipeCatalog::HAND_STATION_ID),
 		0, 0, 0, 0U, result_out, &snapshot_writer));
+}
+
+int32_t GameSession::craft_hand_recipe(uint64_t authenticated_actor_id,
+	uint64_t request_id, uint32_t recipe_id, int32_t batch_count,
+	uint64_t expected_inventory_revision, uint64_t expected_catalog_revision,
+	uint64_t expected_recipe_book_revision,
+	uint64_t expected_character_state_revision,
+	MinecraftCraftActionResult *result_out) noexcept
+{
+	const GameSessionSnapshotWriter snapshot_writer = {
+		&GameSession::save_snapshot_callback, this};
+	int32_t result;
+
+	if (!this->active_)
+		return (FT_ERR_INVALID_OPERATION);
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
+		this->item_instance_transaction_mutex_);
+	if (authenticated_actor_id == 0U
+		|| expected_character_state_revision == 0U
+		|| this->authenticated_actor_authorizer_ == nullptr
+		|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+			this->authenticated_actor_authorizer_user_data_))
+		return (FT_ERR_PERMISSION_DENIED);
+	card_game_snapshot action_session = {};
+	if (this->regeneration_cards_.action_session_id_ != 0U
+		&& this->regeneration_cards_.engine_.get_snapshot(&action_session)
+			!= FT_ERR_SUCCESS)
+		return (FT_ERR_INVALID_STATE);
+	result = this->synchronize_item_instance_id_allocator();
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	return (WorldItemCraftTransaction::execute(this->world_item_save_path_,
+		this->player_character_, this->world_items_, this->recipe_catalog_,
+		this->transaction_journal_, request_id, recipe_id, batch_count,
+		expected_inventory_revision, expected_catalog_revision,
+		expected_recipe_book_revision, authenticated_actor_id,
+		expected_character_state_revision,
+		&GameSession::character_state_revision_provider_callback, this,
+		&GameSession::craft_precommit_authorizer_callback, this,
+		static_cast<uint32_t>(MinecraftRecipeCatalog::HAND_STATION_ID),
+		0, 0, 0, 0U, result_out, &snapshot_writer,
+		this->regeneration_cards_.action_session_id_,
+		action_session.state_sequence));
 }
 
 int32_t GameSession::craft_station_recipe(uint64_t request_id,
@@ -5396,6 +8411,46 @@ int32_t GameSession::craft_station_recipe(uint64_t request_id,
 	uint64_t expected_inventory_revision, uint32_t station_id,
 	int32_t station_x, int32_t station_y, int32_t station_z,
 	uint64_t expected_station_revision,
+	MinecraftCraftActionResult *result_out) noexcept
+{
+	uint64_t catalog_revision = 0U;
+	uint64_t recipe_book_revision = 0U;
+	int32_t result = this->recipe_catalog_.get_catalog_revision(
+		&catalog_revision);
+	if (result == FT_ERR_SUCCESS)
+		result = this->recipe_catalog_.recipe_book().get_revision(
+			&recipe_book_revision);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	return (this->craft_station_recipe(request_id, recipe_id, batch_count,
+		expected_inventory_revision, catalog_revision, recipe_book_revision,
+		station_id, station_x, station_y, station_z, expected_station_revision,
+		result_out));
+}
+
+int32_t GameSession::craft_station_recipe(uint64_t request_id,
+	uint32_t recipe_id, int32_t batch_count,
+	uint64_t expected_inventory_revision, uint64_t expected_catalog_revision,
+	uint64_t expected_recipe_book_revision, uint32_t station_id,
+	int32_t station_x, int32_t station_y, int32_t station_z,
+	uint64_t expected_station_revision,
+	MinecraftCraftActionResult *result_out) noexcept
+{
+	return (this->craft_station_recipe_internal(0U, request_id, recipe_id,
+		batch_count, expected_inventory_revision, expected_catalog_revision,
+		expected_recipe_book_revision, 0U, station_id, station_x,
+		station_y, station_z, expected_station_revision, 0U, 0U, result_out));
+}
+
+int32_t GameSession::craft_station_recipe_internal(
+	uint64_t authenticated_actor_id, uint64_t request_id,
+	uint32_t recipe_id, int32_t batch_count,
+	uint64_t expected_inventory_revision, uint64_t expected_catalog_revision,
+	uint64_t expected_recipe_book_revision,
+	uint64_t expected_character_state_revision, uint32_t station_id,
+	int32_t station_x, int32_t station_y, int32_t station_z,
+	uint64_t expected_station_revision,
+	uint64_t expected_session_id, uint64_t expected_session_revision,
 	MinecraftCraftActionResult *result_out) noexcept
 {
 	const GameSessionSnapshotWriter snapshot_writer = {
@@ -5408,117 +8463,202 @@ int32_t GameSession::craft_station_recipe(uint64_t request_id,
 		|| station_id > static_cast<uint32_t>(
 			MinecraftRecipeCatalog::FURNACE_STATION_ID))
 		return (FT_ERR_INVALID_ARGUMENT);
-	if (expected_station_revision == 0U
-		|| this->processing_station_authorizer_ == nullptr
-		|| !this->processing_station_authorizer_(station_id, station_x,
-			station_y, station_z, expected_station_revision,
-			this->camera_.x, this->camera_.y, this->camera_.z,
-			this->processing_station_authorizer_user_data_))
+	if (authenticated_actor_id != 0U
+		&& (expected_character_state_revision == 0U
+			|| this->authenticated_actor_authorizer_ == nullptr
+			|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+				this->authenticated_actor_authorizer_user_data_)))
 		return (FT_ERR_PERMISSION_DENIED);
-	std::lock_guard<std::mutex> item_transaction_lock(
+	if ((expected_session_id == 0U) != (expected_session_revision == 0U))
+		return (FT_ERR_INVALID_ARGUMENT);
+	if (expected_station_revision == 0U
+		|| (authenticated_actor_id != 0U
+			&& (this->actor_processing_station_authorizer_ == nullptr
+				|| !this->actor_processing_station_authorizer_(
+					authenticated_actor_id, station_id, station_x, station_y,
+					station_z, expected_station_revision,
+					this->actor_processing_station_authorizer_user_data_)))
+		|| (authenticated_actor_id == 0U
+			&& (this->processing_station_authorizer_ == nullptr
+				|| !this->processing_station_authorizer_(station_id, station_x,
+					station_y, station_z, expected_station_revision,
+					this->camera_.x, this->camera_.y, this->camera_.z,
+					this->processing_station_authorizer_user_data_))))
+		return (FT_ERR_PERMISSION_DENIED);
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
 		this->item_instance_transaction_mutex_);
 	int32_t result = this->synchronize_item_instance_id_allocator();
 	if (result != FT_ERR_SUCCESS)
 		return (result);
+	if (authenticated_actor_id != 0U
+		&& (this->authenticated_actor_authorizer_ == nullptr
+			|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+				this->authenticated_actor_authorizer_user_data_)))
+		return (FT_ERR_PERMISSION_DENIED);
+	if (authenticated_actor_id != 0U && expected_session_id == 0U
+		&& this->regeneration_cards_.action_session_id_ != 0U)
+	{
+		card_game_snapshot current_session = {};
+		if (this->regeneration_cards_.engine_.get_snapshot(&current_session)
+				!= FT_ERR_SUCCESS)
+			return (FT_ERR_INVALID_STATE);
+		expected_session_id = this->regeneration_cards_.action_session_id_;
+		expected_session_revision = current_session.state_sequence;
+	}
+	if (expected_session_id != 0U)
+	{
+		card_game_snapshot current_session = {};
+		if (expected_session_id != this->regeneration_cards_.action_session_id_
+			|| this->regeneration_cards_.engine_.get_snapshot(&current_session)
+				!= FT_ERR_SUCCESS
+			|| current_session.state_sequence != expected_session_revision)
+			return (FT_ERR_INVALID_STATE);
+	}
+	if (expected_station_revision == 0U
+		|| (authenticated_actor_id != 0U
+			&& (this->actor_processing_station_authorizer_ == nullptr
+				|| !this->actor_processing_station_authorizer_(
+					authenticated_actor_id, station_id, station_x, station_y,
+					station_z, expected_station_revision,
+					this->actor_processing_station_authorizer_user_data_)))
+		|| (authenticated_actor_id == 0U
+			&& (this->processing_station_authorizer_ == nullptr
+				|| !this->processing_station_authorizer_(station_id, station_x,
+					station_y, station_z, expected_station_revision,
+					this->camera_.x, this->camera_.y, this->camera_.z,
+					this->processing_station_authorizer_user_data_))))
+		return (FT_ERR_PERMISSION_DENIED);
 	return (WorldItemCraftTransaction::execute(this->world_item_save_path_,
 		this->player_character_, this->world_items_, this->recipe_catalog_,
 		this->transaction_journal_, request_id, recipe_id, batch_count,
-		expected_inventory_revision, station_id, station_x, station_y,
-		station_z, expected_station_revision, result_out, &snapshot_writer));
+		expected_inventory_revision, expected_catalog_revision,
+		expected_recipe_book_revision, authenticated_actor_id,
+		expected_character_state_revision,
+		&GameSession::character_state_revision_provider_callback, this,
+		&GameSession::craft_precommit_authorizer_callback, this,
+		station_id, station_x, station_y, station_z,
+		expected_station_revision, result_out, &snapshot_writer,
+		expected_session_id, expected_session_revision));
 }
 
-int32_t GameSession::equip_inventory_item(uint64_t request_id,
+int32_t GameSession::craft_station_recipe(uint64_t authenticated_actor_id,
+	uint64_t request_id, uint32_t recipe_id, int32_t batch_count,
+	uint64_t expected_inventory_revision, uint64_t expected_catalog_revision,
+	uint64_t expected_recipe_book_revision,
+	uint64_t expected_character_state_revision, uint32_t station_id,
+	int32_t station_x, int32_t station_y, int32_t station_z,
+	uint64_t expected_station_revision,
+	MinecraftCraftActionResult *result_out) noexcept
+{
+	if (!this->active_)
+		return (FT_ERR_INVALID_OPERATION);
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
+		this->item_instance_transaction_mutex_);
+	if (authenticated_actor_id == 0U
+		|| this->authenticated_actor_authorizer_ == nullptr
+		|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+			this->authenticated_actor_authorizer_user_data_))
+		return (FT_ERR_PERMISSION_DENIED);
+	return (this->craft_station_recipe_internal(authenticated_actor_id,
+		request_id, recipe_id, batch_count, expected_inventory_revision,
+		expected_catalog_revision, expected_recipe_book_revision,
+		expected_character_state_revision, station_id, station_x, station_y,
+		station_z, expected_station_revision, 0U, 0U, result_out));
+}
+
+int32_t GameSession::equip_inventory_item(uint64_t authenticated_actor_id,
+	uint64_t request_id,
 	int32_t inventory_slot, uint64_t expected_inventory_revision,
 	uint32_t equipment_slot) noexcept
 {
 	if (!this->active_)
 		return (FT_ERR_INVALID_OPERATION);
+	if (authenticated_actor_id == 0U
+		|| this->authenticated_actor_authorizer_ == nullptr
+		|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+			this->authenticated_actor_authorizer_user_data_))
+		return (FT_ERR_PERMISSION_DENIED);
 	if (request_id == 0U || inventory_slot < 0
 		|| expected_inventory_revision == 0U)
 		return (FT_ERR_INVALID_ARGUMENT);
-	std::lock_guard<std::mutex> item_transaction_lock(
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
 		this->item_instance_transaction_mutex_);
+	if (!this->authenticated_actor_authorizer_(authenticated_actor_id,
+			this->authenticated_actor_authorizer_user_data_))
+		return (FT_ERR_PERMISSION_DENIED);
 	const GameSessionSnapshotWriter snapshot_writer = {
 		&GameSession::save_snapshot_callback, this};
 	return (WorldEquipmentLoadoutTransaction::equip(
 		this->world_item_save_path_, this->player_character_,
 		this->item_catalog_, this->transaction_journal_, request_id,
-		inventory_slot, expected_inventory_revision, equipment_slot,
-		&snapshot_writer));
+		authenticated_actor_id, inventory_slot,
+		expected_inventory_revision, equipment_slot,
+		&snapshot_writer,
+		&GameSession::authenticated_actor_precommit_authorizer_callback,
+		this));
 }
 
-int32_t GameSession::unequip_equipment_item(uint64_t request_id,
+int32_t GameSession::unequip_equipment_item(uint64_t authenticated_actor_id,
+	uint64_t request_id,
 	uint64_t expected_inventory_revision, uint32_t equipment_slot) noexcept
 {
 	if (!this->active_)
 		return (FT_ERR_INVALID_OPERATION);
+	if (authenticated_actor_id == 0U
+		|| this->authenticated_actor_authorizer_ == nullptr
+		|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+			this->authenticated_actor_authorizer_user_data_))
+		return (FT_ERR_PERMISSION_DENIED);
 	if (request_id == 0U || expected_inventory_revision == 0U)
 		return (FT_ERR_INVALID_ARGUMENT);
-	std::lock_guard<std::mutex> item_transaction_lock(
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
 		this->item_instance_transaction_mutex_);
+	if (!this->authenticated_actor_authorizer_(authenticated_actor_id,
+			this->authenticated_actor_authorizer_user_data_))
+		return (FT_ERR_PERMISSION_DENIED);
 	const GameSessionSnapshotWriter snapshot_writer = {
 		&GameSession::save_snapshot_callback, this};
 	return (WorldEquipmentLoadoutTransaction::unequip(
 		this->world_item_save_path_, this->player_character_,
 		this->item_catalog_, this->transaction_journal_, request_id,
-		expected_inventory_revision, equipment_slot, &snapshot_writer));
+		authenticated_actor_id, expected_inventory_revision, equipment_slot,
+		&snapshot_writer,
+		&GameSession::authenticated_actor_precommit_authorizer_callback,
+		this));
 }
 
-int32_t GameSession::repair_equipment(uint64_t request_id,
+int32_t GameSession::repair_equipment(uint64_t authenticated_actor_id,
+	uint64_t request_id,
 	int32_t equipment_slot, uint64_t expected_inventory_revision,
 	int32_t station_x, int32_t station_y, int32_t station_z,
 	uint64_t expected_station_revision) noexcept
 {
 	if (!this->active_)
 		return (FT_ERR_INVALID_OPERATION);
+	if (authenticated_actor_id == 0U
+		|| this->authenticated_actor_authorizer_ == nullptr
+		|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+			this->authenticated_actor_authorizer_user_data_))
+		return (FT_ERR_PERMISSION_DENIED);
 	if (request_id == 0U || equipment_slot < 0
 		|| expected_inventory_revision == 0U
 		|| expected_station_revision == 0U)
 		return (FT_ERR_INVALID_ARGUMENT);
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
+		this->item_instance_transaction_mutex_);
 	const GameSessionSnapshotWriter snapshot_writer = {
 		&GameSession::save_snapshot_callback, this};
 	GameTransactionJournal::Record existing = {};
-	int32_t existing_result;
-	{
-		std::lock_guard<std::mutex> item_transaction_lock(
-			this->item_instance_transaction_mutex_);
-		existing_result = this->transaction_journal_.find(
-			WorldEquipmentRepairTransaction::journal_scope(), request_id,
-			&existing);
-		if (existing_result == FT_ERR_SUCCESS)
-			return (WorldEquipmentRepairTransaction::execute(
-				this->world_item_save_path_, this->player_character_,
-				this->item_catalog_, this->transaction_journal_, request_id,
-				equipment_slot, expected_inventory_revision, station_x,
-				station_y, station_z, expected_station_revision,
-				&snapshot_writer));
-	}
-	if (existing_result != FT_ERR_NOT_FOUND)
-		return (existing_result);
-	if (this->world_.world_revision().pending
-		|| this->world_.world_revision().regenerating)
-		return (FT_ERR_INVALID_OPERATION);
-	if (this->processing_station_authorizer_ == nullptr
-		|| !this->processing_station_authorizer_(
+	if (!this->authenticated_actor_authorizer_(authenticated_actor_id,
+			this->authenticated_actor_authorizer_user_data_)
+		|| this->actor_processing_station_authorizer_ == nullptr
+		|| !this->actor_processing_station_authorizer_(authenticated_actor_id,
 			static_cast<uint32_t>(MinecraftRecipeCatalog::WORKBENCH_STATION_ID),
 			station_x, station_y, station_z, expected_station_revision,
-			this->camera_.x, this->camera_.y, this->camera_.z,
-			this->processing_station_authorizer_user_data_))
+			this->actor_processing_station_authorizer_user_data_))
 		return (FT_ERR_PERMISSION_DENIED);
-	std::lock_guard<std::mutex> item_transaction_lock(
-		this->item_instance_transaction_mutex_);
-	existing_result = this->transaction_journal_.find(
-		WorldEquipmentRepairTransaction::journal_scope(), request_id, &existing);
-	if (existing_result == FT_ERR_SUCCESS)
-		return (WorldEquipmentRepairTransaction::execute(
-			this->world_item_save_path_, this->player_character_,
-			this->item_catalog_, this->transaction_journal_, request_id,
-			equipment_slot, expected_inventory_revision, station_x, station_y,
-			station_z, expected_station_revision, &snapshot_writer));
-	if (existing_result != FT_ERR_NOT_FOUND)
-		return (existing_result);
-	if (this->world_.world_revision().pending
-		|| this->world_.world_revision().regenerating)
+	const World::WorldRevision revision = this->world_.world_revision();
+	if (revision.pending || revision.regenerating)
 		return (FT_ERR_INVALID_OPERATION);
 	uint32_t station_block_id = GAME_VOXEL_AIR_BLOCK;
 	if (!this->world_.block_id_at(station_x, station_y, station_z,
@@ -5533,14 +8673,38 @@ int32_t GameSession::repair_equipment(uint64_t request_id,
 	if (station_chunk == nullptr
 		|| station_chunk->voxel_revision != expected_station_revision)
 		return (FT_ERR_INVALID_STATE);
+	int32_t existing_result = this->transaction_journal_.find(
+		WorldEquipmentRepairTransaction::journal_scope(), request_id, &existing);
+	if (existing_result == FT_ERR_SUCCESS)
+		return (WorldEquipmentRepairTransaction::execute(
+			this->world_item_save_path_, this->player_character_,
+			this->item_catalog_, this->transaction_journal_, request_id,
+			authenticated_actor_id, equipment_slot,
+			expected_inventory_revision, station_x, station_y,
+			station_z, expected_station_revision, &snapshot_writer,
+			&GameSession::equipment_repair_precommit_authorizer_callback,
+			this));
+	if (existing_result != FT_ERR_NOT_FOUND)
+		return (existing_result);
+	if (!this->authenticated_actor_authorizer_(authenticated_actor_id,
+			this->authenticated_actor_authorizer_user_data_)
+		|| !this->actor_processing_station_authorizer_(authenticated_actor_id,
+			static_cast<uint32_t>(MinecraftRecipeCatalog::WORKBENCH_STATION_ID),
+			station_x, station_y, station_z, expected_station_revision,
+			this->actor_processing_station_authorizer_user_data_))
+		return (FT_ERR_PERMISSION_DENIED);
 	return (WorldEquipmentRepairTransaction::execute(
 		this->world_item_save_path_, this->player_character_, this->item_catalog_,
-		this->transaction_journal_, request_id, equipment_slot,
+		this->transaction_journal_, request_id, authenticated_actor_id,
+		equipment_slot,
 		expected_inventory_revision, station_x, station_y, station_z,
-		expected_station_revision, &snapshot_writer));
+		expected_station_revision, &snapshot_writer,
+		&GameSession::equipment_repair_precommit_authorizer_callback,
+		this));
 }
 
-int32_t GameSession::query_equipment_repair(int32_t equipment_slot,
+int32_t GameSession::query_equipment_repair(
+	uint64_t authenticated_actor_id, int32_t equipment_slot,
 	uint64_t expected_inventory_revision, int32_t station_x,
 	int32_t station_y, int32_t station_z,
 	uint64_t expected_station_revision,
@@ -5548,16 +8712,22 @@ int32_t GameSession::query_equipment_repair(int32_t equipment_slot,
 {
 	if (!this->active_)
 		return (FT_ERR_INVALID_OPERATION);
+	if (authenticated_actor_id == 0U
+		|| this->authenticated_actor_authorizer_ == nullptr
+		|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+			this->authenticated_actor_authorizer_user_data_))
+		return (FT_ERR_PERMISSION_DENIED);
 	if (quote_out == nullptr || equipment_slot < 0
 		|| expected_inventory_revision == 0U || expected_station_revision == 0U)
 		return (FT_ERR_INVALID_ARGUMENT);
-	if (this->processing_station_authorizer_ == nullptr
-		|| !this->processing_station_authorizer_(
+	if (this->actor_processing_station_authorizer_ == nullptr
+		|| !this->actor_processing_station_authorizer_(authenticated_actor_id,
 			static_cast<uint32_t>(MinecraftRecipeCatalog::WORKBENCH_STATION_ID),
 			station_x, station_y, station_z, expected_station_revision,
-			this->camera_.x, this->camera_.y, this->camera_.z,
-			this->processing_station_authorizer_user_data_))
+			this->actor_processing_station_authorizer_user_data_))
 		return (FT_ERR_PERMISSION_DENIED);
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
+		this->item_instance_transaction_mutex_);
 	uint32_t block_id = GAME_VOXEL_AIR_BLOCK;
 	if (!this->world_.block_id_at(station_x, station_y, station_z, &block_id)
 		|| block_id != VOXEL_GENERATOR_WORKBENCH_BLOCK_ID)
@@ -5610,6 +8780,16 @@ int32_t GameSession::query_equipment_repair(int32_t equipment_slot,
 	quote.repairable = quote.equipment_instance_id != 0U
 		&& quote.current_durability < quote.maximum_durability
 		&& quote.material_quantity_available >= quote.material_quantity;
+	if (!this->authenticated_actor_authorizer_(authenticated_actor_id,
+			this->authenticated_actor_authorizer_user_data_)
+		|| !this->actor_processing_station_authorizer_(authenticated_actor_id,
+			static_cast<uint32_t>(MinecraftRecipeCatalog::WORKBENCH_STATION_ID),
+			station_x, station_y, station_z, expected_station_revision,
+			this->actor_processing_station_authorizer_user_data_))
+		return (FT_ERR_PERMISSION_DENIED);
+	chunk = this->world_.find_chunk(chunk_x, chunk_z);
+	if (chunk == nullptr || chunk->voxel_revision != expected_station_revision)
+		return (FT_ERR_INVALID_STATE);
 	*quote_out = quote;
 	return (FT_ERR_SUCCESS);
 }
@@ -5644,7 +8824,7 @@ int32_t GameSession::launch_arrow_internal(uint64_t actor_id,
 		return (FT_ERR_INVALID_OPERATION);
 	if (expected_inventory_revision == 0U)
 		return (FT_ERR_INVALID_ARGUMENT);
-	std::lock_guard<std::mutex> item_transaction_lock(
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
 		this->item_instance_transaction_mutex_);
 	double direction_x = 0.0;
 	double direction_y = 0.0;
@@ -5721,12 +8901,17 @@ int32_t GameSession::attack_entity_internal(uint64_t actor_id,
 	GameTransactionJournal::Record existing = {};
 	WorldEntitySnapshot target_before = {};
 	WorldEntitySnapshot target_after = {};
+	std::vector<MinecraftLootDrop> lethal_drops;
+	std::vector<uint8_t> entities_before;
+	std::vector<uint8_t> world_items_before;
 	std::vector<uint8_t> journal_before;
 	std::vector<uint8_t> payload;
 	uint64_t sequence = 0U;
 	bool replayed = false;
 	int32_t old_modifier_id = 0;
 	int32_t old_modifier_value = 0;
+	uint32_t mob_loot_table_id = 0U;
+	bool lethal_untracked_mob = false;
 	if (!this->active_)
 		return (FT_ERR_INVALID_OPERATION);
 	if (attack_scope == 0U)
@@ -5738,7 +8923,7 @@ int32_t GameSession::attack_entity_internal(uint64_t actor_id,
 	if (this->world_.world_revision().pending
 		|| this->world_.world_revision().regenerating)
 		return (FT_ERR_INVALID_OPERATION);
-	std::lock_guard<std::mutex> item_transaction_lock(
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
 		this->item_instance_transaction_mutex_);
 	int32_t result = this->transaction_journal_.find(attack_scope, request_id,
 		&existing);
@@ -5812,6 +8997,24 @@ int32_t GameSession::attack_entity_internal(uint64_t actor_id,
 	result = this->world_entities_.get(target_entity_id, &target_before);
 	if (result != FT_ERR_SUCCESS)
 		return (result);
+	if (std::floor(target_before.state.position_x)
+			< static_cast<double>(std::numeric_limits<int32_t>::min())
+		|| std::floor(target_before.state.position_x)
+			> static_cast<double>(std::numeric_limits<int32_t>::max())
+		|| std::floor(target_before.state.position_z)
+			< static_cast<double>(std::numeric_limits<int32_t>::min())
+		|| std::floor(target_before.state.position_z)
+			> static_cast<double>(std::numeric_limits<int32_t>::max()))
+		return (FT_ERR_INVALID_STATE);
+	const int32_t target_chunk_x = WorldCoordinates::floor_divide(
+		static_cast<int32_t>(std::floor(target_before.state.position_x)),
+		GAME_VOXEL_CHUNK_WIDTH);
+	const int32_t target_chunk_z = WorldCoordinates::floor_divide(
+		static_cast<int32_t>(std::floor(target_before.state.position_z)),
+		GAME_VOXEL_CHUNK_DEPTH);
+	if (this->world_.revision_barrier_blocks_chunk(target_chunk_x,
+		target_chunk_z))
+		return (FT_ERR_PERMISSION_DENIED);
 	if (target_before.revision != expected_entity_revision
 		|| target_before.state.health <= 0
 		|| target_before.state.action_state
@@ -5888,6 +9091,26 @@ int32_t GameSession::attack_entity_internal(uint64_t actor_id,
 		delete weapon;
 		return (result);
 	}
+	if (weapon_rule.attack_power
+		>= static_cast<uint32_t>(target_before.state.health))
+	{
+		const int32_t loot_table_result =
+			MinecraftLootCatalog::resolve_entity_loot_table(
+				target_before.state.type, &mob_loot_table_id);
+		if (loot_table_result != FT_ERR_SUCCESS
+			&& loot_table_result != FT_ERR_NOT_FOUND)
+			result = loot_table_result;
+		if (result == FT_ERR_SUCCESS && mob_loot_table_id != 0U)
+		{
+			bool spawner_owned = false;
+			result = this->world_spawners_.is_entity_tracked(
+				target_entity_id, &spawner_owned);
+			lethal_untracked_mob = result == FT_ERR_SUCCESS && !spawner_owned;
+		}
+		if (lethal_untracked_mob)
+			result = MinecraftLootCatalog::resolve(mob_loot_table_id,
+				target_entity_id, lethal_drops);
+	}
 	try
 	{
 		payload.reserve(attack_payload_size);
@@ -5919,6 +9142,11 @@ int32_t GameSession::attack_entity_internal(uint64_t actor_id,
 		result = FT_ERR_INVALID_STATE;
 	if (result == FT_ERR_SUCCESS)
 		result = this->transaction_journal_.serialize(journal_before);
+	if (result == FT_ERR_SUCCESS && lethal_untracked_mob)
+		result = GameSessionEntityState::serialize(this->world_entities_,
+			this->world_spawners_, entities_before);
+	if (result == FT_ERR_SUCCESS && !lethal_drops.empty())
+		result = this->world_items_.serialize(world_items_before);
 	if (result == FT_ERR_SUCCESS)
 		result = this->transaction_journal_.prepare(attack_scope, request_id,
 			attack_type, payload.data(), static_cast<uint32_t>(payload.size()),
@@ -5926,7 +9154,32 @@ int32_t GameSession::attack_entity_internal(uint64_t actor_id,
 	if (result == FT_ERR_SUCCESS)
 		result = this->world_entities_.apply_damage(target_entity_id,
 			expected_entity_revision,
-			static_cast<int32_t>(weapon_rule.attack_power), &target_after);
+		static_cast<int32_t>(weapon_rule.attack_power), actor_id,
+		&target_after);
+	if (result == FT_ERR_SUCCESS && !lethal_drops.empty())
+	{
+		const uint64_t owner_lock_until_tick = actor_id == 0U
+			? 0U : (this->world_.current_tick > UINT64_MAX - 40U
+				? UINT64_MAX : this->world_.current_tick + 40U);
+		for (const MinecraftLootDrop &loot_drop : lethal_drops)
+		{
+			ft_sharedptr<game_item> drop;
+			uint64_t item_entity_id = 0U;
+			result = this->item_catalog_.create_item(loot_drop.item_id,
+				loot_drop.quantity, &drop);
+			if (result == FT_ERR_SUCCESS)
+				result = this->world_items_.spawn(drop,
+					target_after.state.position_x,
+					target_after.state.position_y,
+					target_after.state.position_z, this->world_.current_tick,
+					actor_id, owner_lock_until_tick, &item_entity_id);
+			if (result != FT_ERR_SUCCESS)
+				break ;
+		}
+	}
+	if (result == FT_ERR_SUCCESS && lethal_untracked_mob)
+		result = this->world_entities_.despawn(target_entity_id,
+			target_after.revision);
 	if (result == FT_ERR_SUCCESS)
 	{
 		(*weapon)->set_modifier1_id(
@@ -5941,9 +9194,27 @@ int32_t GameSession::attack_entity_internal(uint64_t actor_id,
 	if (result != FT_ERR_SUCCESS && !journal_before.empty())
 	{
 		int32_t rollback_result = FT_ERR_SUCCESS;
-		if (target_after.revision != 0U)
-			rollback_result = this->world_entities_.rollback_update(
-				target_before, target_after.revision);
+		if (!world_items_before.empty())
+			rollback_result = this->world_items_.deserialize(
+				world_items_before.data(), world_items_before.size());
+		if (!entities_before.empty())
+		{
+			const int32_t entity_rollback = GameSessionEntityState::restore(
+				entities_before.data(), entities_before.size(),
+				this->world_entities_, this->world_spawners_);
+			if (rollback_result == FT_ERR_SUCCESS
+				&& entity_rollback != FT_ERR_SUCCESS)
+				rollback_result = entity_rollback;
+		}
+		else if (target_after.revision != 0U)
+		{
+			const int32_t entity_rollback =
+				this->world_entities_.rollback_update(target_before,
+					target_after.revision);
+			if (rollback_result == FT_ERR_SUCCESS
+				&& entity_rollback != FT_ERR_SUCCESS)
+				rollback_result = entity_rollback;
+		}
 		(*weapon)->set_modifier1_id(old_modifier_id);
 		(*weapon)->set_modifier1_value(old_modifier_value);
 		const int32_t journal_rollback = this->transaction_journal_.deserialize(
@@ -6046,7 +9317,17 @@ int32_t GameSession::try_attack_aimed_entity() noexcept
 		target->revision, &action_result));
 }
 
-int32_t GameSession::set_shield_guarding(bool guarding) noexcept
+int32_t GameSession::set_shield_guarding(uint64_t authenticated_actor_id,
+	bool guarding) noexcept
+{
+	if (authenticated_actor_id == 0U || this->combat_actor_authorizer_ == nullptr
+		|| !this->combat_actor_authorizer_(authenticated_actor_id,
+			this->combat_actor_authorizer_user_data_))
+		return (FT_ERR_PERMISSION_DENIED);
+	return (this->set_shield_guarding_internal(guarding));
+}
+
+int32_t GameSession::set_shield_guarding_internal(bool guarding) noexcept
 {
 	if (!this->active_)
 		return (FT_ERR_INVALID_OPERATION);
@@ -6104,13 +9385,40 @@ int32_t GameSession::set_shield_guarding(bool guarding) noexcept
 	return (FT_ERR_SUCCESS);
 }
 
-int32_t GameSession::start_recipe_processing(uint64_t request_id,
+int32_t GameSession::start_recipe_processing(uint64_t authenticated_actor_id,
+	uint64_t request_id,
 	uint32_t recipe_id, int32_t batch_count,
 	uint64_t expected_inventory_revision,
+	uint64_t expected_catalog_revision,
+	uint64_t expected_recipe_book_revision,
 	int32_t station_x, int32_t station_y, int32_t station_z,
 	uint64_t expected_station_revision,
 	MinecraftProcessingActionResult *result_out) noexcept
 {
+	if (authenticated_actor_id == 0U
+		|| this->authenticated_actor_authorizer_ == nullptr
+		|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+			this->authenticated_actor_authorizer_user_data_))
+		return (FT_ERR_PERMISSION_DENIED);
+	return (this->start_recipe_processing_internal(authenticated_actor_id,
+		request_id, recipe_id, batch_count, expected_inventory_revision,
+		expected_catalog_revision, expected_recipe_book_revision,
+		station_x, station_y, station_z, expected_station_revision,
+		result_out));
+}
+
+int32_t GameSession::start_recipe_processing_internal(
+	uint64_t authenticated_actor_id, uint64_t request_id,
+	uint32_t recipe_id, int32_t batch_count,
+	uint64_t expected_inventory_revision,
+	uint64_t expected_catalog_revision,
+	uint64_t expected_recipe_book_revision,
+	int32_t station_x, int32_t station_y, int32_t station_z,
+	uint64_t expected_station_revision,
+	MinecraftProcessingActionResult *result_out) noexcept
+{
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
+		this->item_instance_transaction_mutex_);
 	const GameSessionSnapshotWriter snapshot_writer = {
 		&GameSession::save_snapshot_callback, this};
 
@@ -6118,28 +9426,39 @@ int32_t GameSession::start_recipe_processing(uint64_t request_id,
 		return (FT_ERR_INVALID_OPERATION);
 	if (result_out == nullptr)
 		return (FT_ERR_INVALID_ARGUMENT);
-	if (request_id == 0U || recipe_id == 0U || batch_count <= 0
-		|| expected_station_revision == 0U
-		|| this->processing_station_authorizer_ == nullptr
-		|| !this->processing_station_authorizer_(
+	if (authenticated_actor_id == 0U || request_id == 0U
+		|| recipe_id == 0U || batch_count <= 0
+		|| expected_inventory_revision == 0U
+		|| expected_catalog_revision == 0U
+		|| expected_recipe_book_revision == 0U
+		|| expected_station_revision == 0U)
+		return (FT_ERR_INVALID_ARGUMENT);
+	if (this->authenticated_actor_authorizer_ == nullptr
+		|| !this->authenticated_actor_authorizer_(authenticated_actor_id,
+			this->authenticated_actor_authorizer_user_data_)
+		|| this->actor_processing_station_authorizer_ == nullptr
+		|| !this->actor_processing_station_authorizer_(authenticated_actor_id,
 			static_cast<uint32_t>(MinecraftRecipeCatalog::FURNACE_STATION_ID),
 			station_x, station_y, station_z, expected_station_revision,
-			this->camera_.x, this->camera_.y, this->camera_.z,
-			this->processing_station_authorizer_user_data_))
+			this->actor_processing_station_authorizer_user_data_))
 		return (FT_ERR_PERMISSION_DENIED);
 	return (WorldItemProcessingTransaction::execute(
 		this->world_item_save_path_, this->player_character_,
 		this->world_items_, this->recipe_catalog_, this->transaction_journal_,
 		request_id, recipe_id, batch_count, expected_inventory_revision,
+		expected_catalog_revision, expected_recipe_book_revision,
+		authenticated_actor_id,
 		station_x, station_y, station_z, expected_station_revision,
-		result_out, &snapshot_writer));
+		result_out, &snapshot_writer,
+		&GameSession::processing_start_precommit_authorizer_callback,
+		this));
 }
 
 int32_t GameSession::till_farmland(uint64_t request_id, int32_t inventory_slot,
 	uint64_t expected_inventory_revision, int32_t world_x, int32_t world_y,
 	int32_t world_z, uint64_t expected_voxel_revision) noexcept
 {
-	std::lock_guard<std::mutex> item_transaction_lock(
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
 		this->item_instance_transaction_mutex_);
 	GameSessionSnapshotWriter snapshot_writer = {
 		&GameSession::save_snapshot_callback, this};
@@ -6193,7 +9512,8 @@ int32_t GameSession::till_farmland(uint64_t request_id, int32_t inventory_slot,
 		GAME_VOXEL_CHUNK_WIDTH);
 	const int32_t chunk_z = WorldCoordinates::floor_divide(world_z,
 		GAME_VOXEL_CHUNK_DEPTH);
-	if (this->world_.is_chunk_protected(chunk_x, chunk_z))
+	if (this->world_.is_chunk_protected(chunk_x, chunk_z)
+		|| this->world_.revision_barrier_blocks_chunk(chunk_x, chunk_z))
 		return (FT_ERR_PERMISSION_DENIED);
 	const WorldChunk *chunk = this->world_.find_chunk(chunk_x, chunk_z);
 	if (chunk == nullptr)
@@ -6211,7 +9531,7 @@ int32_t GameSession::place_inventory_block(uint64_t request_id,
 	uint64_t expected_inventory_revision, int32_t world_x, int32_t world_y,
 	int32_t world_z, uint64_t expected_voxel_revision) noexcept
 {
-	std::lock_guard<std::mutex> item_transaction_lock(
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
 		this->item_instance_transaction_mutex_);
 	game_inventory &inventory = this->player_character_.get_inventory();
 	game_inventory_snapshot inventory_before = {};
@@ -6219,6 +9539,7 @@ int32_t GameSession::place_inventory_block(uint64_t request_id,
 	MinecraftBlockItemRule block_rule = {};
 	std::vector<uint8_t> payload;
 	std::vector<uint8_t> journal_before;
+	std::vector<uint8_t> journal_prepared;
 	uint64_t journal_sequence = 0U;
 	uint64_t voxel_revision = 0U;
 	uint32_t block_id = 0U;
@@ -6339,7 +9660,8 @@ int32_t GameSession::place_inventory_block(uint64_t request_id,
 		&protection);
 	if (result != FT_ERR_SUCCESS)
 		return (result);
-	if (protection.loom_safe_zone || protection.manually_protected
+	if (this->world_.revision_barrier_blocks_chunk(chunk_x, chunk_z)
+		|| protection.loom_safe_zone || protection.manually_protected
 		|| protection.occupied_player_exclusion
 		|| (protection.generation_protected
 			&& block_id != VOXEL_GENERATOR_WHEAT_CROP_IMMATURE_BLOCK_ID
@@ -6387,6 +9709,9 @@ int32_t GameSession::place_inventory_block(uint64_t request_id,
 		if (result != FT_ERR_SUCCESS)
 			return (result);
 	}
+	result = this->transaction_journal_.serialize(journal_prepared);
+	if (result != FT_ERR_SUCCESS)
+		goto rollback_block_placement;
 	result = this->save_session_snapshot();
 	if (result != FT_ERR_SUCCESS)
 		goto rollback_block_placement;
@@ -6422,12 +9747,14 @@ rollback_block_placement:
 			/* Keep the world and inventory on the committed side if the world
 			 * participant cannot be reverted. The prepared save remains replayable
 			 * if the following checkpoint also fails. */
+			int32_t journal_result = FT_ERR_SUCCESS;
 			if (inventory_changed)
-				(void)this->transaction_journal_.mark_committed(
+				journal_result = this->transaction_journal_.mark_committed(
 					BLOCK_PLACEMENT_SCOPE, request_id);
 			const int32_t checkpoint_result = this->save_session_snapshot();
-			return (checkpoint_result == FT_ERR_SUCCESS
-				? rollback_result : checkpoint_result);
+			return (journal_result == FT_ERR_SUCCESS
+				&& checkpoint_result == FT_ERR_SUCCESS
+				? rollback_result : FT_ERR_INVALID_STATE);
 		}
 	}
 	if (inventory_changed)
@@ -6444,19 +9771,34 @@ rollback_block_placement:
 					current_chunk->voxel_revision);
 			if (world_restore == FT_ERR_SUCCESS)
 			{
-				(void)this->transaction_journal_.mark_committed(
+				const int32_t journal_result =
+					this->transaction_journal_.mark_committed(
 					BLOCK_PLACEMENT_SCOPE, request_id);
 				const int32_t checkpoint_result = this->save_session_snapshot();
-				return (checkpoint_result == FT_ERR_SUCCESS
-					? inventory_rollback : checkpoint_result);
+				return (journal_result == FT_ERR_SUCCESS
+					&& checkpoint_result == FT_ERR_SUCCESS
+					? inventory_rollback : FT_ERR_INVALID_STATE);
 			}
-			return (world_restore);
+			const int32_t journal_recovery_result =
+				this->transaction_journal_.deserialize(
+					journal_prepared.data(), journal_prepared.size());
+			if (journal_recovery_result != FT_ERR_SUCCESS)
+				return (FT_ERR_INVALID_STATE);
+			const int32_t recovery_checkpoint_result =
+				this->save_session_snapshot();
+			if (recovery_checkpoint_result != FT_ERR_SUCCESS)
+				return (recovery_checkpoint_result);
+			return (FT_ERR_INVALID_STATE);
 		}
 	}
-	(void)this->transaction_journal_.deserialize(journal_before.data(),
-		journal_before.size());
-	(void)this->save_session_snapshot();
-	return (result);
+	const int32_t journal_rollback_result =
+		this->transaction_journal_.deserialize(journal_before.data(),
+			journal_before.size());
+	if (journal_rollback_result != FT_ERR_SUCCESS)
+		return (FT_ERR_INVALID_STATE);
+	const int32_t checkpoint_rollback_result = this->save_session_snapshot();
+	return (checkpoint_rollback_result == FT_ERR_SUCCESS
+		? result : FT_ERR_INVALID_STATE);
 }
 
 int32_t GameSession::transfer_fluid_bucket(uint64_t request_id,
@@ -6464,7 +9806,7 @@ int32_t GameSession::transfer_fluid_bucket(uint64_t request_id,
 	bool pickup_source, int32_t world_x, int32_t world_y, int32_t world_z,
 	uint64_t expected_voxel_revision) noexcept
 {
-	std::lock_guard<std::mutex> item_transaction_lock(
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
 		this->item_instance_transaction_mutex_);
 	static const uint64_t FLUID_TRANSFER_SCOPE = 0x574F524C44464C44ULL;
 	static const uint32_t FLUID_TRANSFER_TYPE = 7U;
@@ -6576,7 +9918,8 @@ int32_t GameSession::transfer_fluid_bucket(uint64_t request_id,
 		GAME_VOXEL_CHUNK_WIDTH);
 	chunk_z = WorldCoordinates::floor_divide(world_z,
 		GAME_VOXEL_CHUNK_DEPTH);
-	if (this->world_.is_chunk_protected(chunk_x, chunk_z))
+	if (this->world_.is_chunk_protected(chunk_x, chunk_z)
+		|| this->world_.revision_barrier_blocks_chunk(chunk_x, chunk_z))
 		return (FT_ERR_PERMISSION_DENIED);
 	const WorldChunk *chunk = this->world_.find_chunk(chunk_x, chunk_z);
 	if (chunk == nullptr)
@@ -6706,23 +10049,51 @@ int32_t GameSession::transfer_fluid_bucket(uint64_t request_id,
 		result = this->save_session_snapshot();
 	if (result == FT_ERR_SUCCESS)
 		return (FT_ERR_SUCCESS);
+	int32_t rollback_result = FT_ERR_SUCCESS;
 	if (world_changed)
 	{
 		const WorldChunk *changed_chunk = this->world_.find_chunk(chunk_x, chunk_z);
-		if (changed_chunk != nullptr)
-			(void)this->world_.replace_fluid_source_at(world_x, world_y, world_z,
-				replacement_block_id, current_block_id,
-				changed_chunk->voxel_revision);
+		if (changed_chunk == nullptr)
+			rollback_result = FT_ERR_INVALID_STATE;
+		else
+		{
+			const int32_t world_rollback_result =
+				this->world_.replace_fluid_source_at(world_x, world_y, world_z,
+					replacement_block_id, current_block_id,
+					changed_chunk->voxel_revision);
+			if (world_rollback_result != FT_ERR_SUCCESS)
+				rollback_result = world_rollback_result;
+		}
 	}
 	if (inventory_changed)
-		(void)inventory.restore_snapshot(inventory_before);
-	(void)this->transaction_journal_.deserialize(journal_before.data(),
-		journal_before.size());
-	(void)this->world_.serialize_fluid_state(fluid_state_);
+	{
+		const int32_t inventory_rollback_result =
+			inventory.restore_snapshot(inventory_before);
+		if (rollback_result == FT_ERR_SUCCESS
+			&& inventory_rollback_result != FT_ERR_SUCCESS)
+			rollback_result = inventory_rollback_result;
+	}
+	const int32_t journal_rollback_result =
+		this->transaction_journal_.deserialize(journal_before.data(),
+			journal_before.size());
+	if (rollback_result == FT_ERR_SUCCESS
+		&& journal_rollback_result != FT_ERR_SUCCESS)
+		rollback_result = journal_rollback_result;
+	const int32_t fluid_state_result =
+		this->world_.serialize_fluid_state(fluid_state_);
+	if (rollback_result == FT_ERR_SUCCESS
+		&& fluid_state_result != FT_ERR_SUCCESS)
+		rollback_result = fluid_state_result;
 	if (allocator_changed)
-		(void)this->recipe_catalog_.restore_next_output_instance_id(
-			old_next_instance_id);
-	return (result);
+	{
+		const int32_t allocator_rollback_result =
+			this->recipe_catalog_.restore_next_output_instance_id(
+				old_next_instance_id);
+		if (rollback_result == FT_ERR_SUCCESS
+			&& allocator_rollback_result != FT_ERR_SUCCESS)
+			rollback_result = allocator_rollback_result;
+	}
+	return (rollback_result == FT_ERR_SUCCESS ? result : FT_ERR_INVALID_STATE);
 }
 
 bool GameSession::is_active() const
@@ -6730,15 +10101,60 @@ bool GameSession::is_active() const
 	return (active_);
 }
 
-int32_t GameSession::place_boat_from_inventory(uint64_t request_id,
-	int32_t inventory_slot, uint64_t expected_inventory_revision,
-	int32_t water_x, int32_t water_y, int32_t water_z,
-	uint64_t expected_voxel_revision,
-	WorldBoatTransferTransaction::Result *result_out) noexcept
+bool GameSession::is_world_active(const uint8_t world_id[32]) noexcept
 {
-	return (this->place_boat_from_inventory_for_actor(request_id, 0U,
-		inventory_slot, expected_inventory_revision, water_x, water_y, water_z,
-		expected_voxel_revision, result_out));
+	if (world_id == nullptr)
+		return (false);
+	std::lock_guard<std::mutex> lock(game_session_world_registry_mutex);
+	for (const GameSessionWorldRegistryEntry &entry
+		: game_session_active_worlds)
+		if (std::memcmp(entry.world_id, world_id, 32U) == 0)
+			return (true);
+	return (false);
+}
+
+int32_t GameSession::acquire_world_maintenance(
+	const uint8_t world_id[32]) noexcept
+{
+	if (world_id == nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
+	std::lock_guard<std::mutex> lock(game_session_world_registry_mutex);
+	for (const GameSessionWorldRegistryEntry &entry
+		: game_session_active_worlds)
+		if (std::memcmp(entry.world_id, world_id, 32U) == 0)
+			return (FT_ERR_INVALID_STATE);
+	for (const GameSessionWorldRegistryEntry &entry
+		: game_session_maintenance_worlds)
+		if (std::memcmp(entry.world_id, world_id, 32U) == 0)
+			return (FT_ERR_ALREADY_EXISTS);
+	GameSessionWorldRegistryEntry entry = {};
+	std::memcpy(entry.world_id, world_id, 32U);
+	try
+	{
+		game_session_maintenance_worlds.push_back(entry);
+	}
+	catch (const std::bad_alloc &)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t GameSession::release_world_maintenance(
+	const uint8_t world_id[32]) noexcept
+{
+	if (world_id == nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
+	std::lock_guard<std::mutex> lock(game_session_world_registry_mutex);
+	for (std::vector<GameSessionWorldRegistryEntry>::iterator it =
+		game_session_maintenance_worlds.begin();
+		it != game_session_maintenance_worlds.end(); ++it)
+		if (std::memcmp(it->world_id, world_id, 32U) == 0)
+		{
+			game_session_maintenance_worlds.erase(it);
+			return (FT_ERR_SUCCESS);
+		}
+	return (FT_ERR_NOT_FOUND);
 }
 
 int32_t GameSession::place_boat_from_inventory_for_actor(uint64_t request_id,
@@ -6768,7 +10184,7 @@ int32_t GameSession::place_boat_from_inventory_for_actor(uint64_t request_id,
 	boat_state.action_state = static_cast<uint32_t>(
 		EntityState::ActionState::IDLE);
 	boat_state.tick = this->world_.current_tick;
-	std::lock_guard<std::mutex> item_transaction_lock(
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
 		this->item_instance_transaction_mutex_);
 	const GameSessionSnapshotWriter snapshot_writer = {
 		&GameSession::save_snapshot_callback, this};
@@ -6822,16 +10238,6 @@ int32_t GameSession::place_boat_from_inventory_for_actor(uint64_t request_id,
 		expected_inventory_revision, boat_state, &snapshot_writer, result_out));
 }
 
-int32_t GameSession::retrieve_boat_to_inventory(uint64_t request_id,
-	uint32_t entity_id, uint64_t expected_entity_revision,
-	uint64_t expected_inventory_revision,
-	WorldBoatTransferTransaction::Result *result_out) noexcept
-{
-	return (this->retrieve_boat_to_inventory_for_actor(request_id, 0U,
-		entity_id, expected_entity_revision, expected_inventory_revision,
-		result_out));
-}
-
 int32_t GameSession::retrieve_boat_to_inventory_for_actor(
 	uint64_t request_id, uint64_t authenticated_actor_id,
 	uint32_t entity_id, uint64_t expected_entity_revision,
@@ -6847,7 +10253,7 @@ int32_t GameSession::retrieve_boat_to_inventory_for_actor(
 		|| !this->boat_actor_authorizer_(authenticated_actor_id,
 			this->boat_actor_authorizer_user_data_))
 		return (FT_ERR_PERMISSION_DENIED);
-	std::lock_guard<std::mutex> item_transaction_lock(
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
 		this->item_instance_transaction_mutex_);
 	const GameSessionSnapshotWriter snapshot_writer = {
 		&GameSession::save_snapshot_callback, this};
@@ -6891,7 +10297,8 @@ int32_t GameSession::retrieve_boat_to_inventory_for_actor(
 		GAME_VOXEL_CHUNK_WIDTH);
 	const int32_t chunk_z = WorldCoordinates::floor_divide(block_z,
 		GAME_VOXEL_CHUNK_DEPTH);
-	if (this->world_.is_chunk_protected(chunk_x, chunk_z))
+	if (this->world_.is_chunk_protected(chunk_x, chunk_z)
+		|| this->world_.revision_barrier_blocks_chunk(chunk_x, chunk_z))
 		return (FT_ERR_PERMISSION_DENIED);
 	return (WorldBoatTransferTransaction::retrieve_for_actor(this->world_item_save_path_,
 		this->player_character_, this->world_items_, this->world_entities_,
@@ -6916,7 +10323,7 @@ int32_t GameSession::move_boat_for_actor(uint64_t request_id,
 		|| !this->boat_actor_authorizer_(authenticated_actor_id,
 			this->boat_actor_authorizer_user_data_))
 		return (FT_ERR_PERMISSION_DENIED);
-	std::lock_guard<std::mutex> item_transaction_lock(
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
 		this->item_instance_transaction_mutex_);
 	WorldEntitySnapshot boat = {};
 	int32_t result = this->world_entities_.get(entity_id, &boat);
@@ -7504,6 +10911,18 @@ int32_t GameSession::configure_combat_actor_authorizer(
 	return (FT_ERR_SUCCESS);
 }
 
+int32_t GameSession::configure_authenticated_actor_authorizer(
+	AuthenticatedActorAuthorizer authorizer, void *user_data) noexcept
+{
+	if (this->active_)
+		return (FT_ERR_INVALID_OPERATION);
+	if (authorizer == nullptr && user_data != nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
+	this->authenticated_actor_authorizer_ = authorizer;
+	this->authenticated_actor_authorizer_user_data_ = user_data;
+	return (FT_ERR_SUCCESS);
+}
+
 int32_t GameSession::configure_melee_attack_interval(
 	uint32_t interval_ticks) noexcept
 {
@@ -7588,9 +11007,14 @@ int GameSession::loading_tick(const RenderDistanceStrategy &strategy)
 
 	if (!active_)
 		return (FT_ERR_INVALID_ARGUMENT);
-	error_code_ = world_.update_around(static_cast<double>(player_character_.get_x()),
+	{
+		std::lock_guard<std::recursive_mutex> session_lock(
+			this->item_instance_transaction_mutex_);
+		error_code_ = world_.update_around(
+			static_cast<double>(player_character_.get_x()),
 			static_cast<double>(player_character_.get_z()), gen,
 			active_render_distance_);
+	}
 	if (error_code_ != FT_ERR_SUCCESS)
 	{
 	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
@@ -7610,6 +11034,12 @@ int GameSession::loading_tick(const RenderDistanceStrategy &strategy)
 	#endif
 		if (error_code_ > 0)
 			return (FT_ERR_SUCCESS);
+	}
+	if (error_code_ == FT_ERR_SUCCESS)
+	{
+		error_code_ = this->resume_requested_regeneration();
+		if (error_code_ != FT_ERR_SUCCESS)
+			return (error_code_);
 	}
 	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
 	diagnostics = world_.stream_diagnostics();
@@ -7723,7 +11153,7 @@ int32_t GameSession::process_spawner_deaths(
 {
 	if (deaths.empty())
 		return (FT_ERR_SUCCESS);
-	std::lock_guard<std::mutex> item_transaction_lock(
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
 		this->item_instance_transaction_mutex_);
 	std::vector<uint8_t> items_before;
 	std::vector<uint8_t> entities_before;
@@ -7779,13 +11209,17 @@ int32_t GameSession::process_spawner_deaths(
 		{
 			ft_sharedptr<game_item> drop;
 			uint64_t item_entity_id = 0U;
+			const uint64_t owner_lock_until_tick = death.killer_actor_id == 0U
+				? 0U : (this->world_.current_tick > UINT64_MAX - 40U
+					? UINT64_MAX : this->world_.current_tick + 40U);
 			if (result == FT_ERR_SUCCESS)
 				result = this->item_catalog_.create_item(loot_drop.item_id,
 					loot_drop.quantity, &drop);
 			if (result == FT_ERR_SUCCESS)
 				result = this->world_items_.spawn(drop,
 					corpse.state.position_x, corpse.state.position_y,
-					corpse.state.position_z, world_.current_tick, 0U, 0U,
+					corpse.state.position_z, world_.current_tick,
+					death.killer_actor_id, owner_lock_until_tick,
 					&item_entity_id);
 			if (result != FT_ERR_SUCCESS)
 				break ;
@@ -7821,7 +11255,7 @@ int32_t GameSession::process_animal_production(
 {
 	if (events.empty())
 		return (FT_ERR_SUCCESS);
-	std::lock_guard<std::mutex> item_transaction_lock(
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
 		this->item_instance_transaction_mutex_);
 	std::vector<uint8_t> items_before;
 	int32_t result = this->world_items_.serialize(items_before);
@@ -8182,6 +11616,18 @@ GameSession::Action GameSession::tick_world(double delta_seconds,
 	int32_t analytics_error;
 
 	world_.advance_tick();
+	if (this->active_ && this->world_loom_start_committed_
+		&& !this->world_.revision_replaying_completed_generation()
+		&& this->revision_clock_provider_ != nullptr)
+	{
+		const int32_t expiry_result =
+			this->process_due_regeneration_choice_expiry();
+		if (expiry_result != FT_ERR_SUCCESS)
+		{
+			error_code_ = expiry_result;
+			return (Action::FAILED);
+		}
+	}
 	if (this->shield_guard_active_
 		&& world_.current_tick >= this->shield_guard_until_tick_)
 	{
@@ -8211,7 +11657,7 @@ GameSession::Action GameSession::tick_world(double delta_seconds,
 			const GameSessionSnapshotWriter snapshot_writer = {
 				&GameSession::save_snapshot_callback, this};
 			const int32_t projectile_result = WorldProjectileSimulation::tick(
-				world_, world_entities_, world_items_, item_catalog_,
+				world_, world_entities_, world_spawners_, world_items_, item_catalog_,
 				world_.current_tick, &snapshot_writer,
 				&projectile_state_changed);
 			if (projectile_result != FT_ERR_SUCCESS)
@@ -8316,10 +11762,17 @@ GameSession::Action GameSession::tick_world(double delta_seconds,
 						armor_modifier_value_before, armor_wear_applied);
 				if (wear_result != FT_ERR_SUCCESS)
 				{
-					(void)game_session_restore_equipped_armor_wear(
+					const int32_t restore_result =
+						game_session_restore_equipped_armor_wear(
 						this->player_character_, armor_modifier_id_before,
 						armor_modifier_value_before, armor_wear_applied);
-					error_code_ = wear_result;
+					this->player_character_.set_hit_points(hit_points_before);
+					this->player_character_.set_current_physical_armor(
+						physical_armor_before);
+					this->player_character_.set_current_magic_armor(
+						magic_armor_before);
+					error_code_ = restore_result == FT_ERR_SUCCESS
+						? wear_result : FT_ERR_INVALID_STATE;
 					return (Action::FAILED);
 				}
 			}
@@ -8331,19 +11784,36 @@ GameSession::Action GameSession::tick_world(double delta_seconds,
 					&shield_modifier_value_before, &shield_wear_applied);
 				if (wear_result != FT_ERR_SUCCESS)
 				{
-					(void)game_session_restore_equipped_armor_wear(
+					const int32_t armor_restore_result =
+						game_session_restore_equipped_armor_wear(
 						this->player_character_, armor_modifier_id_before,
 						armor_modifier_value_before, armor_wear_applied);
-					error_code_ = wear_result;
+					const int32_t shield_restore_result =
+						game_session_restore_shield_wear(
+							this->player_character_, shield_modifier_id_before,
+							shield_modifier_value_before, shield_wear_applied);
+					this->player_character_.set_hit_points(hit_points_before);
+					this->player_character_.set_current_physical_armor(
+						physical_armor_before);
+					this->player_character_.set_current_magic_armor(
+						magic_armor_before);
+					error_code_ = armor_restore_result == FT_ERR_SUCCESS
+						&& shield_restore_result == FT_ERR_SUCCESS
+						? wear_result : FT_ERR_INVALID_STATE;
 					return (Action::FAILED);
 				}
 			}
 			if (this->player_character_.get_hit_points() <= 0)
 			{
 				/* Survival has a single bounded recovery path. Keep inventory and
-				 * world state, and return the player to the safe world spawn. */
-				this->camera_.x = this->player_spawn_x_;
-				this->camera_.z = this->player_spawn_z_;
+				 * world state, and return the player to the configured spawn unless
+				 * that chunk is currently reserved by world regeneration. */
+				if (!game_session_revision_barrier_blocks_position(this->world_,
+						this->player_spawn_x_, this->player_spawn_z_))
+				{
+					this->camera_.x = this->player_spawn_x_;
+					this->camera_.z = this->player_spawn_z_;
+				}
 				PlayerController::spawn_player_on_ground(&this->camera_,
 					this->world_);
 				this->player_character_.set_hit_points(
@@ -8390,7 +11860,7 @@ GameSession::Action GameSession::tick_world(double delta_seconds,
 		bool spawner_state_changed = false;
 		const int32_t spawner_error = this->world_spawners_.tick(
 			world_.current_tick, this->world_entities_, pending_deaths,
-			&spawner_state_changed);
+			&spawner_state_changed, &this->world_);
 		if (spawner_error != FT_ERR_SUCCESS)
 		{
 			std::fprintf(stderr,
@@ -8430,70 +11900,98 @@ GameSession::Action GameSession::tick_world(double delta_seconds,
 			processing_tick_accumulator_);
 		uint32_t completed_jobs = 0U;
 		uint32_t pending_outputs = 0U;
-		if (elapsed_ticks > 0U)
+		uint32_t processing_job_count = 0U;
+		int32_t process_error = recipe_catalog_.get_processing_job_count(
+			&processing_job_count);
+		/* A prepared advance was journaled only after every affected furnace
+		 * passed continuity authorization. Finish that accepted transaction
+		 * before consulting current station state; otherwise destroying a
+		 * furnace after prepare could strand a durable transaction forever. */
+		if (process_error == FT_ERR_SUCCESS && processing_job_count != 0U)
 		{
-			uint32_t processing_job_count = 0U;
-			uint64_t advance_request_id = 0U;
-			int32_t process_error = recipe_catalog_.get_processing_job_count(
+			const GameSessionSnapshotWriter snapshot_writer = {
+				&GameSession::save_snapshot_callback, this};
+			process_error = WorldItemProcessingAdvanceTransaction::recover_pending(
+				world_item_save_path_, player_character_, world_items_,
+				recipe_catalog_, transaction_journal_, &snapshot_writer);
+		}
+		if (process_error == FT_ERR_SUCCESS && elapsed_ticks > 0U)
+			process_error = recipe_catalog_.get_processing_job_count(
 				&processing_job_count);
-			bool processing_stations_authorized = true;
-			if (process_error == FT_ERR_SUCCESS && processing_job_count != 0U)
+		std::vector<uint64_t> authorized_processing_job_ids;
+		if (process_error == FT_ERR_SUCCESS && elapsed_ticks > 0U
+			&& processing_job_count != 0U)
+		{
+			std::vector<MinecraftRecipeCatalog::ProcessingStationContext>
+				station_contexts;
+			process_error = recipe_catalog_.get_processing_station_contexts(
+				station_contexts);
+			if (process_error == FT_ERR_SUCCESS
+				&& station_contexts.size() != processing_job_count)
+				process_error = FT_ERR_INVALID_STATE;
+			if (process_error == FT_ERR_SUCCESS
+				&& processing_station_continuity_validator_ != nullptr)
 			{
-				std::vector<MinecraftRecipeCatalog::ProcessingStationContext>
-					station_contexts;
-				process_error = recipe_catalog_.get_processing_station_contexts(
-					station_contexts);
-				if (process_error == FT_ERR_SUCCESS
-					&& (processing_station_continuity_validator_ == nullptr
-						|| station_contexts.size() != processing_job_count))
-					processing_stations_authorized = false;
-				for (const MinecraftRecipeCatalog::ProcessingStationContext
-					&station : station_contexts)
+				try
 				{
-					if (!processing_station_continuity_validator_
-						|| !processing_station_continuity_validator_(
-							static_cast<uint32_t>(
-								MinecraftRecipeCatalog::FURNACE_STATION_ID),
-							station.station_x, station.station_y, station.station_z,
-							station.expected_station_revision,
-							processing_station_continuity_user_data_))
-						processing_stations_authorized = false;
+					authorized_processing_job_ids.reserve(
+						station_contexts.size());
+				}
+				catch (const std::bad_alloc &)
+				{
+					process_error = FT_ERR_NO_MEMORY;
 				}
 			}
-			if (process_error == FT_ERR_SUCCESS && processing_job_count != 0U
-				&& processing_stations_authorized)
+			for (const MinecraftRecipeCatalog::ProcessingStationContext
+				&station : station_contexts)
 			{
-				const GameSessionSnapshotWriter snapshot_writer = {
-					&GameSession::save_snapshot_callback, this};
-				process_error = WorldItemProcessingAdvanceTransaction::recover_pending(
-					world_item_save_path_, player_character_, world_items_,
-					recipe_catalog_, transaction_journal_, &snapshot_writer);
+				if (process_error != FT_ERR_SUCCESS)
+					break ;
+				if (processing_station_continuity_validator_
+					&& processing_station_continuity_validator_(
+						static_cast<uint32_t>(
+							MinecraftRecipeCatalog::FURNACE_STATION_ID),
+						station.station_x, station.station_y, station.station_z,
+						station.expected_station_revision,
+						processing_station_continuity_user_data_))
+				{
+					try
+					{
+						authorized_processing_job_ids.push_back(
+							station.request_id);
+					}
+					catch (const std::bad_alloc &)
+					{
+						process_error = FT_ERR_NO_MEMORY;
+					}
+				}
 			}
-			if (process_error == FT_ERR_SUCCESS && processing_job_count != 0U
-				&& processing_stations_authorized)
-				process_error = transaction_journal_.next_request_id(
-					WorldItemProcessingAdvanceTransaction::journal_scope(),
-					&advance_request_id);
-			if (process_error == FT_ERR_SUCCESS && processing_job_count != 0U
-				&& processing_stations_authorized)
-			{
-				const GameSessionSnapshotWriter snapshot_writer = {
-					&GameSession::save_snapshot_callback, this};
-				process_error = WorldItemProcessingAdvanceTransaction::execute(
-					world_item_save_path_, player_character_, world_items_,
-					recipe_catalog_, transaction_journal_, advance_request_id,
-					elapsed_ticks, 64U, &completed_jobs, &pending_outputs,
-					&snapshot_writer);
-			}
-			if (process_error != FT_ERR_SUCCESS)
-			{
-				std::fprintf(stderr,
-					"[Session] furnace processing tick failed error=%d\n",
-					process_error);
-				return (Action::FAILED);
-			}
-			processing_tick_accumulator_ -= elapsed_ticks;
 		}
+		uint64_t advance_request_id = 0U;
+		if (process_error == FT_ERR_SUCCESS && elapsed_ticks > 0U
+			&& !authorized_processing_job_ids.empty())
+			process_error = transaction_journal_.next_request_id(
+				WorldItemProcessingAdvanceTransaction::journal_scope(),
+				&advance_request_id);
+		if (process_error == FT_ERR_SUCCESS && elapsed_ticks > 0U
+			&& !authorized_processing_job_ids.empty())
+		{
+			const GameSessionSnapshotWriter snapshot_writer = {
+				&GameSession::save_snapshot_callback, this};
+			process_error = WorldItemProcessingAdvanceTransaction::execute(
+				world_item_save_path_, player_character_, world_items_,
+				recipe_catalog_, transaction_journal_, advance_request_id,
+				authorized_processing_job_ids, elapsed_ticks, 64U,
+				&completed_jobs, &pending_outputs, &snapshot_writer);
+		}
+		if (process_error != FT_ERR_SUCCESS)
+		{
+			std::fprintf(stderr,
+				"[Session] furnace processing tick failed error=%d\n",
+				process_error);
+			return (Action::FAILED);
+		}
+		processing_tick_accumulator_ -= elapsed_ticks;
 	}
 	input = InputReader::read_camera_input(boost_enabled_);
 	analytics_error = RuntimeAnalytics::begin_scope(
@@ -8534,9 +12032,14 @@ GameSession::Action GameSession::tick_world(double delta_seconds,
 	if (analytics_error != FT_ERR_SUCCESS)
 		std::fprintf(stderr, "Analytics: stream scope start failed (%d)\n",
 			analytics_error);
-	error_code_ = world_.update_around(static_cast<double>(player_character_.get_x()),
+	{
+		std::lock_guard<std::recursive_mutex> session_lock(
+			this->item_instance_transaction_mutex_);
+		error_code_ = world_.update_around(
+			static_cast<double>(player_character_.get_x()),
 			static_cast<double>(player_character_.get_z()), gen,
 			active_render_distance_);
+	}
 	analytics_error = RuntimeAnalytics::end_scope();
 	if (analytics_error != FT_ERR_SUCCESS)
 		std::fprintf(stderr, "Analytics: stream scope end failed (%d)\n",
@@ -8562,6 +12065,9 @@ GameSession::Action GameSession::tick_world(double delta_seconds,
 		}
 		return (Action::FAILED);
 	}
+	error_code_ = this->resume_requested_regeneration();
+	if (error_code_ != FT_ERR_SUCCESS)
+		return (Action::FAILED);
 	analytics_error = RuntimeAnalytics::begin_scope(
 		RuntimeAnalyticsScope::BLOCK_INTERACTION);
 	if (analytics_error != FT_ERR_SUCCESS)
@@ -8572,7 +12078,7 @@ GameSession::Action GameSession::tick_world(double delta_seconds,
 		int32_t interaction_error = this->try_attack_aimed_entity();
 		if (interaction_error == FT_ERR_NOT_FOUND)
 		{
-			std::lock_guard<std::mutex> item_instance_lock(
+			std::lock_guard<std::recursive_mutex> item_instance_lock(
 				this->item_instance_transaction_mutex_);
 			const GameSessionSnapshotWriter snapshot_writer = {
 				&GameSession::save_snapshot_callback, this};
@@ -8727,7 +12233,8 @@ int32_t GameSession::try_toggle_target_trapdoor() noexcept
 		GAME_VOXEL_CHUNK_WIDTH);
 	const int32_t chunk_z = WorldCoordinates::floor_divide(hit_z,
 		GAME_VOXEL_CHUNK_DEPTH);
-	if (this->world_.is_chunk_protected(chunk_x, chunk_z))
+	if (this->world_.is_chunk_protected(chunk_x, chunk_z)
+		|| this->world_.revision_barrier_blocks_chunk(chunk_x, chunk_z))
 		return (FT_ERR_PERMISSION_DENIED);
 	const WorldChunk *chunk = this->world_.find_chunk(chunk_x, chunk_z);
 	if (chunk == nullptr)
@@ -9056,17 +12563,23 @@ int32_t GameSession::update_revision_occupancy() noexcept
 {
 	if (this->revision_occupancy_provider_ != nullptr)
 	{
-		std::vector<World::RevisionChunkCoordinate> staged_occupied;
+		WorldRevisionOccupancySample occupancy_sample = {};
 		uint64_t current_selection_revision = 0U;
-		int32_t result = this->revision_occupancy_provider_(staged_occupied,
-			this->revision_occupancy_provider_user_data_);
+		int32_t result = GameSession::revision_occupancy_provider_callback(
+			occupancy_sample, this);
 		if (result != FT_ERR_SUCCESS)
 			return (result);
-		result = this->world_.set_revision_occupied_chunks(staged_occupied,
+		result = this->world_.set_revision_occupied_chunks(
+			occupancy_sample.player_chunks,
 			&current_selection_revision);
 		if (result == FT_ERR_SUCCESS)
 		{
-			this->revision_occupied_chunks_.swap(staged_occupied);
+			this->revision_occupied_chunks_.swap(
+				occupancy_sample.player_chunks);
+			this->revision_participant_actor_ids_.swap(
+				occupancy_sample.player_actor_ids);
+			this->revision_active_player_count_ =
+				occupancy_sample.active_player_count;
 			this->revision_occupancy_valid_ = false;
 		}
 		return (result);
@@ -9092,7 +12605,12 @@ int32_t GameSession::update_revision_occupancy() noexcept
 	if (this->revision_occupancy_valid_
 		&& this->revision_occupied_chunk_x_ == chunk_x
 		&& this->revision_occupied_chunk_z_ == chunk_z)
+	{
+		this->revision_active_player_count_ = 1U;
+		if (this->revision_occupancy_provider_ == nullptr)
+			this->revision_participant_actor_ids_.clear();
 		return (FT_ERR_SUCCESS);
+	}
 	try
 	{
 		if (this->revision_occupied_chunks_.empty())
@@ -9113,6 +12631,8 @@ int32_t GameSession::update_revision_occupancy() noexcept
 	{
 		this->revision_occupied_chunk_x_ = chunk_x;
 		this->revision_occupied_chunk_z_ = chunk_z;
+		this->revision_active_player_count_ = 1U;
+		this->revision_participant_actor_ids_.clear();
 		this->revision_occupancy_valid_ = true;
 	}
 	return (result);
@@ -9132,12 +12652,20 @@ int32_t GameSession::recover_pending_transactions() noexcept
 		error_code = WorldItemCraftTransaction::recover_pending(
 			this->world_item_save_path_, this->player_character_,
 			this->world_items_, this->recipe_catalog_,
-			this->transaction_journal_, &snapshot_writer);
+			this->transaction_journal_, &snapshot_writer,
+			this->processing_station_continuity_validator_,
+			this->processing_station_continuity_user_data_,
+			&GameSession::character_state_revision_provider_callback, this,
+			&GameSession::craft_precommit_authorizer_callback, this);
 	if (error_code == FT_ERR_SUCCESS)
 		error_code = WorldItemProcessingTransaction::recover_pending(
 			this->world_item_save_path_, this->player_character_,
 			this->world_items_, this->recipe_catalog_,
-			this->transaction_journal_, &snapshot_writer);
+			this->transaction_journal_, &snapshot_writer,
+			this->processing_station_continuity_validator_,
+			this->processing_station_continuity_user_data_,
+			this->authenticated_actor_authorizer_,
+			this->authenticated_actor_authorizer_user_data_);
 	if (error_code == FT_ERR_SUCCESS)
 		error_code = WorldItemProcessingAdvanceTransaction::recover_pending(
 			this->world_item_save_path_, this->player_character_,
@@ -9166,11 +12694,17 @@ int32_t GameSession::recover_pending_transactions() noexcept
 	if (error_code == FT_ERR_SUCCESS)
 		error_code = WorldEquipmentRepairTransaction::recover_pending(
 			this->world_item_save_path_, this->player_character_,
-			this->item_catalog_, this->transaction_journal_, &snapshot_writer);
+			this->item_catalog_, this->transaction_journal_, &snapshot_writer,
+			this->processing_station_continuity_validator_,
+			this->processing_station_continuity_user_data_,
+			this->authenticated_actor_authorizer_,
+			this->authenticated_actor_authorizer_user_data_);
 	if (error_code == FT_ERR_SUCCESS)
 		error_code = WorldEquipmentLoadoutTransaction::recover_pending(
 			this->world_item_save_path_, this->player_character_,
-			this->item_catalog_, this->transaction_journal_, &snapshot_writer);
+			this->item_catalog_, this->transaction_journal_, &snapshot_writer,
+			this->authenticated_actor_authorizer_,
+			this->authenticated_actor_authorizer_user_data_);
 	if (error_code == FT_ERR_SUCCESS)
 	{
 		double direction_x = 0.0;
@@ -9196,11 +12730,22 @@ int32_t GameSession::recover_pending_transactions() noexcept
 	{
 		if (record.scope_id != WORLD_LOOM_START_SCOPE)
 			continue ;
+		const uint32_t payload_version = record.payload.size() >= 8U
+			? game_session_read_u32(record.payload, 4U) : 0U;
 		if (record.transaction_type != WORLD_LOOM_START_TRANSACTION_TYPE
-			|| record.request_id == 0U || record.payload.size() != 56U
+			|| record.request_id == 0U
+			|| record.payload.size() < 56U
 			|| record.payload[0] != 'W' || record.payload[1] != 'L'
 			|| record.payload[2] != 'S' || record.payload[3] != 'T'
-			|| game_session_read_u32(record.payload, 4U) != 1U
+			|| (payload_version == 1U && record.payload.size() != 56U)
+			|| (payload_version == 2U && record.payload.size() != 72U)
+			|| (payload_version == 3U && record.payload.size() != 80U)
+			|| (payload_version == 4U && record.payload.size() != 92U)
+			|| (payload_version == 5U && record.payload.size() < 100U)
+			|| (payload_version == 6U && record.payload.size() < 120U)
+			|| (payload_version != 1U && payload_version != 2U
+				&& payload_version != 3U && payload_version != 4U
+				&& payload_version != 5U && payload_version != 6U)
 			|| game_session_read_u64(record.payload, 8U) == 0U
 			|| game_session_read_u64(record.payload, 16U) == 0U
 			|| game_session_read_u32(record.payload, 40U) < 4U
@@ -9211,6 +12756,79 @@ int32_t GameSession::recover_pending_transactions() noexcept
 			|| game_session_read_u64(record.payload, 48U)
 				> static_cast<uint64_t>(std::numeric_limits<int32_t>::max()))
 			return (FT_ERR_INVALID_ARGUMENT);
+		if (payload_version >= 2U
+			&& (game_session_read_u64(record.payload, 56U) == 0U
+				|| game_session_read_u64(record.payload, 64U)
+					< MINIMUM_REVISION_DECISION_TIMEOUT_MS
+				|| game_session_read_u64(record.payload, 64U)
+					> MAXIMUM_REVISION_DECISION_TIMEOUT_MS))
+			return (FT_ERR_INVALID_ARGUMENT);
+		if (payload_version >= 3U)
+		{
+			const uint32_t mode = game_session_read_u32(record.payload, 72U);
+			const uint32_t player_count = game_session_read_u32(
+				record.payload, 76U);
+			if ((mode != 1U && mode != 2U) || player_count == 0U
+				|| (mode == 1U && player_count != 1U)
+				|| (mode == 2U && player_count < 2U))
+				return (FT_ERR_INVALID_ARGUMENT);
+		}
+		if (payload_version >= 4U
+			&& (game_session_read_u32(record.payload, 80U) > 256U
+				|| game_session_read_u32(record.payload, 84U) > 256U
+				|| game_session_read_u32(record.payload, 80U)
+					+ game_session_read_u32(record.payload, 84U) == 0U
+				|| game_session_read_u32(record.payload, 80U)
+					+ game_session_read_u32(record.payload, 84U) > 256U
+				|| game_session_read_u32(record.payload, 88U)
+				!= WORLD_REVISION_SETTLEMENT_RETAIN_COMMITTED_COST))
+			return (FT_ERR_INVALID_ARGUMENT);
+		if (payload_version >= 5U)
+		{
+			const uint32_t player_count = game_session_read_u32(
+				record.payload, 76U);
+			const uint32_t participant_count = game_session_read_u32(
+				record.payload, payload_version == 5U ? 92U : 96U);
+			const std::size_t participants_offset =
+				payload_version == 5U ? 96U : 100U;
+			const std::size_t fixed_size =
+				payload_version == 5U ? 100U : 120U;
+			if (participant_count != player_count || participant_count == 0U
+				|| participant_count > 4096U
+				|| (payload_version == 6U
+					&& game_session_read_u32(record.payload, 92U) == 0U)
+				|| record.payload.size() != fixed_size
+					+ static_cast<std::size_t>(participant_count) * 8U)
+				return (FT_ERR_INVALID_ARGUMENT);
+			std::vector<uint64_t> participants;
+			try
+			{
+				participants.reserve(participant_count);
+				for (uint32_t index = 0U; index < participant_count; ++index)
+					participants.push_back(game_session_read_u64(record.payload,
+						participants_offset
+							+ static_cast<std::size_t>(index) * 8U));
+			}
+			catch (const std::bad_alloc &)
+			{
+				return (FT_ERR_NO_MEMORY);
+			}
+			if (!std::is_sorted(participants.begin(), participants.end())
+				|| !std::binary_search(participants.begin(), participants.end(),
+					game_session_read_u64(record.payload, 8U))
+				|| game_session_validate_revision_actor_ids(participants)
+					!= FT_ERR_SUCCESS)
+				return (FT_ERR_INVALID_ARGUMENT);
+			if (payload_version == 6U)
+			{
+				const std::size_t metadata_offset = participants_offset
+					+ static_cast<std::size_t>(participant_count) * 8U;
+				if (game_session_read_u32(record.payload, metadata_offset) == 0U
+					|| game_session_read_u64(record.payload, metadata_offset + 4U)
+						== 0U)
+					return (FT_ERR_INVALID_ARGUMENT);
+			}
+		}
 		/* The prepared checkpoint is pre-debit and pre-deal. Abort it, then
 		 * discard the orphaned uncommitted draft below. */
 		error_code = this->transaction_journal_.mark_aborted(
@@ -9219,6 +12837,65 @@ int32_t GameSession::recover_pending_transactions() noexcept
 			return (error_code);
 		start_record_aborted = true;
 	}
+	GameTransactionJournal::Record latest_start = {};
+	error_code = this->transaction_journal_.latest(WORLD_LOOM_START_SCOPE,
+		WORLD_LOOM_START_TRANSACTION_TYPE, &latest_start);
+	if (error_code == FT_ERR_SUCCESS
+		&& latest_start.state == GameTransactionJournal::COMMITTED
+		&& latest_start.payload.size() >= 8U
+		&& game_session_read_u32(latest_start.payload, 4U) == 6U)
+	{
+		if (latest_start.payload.size() < 120U
+			|| game_session_read_u32(latest_start.payload, 92U) == 0U)
+			return (FT_ERR_INVALID_STATE);
+		const uint32_t participant_count = game_session_read_u32(
+			latest_start.payload, 96U);
+		const std::size_t metadata_offset = 100U
+			+ static_cast<std::size_t>(participant_count) * 8U;
+		if (participant_count == 0U || participant_count > 4096U
+			|| latest_start.payload.size() != 120U
+				+ static_cast<std::size_t>(participant_count) * 8U
+			|| game_session_read_u32(latest_start.payload, metadata_offset)
+				!= RegenerationCardSession::CONTENT_VERSION
+			|| game_session_read_u64(latest_start.payload, metadata_offset + 4U)
+				!= this->regeneration_world_rules_policy_.generation_manifest_hash
+			|| game_session_read_u64(latest_start.payload, metadata_offset + 12U)
+				!= this->trusted_script_manifest_hash_)
+			return (FT_ERR_INVALID_STATE);
+		std::vector<uint64_t> participants;
+		try
+		{
+			participants.reserve(participant_count);
+			for (uint32_t index = 0U; index < participant_count; ++index)
+				participants.push_back(game_session_read_u64(latest_start.payload,
+					100U + static_cast<std::size_t>(index) * 8U));
+		}
+		catch (const std::bad_alloc &)
+		{
+			return (FT_ERR_NO_MEMORY);
+		}
+		if (!std::is_sorted(participants.begin(), participants.end())
+			|| !std::binary_search(participants.begin(), participants.end(),
+				game_session_read_u64(latest_start.payload, 8U))
+			|| game_session_validate_revision_actor_ids(participants)
+				!= FT_ERR_SUCCESS
+			|| participants.size()
+				!= game_session_read_u32(latest_start.payload, 76U))
+			return (FT_ERR_INVALID_STATE);
+		uint64_t card_deal_request_id = 0U;
+		uint32_t card_deal_count = 0U;
+		error_code = this->regeneration_cards_.get_starting_hand_deal_identity(
+			&card_deal_request_id, &card_deal_count);
+		if (error_code != FT_ERR_SUCCESS
+			|| card_deal_request_id != latest_start.request_id
+			|| card_deal_count
+				!= game_session_read_u32(latest_start.payload, 40U))
+			return (FT_ERR_INVALID_STATE);
+	}
+	else if (error_code == FT_ERR_NOT_FOUND)
+		error_code = FT_ERR_SUCCESS;
+	else if (error_code != FT_ERR_SUCCESS)
+		return (error_code);
 	const World::WorldRevision restored_revision = this->world_.world_revision();
 	if (restored_revision.pending && !restored_revision.regenerating
 		&& !this->world_.revision_barriers_active())
@@ -9251,19 +12928,23 @@ int32_t GameSession::recover_pending_recipe_research() noexcept
 		uint64_t random_value = 0U;
 		uint32_t station_id = 0U;
 		uint32_t recipe_id = 0U;
+		uint64_t authenticated_actor_id = 0U;
 		int32_t station_x = 0;
 		int32_t station_y = 0;
 		int32_t station_z = 0;
 		if (!game_session_decode_recipe_research(record,
 				&expected_inventory_revision, &station_id, &station_x,
 				&station_y, &station_z, &expected_station_revision,
-				&random_value, &recipe_id))
+				&random_value, &recipe_id, &authenticated_actor_id))
 			return (FT_ERR_INVALID_ARGUMENT);
-		(void)station_id;
-		(void)station_x;
-		(void)station_y;
-		(void)station_z;
-		(void)expected_station_revision;
+		if (station_id != static_cast<uint32_t>(
+				MinecraftRecipeCatalog::CARD_PRESS_STATION_ID)
+			|| expected_station_revision == 0U
+			|| this->processing_station_continuity_validator_ == nullptr
+			|| !this->processing_station_continuity_validator_(station_id,
+				station_x, station_y, station_z, expected_station_revision,
+				this->processing_station_continuity_user_data_))
+			return (FT_ERR_PERMISSION_DENIED);
 		(void)random_value;
 		game_inventory_snapshot inventory_before = {};
 		result = this->player_character_.get_inventory().get_snapshot(
@@ -9402,9 +13083,11 @@ int32_t GameSession::recover_pending_block_placements() noexcept
 		result = inventory.restore_snapshot(inventory_after);
 		if (result != FT_ERR_SUCCESS)
 		{
-			(void)this->world_.set_block_state_override(world_x, world_y,
-				world_z, GAME_VOXEL_AIR_BLOCK);
-			return (result);
+			const int32_t block_rollback =
+				this->world_.set_block_state_override(world_x, world_y,
+					world_z, GAME_VOXEL_AIR_BLOCK);
+			return (block_rollback == FT_ERR_SUCCESS
+				? result : FT_ERR_INVALID_STATE);
 		}
 		result = this->transaction_journal_.mark_committed(
 			BLOCK_PLACEMENT_SCOPE, record.request_id);
@@ -9428,7 +13111,7 @@ int32_t GameSession::pickup_nearby_ground_items() noexcept
 {
 	static const uint64_t SINGLE_PLAYER_ACTOR_ID = 1U;
 	static const double PICKUP_QUERY_RADIUS = 1.5;
-	std::lock_guard<std::mutex> item_transaction_lock(
+	std::lock_guard<std::recursive_mutex> item_transaction_lock(
 		this->item_instance_transaction_mutex_);
 	std::vector<WorldItemSnapshot> nearby_items;
 	const GameSessionSnapshotWriter snapshot_writer = {
@@ -9442,6 +13125,9 @@ int32_t GameSession::pickup_nearby_ground_items() noexcept
 		return (error_code);
 	for (const WorldItemSnapshot &item : nearby_items)
 	{
+		if (this->world_.revision_barrier_blocks_chunk(item.chunk_x,
+			item.chunk_z))
+			continue ;
 		uint64_t inventory_revision;
 		const uint64_t request_id = this->pickup_request_id_++;
 		WorldItemPickupResult pickup_result = {};

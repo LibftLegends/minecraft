@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <limits>
 #include <new>
+#include <utility>
 
 static uint64_t world_revision_hash_bytes(const char *domain,
 	const uint8_t *bytes, std::size_t byte_count) noexcept
@@ -117,10 +118,19 @@ WorldRevisionManager::WorldRevisionManager(World &world) : world_(world),
 	mode_(World::REGEN_FULL), config_(), biome_base_config_(),
 	base_biome_selector_(nullptr), base_biome_selector_user_data_(nullptr),
 	biome_rule_count_(0U), base_biome_selector_captured_(false), selected_(),
-	restored_selected_(), restored_selection_revision_(0U),
+	published_chunks_(), failed_chunks_(), completed_revision_id_(0U),
+	completed_selected_chunks_(), completed_published_chunks_(),
+	completed_chunk_outcomes_(), pending_feature_assignments_(),
+	completed_feature_assignments_(), restored_selected_(),
+	restored_published_chunks_(), restored_failed_chunks_(),
+	restored_selection_revision_(0U),
 	restored_deadline_epoch_(0U), decision_deadline_epoch_(0U),
+	finish_previous_deadline_epoch_(0U),
 	restored_mode_(0),
 	restored_stage_mask_(0U), restored_barrier_state_(false),
+	restored_replaying_completed_revision_(false),
+	replaying_completed_revision_(false),
+	completed_revision_rules_pending_(false),
 	lifecycle_restore_pending_(false), rules_target_chunks_(), feature_plans_(),
 	manual_protected_(), loom_station_configured_(false),
 	loom_station_chunk_x_(0), loom_station_chunk_z_(0),
@@ -148,10 +158,19 @@ WorldRevisionManager::WorldRevisionManager(const WorldRevisionManager &other) : 
 	mode_(World::REGEN_FULL), config_(), biome_base_config_(),
 	base_biome_selector_(nullptr), base_biome_selector_user_data_(nullptr),
 	biome_rule_count_(0U), base_biome_selector_captured_(false), selected_(),
-	restored_selected_(), restored_selection_revision_(0U),
+	published_chunks_(), failed_chunks_(), completed_revision_id_(0U),
+	completed_selected_chunks_(), completed_published_chunks_(),
+	completed_chunk_outcomes_(), pending_feature_assignments_(),
+	completed_feature_assignments_(), restored_selected_(),
+	restored_published_chunks_(), restored_failed_chunks_(),
+	restored_selection_revision_(0U),
 	restored_deadline_epoch_(0U), decision_deadline_epoch_(0U),
+	finish_previous_deadline_epoch_(0U),
 	restored_mode_(0),
 	restored_stage_mask_(0U), restored_barrier_state_(false),
+	restored_replaying_completed_revision_(false),
+	replaying_completed_revision_(false),
+	completed_revision_rules_pending_(false),
 	lifecycle_restore_pending_(false), rules_target_chunks_(), feature_plans_(),
 	manual_protected_(), loom_station_configured_(false),
 	loom_station_chunk_x_(0), loom_station_chunk_z_(0),
@@ -184,16 +203,32 @@ void WorldRevisionManager::reset() noexcept
 {
 	this->pending_ = false;
 	this->barriers_active_ = false;
+	this->generation_requested_ = false;
 	this->rules_hash_ = 0U;
 	this->progress_.reset();
 	this->selected_.clear();
+	this->published_chunks_.clear();
+	this->failed_chunks_.clear();
+	this->completed_revision_id_ = 0U;
+	this->completed_selected_chunks_.clear();
+	this->completed_published_chunks_.clear();
+	this->completed_chunk_outcomes_.clear();
+	this->pending_feature_assignments_.clear();
+	this->completed_feature_assignments_.clear();
 	this->restored_selected_.clear();
+	this->restored_published_chunks_.clear();
+	this->restored_failed_chunks_.clear();
 	this->restored_selection_revision_ = 0U;
 	this->restored_deadline_epoch_ = 0U;
 	this->decision_deadline_epoch_ = 0U;
+	this->finish_previous_deadline_epoch_ = 0U;
 	this->restored_mode_ = 0;
 	this->restored_stage_mask_ = 0U;
 	this->restored_barrier_state_ = false;
+	this->restored_generation_requested_ = false;
+	this->restored_replaying_completed_revision_ = false;
+	this->replaying_completed_revision_ = false;
+	this->completed_revision_rules_pending_ = false;
 	this->lifecycle_restore_pending_ = false;
 	this->rules_target_chunks_.clear();
 	this->feature_plans_.clear();
@@ -251,6 +286,9 @@ int32_t WorldRevisionManager::begin(const voxel_generation_config &config,
 	this->mode_ = mode;
 	this->stage_mask_ = WorldRevisionManager::stage_mask_for_mode(mode);
 	this->selected_.clear();
+	this->published_chunks_.clear();
+	this->failed_chunks_.clear();
+	this->pending_feature_assignments_.clear();
 	this->rules_target_chunks_.clear();
 	this->feature_plans_.clear();
 	this->selection_revision_ += 1U;
@@ -406,6 +444,7 @@ int32_t WorldRevisionManager::begin(const voxel_generation_config &config,
 	this->mode_ = mode;
 	this->stage_mask_ = WorldRevisionManager::stage_mask_for_mode(mode);
 	this->selected_.clear();
+	this->pending_feature_assignments_.clear();
 	this->rules_target_chunks_.clear();
 	error_code = this->update_pending_rules(rules);
 	if (error_code != FT_ERR_SUCCESS)
@@ -634,7 +673,11 @@ int32_t WorldRevisionManager::cancel() noexcept
 	if (!this->selected_.empty())
 		this->selection_revision_ += 1U;
 	this->selected_.clear();
+	this->published_chunks_.clear();
+	this->failed_chunks_.clear();
 	this->restored_selected_.clear();
+	this->restored_published_chunks_.clear();
+	this->restored_failed_chunks_.clear();
 	this->rules_target_chunks_.clear();
 	this->feature_plans_.clear();
 	this->decision_deadline_epoch_ = 0U;
@@ -643,6 +686,8 @@ int32_t WorldRevisionManager::cancel() noexcept
 	this->restored_mode_ = 0;
 	this->restored_stage_mask_ = 0U;
 	this->restored_barrier_state_ = false;
+	this->generation_requested_ = false;
+	this->restored_generation_requested_ = false;
 	this->lifecycle_restore_pending_ = false;
 	return (FT_ERR_SUCCESS);
 }
@@ -653,7 +698,143 @@ int32_t WorldRevisionManager::set_barriers_active(bool active) noexcept
 		return (FT_ERR_INVALID_STATE);
 	this->barriers_active_ = active;
 	if (!active)
+	{
 		this->decision_deadline_epoch_ = 0U;
+		this->generation_requested_ = false;
+		this->published_chunks_.clear();
+		this->failed_chunks_.clear();
+	}
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t WorldRevisionManager::set_generation_requested(bool requested) noexcept
+{
+	if (requested && (!this->pending_ || !this->barriers_active_
+		|| this->selected_.empty()))
+		return (FT_ERR_INVALID_STATE);
+	if (!requested && this->progress_.active())
+		return (FT_ERR_INVALID_OPERATION);
+	this->generation_requested_ = requested;
+	return (FT_ERR_SUCCESS);
+}
+
+bool WorldRevisionManager::replaying_completed_revision() const noexcept
+{
+	return (this->replaying_completed_revision_);
+}
+
+bool WorldRevisionManager::completed_revision_rules_pending() const noexcept
+{
+	return (this->completed_revision_rules_pending_);
+}
+
+int32_t WorldRevisionManager::rehydrate_completed_revision_rules(
+	const RegenerationWorldRules &rules) noexcept
+{
+	if (!this->replaying_completed_revision_
+		|| !this->completed_revision_rules_pending_ || !this->pending_)
+		return (FT_ERR_INVALID_STATE);
+	for (const RevisionChunk &entry : this->selected_)
+		if (this->world_.find_chunk(entry.chunk_x, entry.chunk_z) == nullptr)
+			return (FT_ERR_NOT_FOUND);
+	std::vector<RevisionChunk> saved_selection;
+	std::vector<RegenerationTargetChunk> rule_targets;
+	try
+	{
+		saved_selection = this->selected_;
+	}
+	catch (...)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	int32_t result = rules.copy_added_target_chunks(rule_targets);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	for (const RegenerationTargetChunk &target : rule_targets)
+	{
+		const auto saved_target = std::find_if(saved_selection.begin(),
+			saved_selection.end(), [&target](const RevisionChunk &entry)
+			{
+				return (entry.chunk_x == target.chunk_x
+					&& entry.chunk_z == target.chunk_z && entry.bonus);
+			});
+		if (saved_target == saved_selection.end())
+			return (FT_ERR_CONFIGURATION);
+	}
+	const uint64_t selection_revision = this->selection_revision_;
+	if (selection_revision == 0U)
+		return (FT_ERR_INVALID_STATE);
+	this->selection_revision_ = selection_revision - 1U;
+	result = this->update_pending_rules(rules);
+	this->selection_revision_ = selection_revision;
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	if (this->selected_.size() != saved_selection.size())
+		return (FT_ERR_CONFIGURATION);
+	for (std::size_t index = 0U; index < saved_selection.size(); ++index)
+	{
+		if (this->selected_[index].chunk_x != saved_selection[index].chunk_x
+			|| this->selected_[index].chunk_z != saved_selection[index].chunk_z
+			|| this->selected_[index].bonus != saved_selection[index].bonus)
+			return (FT_ERR_CONFIGURATION);
+	}
+	this->completed_revision_rules_pending_ = false;
+	return (FT_ERR_SUCCESS);
+}
+
+bool WorldRevisionManager::generation_requested() const noexcept
+{
+	return (this->generation_requested_);
+}
+
+bool WorldRevisionManager::has_published_chunk(int32_t chunk_x,
+	int32_t chunk_z) const noexcept
+{
+	return (world_revision_contains_chunk(this->published_chunks_, chunk_x,
+		chunk_z));
+}
+
+int32_t WorldRevisionManager::set_chunk_published(int32_t chunk_x,
+	int32_t chunk_z, bool published) noexcept
+{
+	if (!this->pending_ || !this->barriers_active_
+		|| !this->generation_requested_
+		|| !WorldRevisionChunkSet::contains(this->selected_, chunk_x, chunk_z))
+		return (FT_ERR_INVALID_STATE);
+	auto found = std::find_if(this->published_chunks_.begin(),
+		this->published_chunks_.end(), [chunk_x, chunk_z](const RevisionChunk &entry)
+		{
+			return (entry.chunk_x == chunk_x && entry.chunk_z == chunk_z);
+		});
+	if (published)
+	{
+		if (found != this->published_chunks_.end())
+			return (FT_ERR_SUCCESS);
+		if (this->published_chunks_.size() >= this->selected_.size())
+			return (FT_ERR_FULL);
+		try
+		{
+			auto insert_position = std::lower_bound(
+				this->published_chunks_.begin(), this->published_chunks_.end(),
+				std::pair<int32_t, int32_t>(chunk_x, chunk_z),
+				[](const RevisionChunk &entry,
+					const std::pair<int32_t, int32_t> &coordinate)
+				{
+					if (entry.chunk_x != coordinate.first)
+						return (entry.chunk_x < coordinate.first);
+					return (entry.chunk_z < coordinate.second);
+				});
+			this->published_chunks_.insert(insert_position,
+				{chunk_x, chunk_z, false});
+		}
+		catch (...)
+		{
+			return (FT_ERR_NO_MEMORY);
+		}
+		return (FT_ERR_SUCCESS);
+	}
+	if (found != this->published_chunks_.end())
+		this->published_chunks_.erase(found);
 	return (FT_ERR_SUCCESS);
 }
 
@@ -666,6 +847,14 @@ int32_t WorldRevisionManager::set_decision_deadline_epoch(
 		&& this->decision_deadline_epoch_ != deadline_epoch)
 		return (FT_ERR_INVALID_STATE);
 	this->decision_deadline_epoch_ = deadline_epoch;
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t WorldRevisionManager::clear_decision_deadline_epoch() noexcept
+{
+	if (!this->pending_ || this->barriers_active_ || this->progress_.active())
+		return (FT_ERR_INVALID_STATE);
+	this->decision_deadline_epoch_ = 0U;
 	return (FT_ERR_SUCCESS);
 }
 
@@ -714,6 +903,129 @@ bool WorldRevisionManager::regenerating() const noexcept
 std::size_t WorldRevisionManager::selected_count() const noexcept
 {
 	return (this->selected_.size());
+}
+
+std::size_t WorldRevisionManager::regeneration_job_count() const noexcept
+{
+	return (this->progress_.job_count());
+}
+
+std::size_t WorldRevisionManager::completed_regeneration_job_count() const noexcept
+{
+	return (this->progress_.completed_job_count());
+}
+
+int32_t WorldRevisionManager::regenerated_chunk_count() const noexcept
+{
+	return (this->progress_.regenerated_count());
+}
+
+int32_t WorldRevisionManager::skipped_chunk_count() const noexcept
+{
+	return (this->progress_.skipped_count());
+}
+
+int32_t WorldRevisionManager::regeneration_error() const noexcept
+{
+	return (this->progress_.error());
+}
+
+int32_t WorldRevisionManager::get_regeneration_chunk_outcome(int32_t chunk_x,
+	int32_t chunk_z, RegenerationChunkOutcome *outcome_out) const noexcept
+{
+	if (outcome_out == nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
+	if (this->pending_ || this->barriers_active_)
+	{
+		for (const RegenerationChunkOutcome &outcome : this->failed_chunks_)
+		{
+			if (outcome.chunk_x == chunk_x && outcome.chunk_z == chunk_z)
+			{
+				*outcome_out = outcome;
+				return (FT_ERR_SUCCESS);
+			}
+		}
+	}
+	else
+	{
+		for (const RegenerationChunkOutcome &outcome
+			: this->completed_chunk_outcomes_)
+		{
+			if (outcome.chunk_x == chunk_x && outcome.chunk_z == chunk_z)
+			{
+				*outcome_out = outcome;
+				return (FT_ERR_SUCCESS);
+			}
+		}
+	}
+	return (FT_ERR_NOT_FOUND);
+}
+
+int32_t WorldRevisionManager::copy_completed_chunk_feature_plans(
+	int32_t chunk_x, int32_t chunk_z,
+	std::vector<WorldGenerationPipeline::GenerationFeaturePlan>
+		&plans_out) const noexcept
+{
+	std::vector<WorldGenerationPipeline::GenerationFeaturePlan> staged;
+	if (!WorldRevisionChunkSet::contains(this->completed_selected_chunks_,
+			chunk_x, chunk_z)
+		|| !WorldRevisionChunkSet::contains(
+			this->completed_published_chunks_, chunk_x, chunk_z))
+	{
+		plans_out.clear();
+		return (FT_ERR_SUCCESS);
+	}
+	for (const CompletedChunkFeatureAssignment &assignment
+		: this->completed_feature_assignments_)
+	{
+		if (assignment.chunk_x != chunk_x || assignment.chunk_z != chunk_z)
+			continue ;
+		try
+		{
+			staged = assignment.plans;
+		}
+		catch (...)
+		{
+			return (FT_ERR_NO_MEMORY);
+		}
+		plans_out.swap(staged);
+		return (FT_ERR_SUCCESS);
+	}
+	plans_out.clear();
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t WorldRevisionManager::copy_status_chunks(
+	std::vector<RevisionChunk> &chunks_out, uint32_t *revision_id_out,
+	bool *completed_out) const noexcept
+{
+	if (revision_id_out == nullptr || completed_out == nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
+	try
+	{
+		const bool active_revision = this->pending_ || this->barriers_active_;
+		std::vector<RevisionChunk> staged = active_revision
+			? this->selected_ : this->completed_selected_chunks_;
+		chunks_out.swap(staged);
+		*completed_out = !active_revision
+			&& !this->completed_selected_chunks_.empty();
+		*revision_id_out = *completed_out ? this->completed_revision_id_
+			: this->revision_id_;
+	}
+	catch (const std::bad_alloc &)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	return (FT_ERR_SUCCESS);
+}
+
+bool WorldRevisionManager::status_chunk_is_published(int32_t chunk_x,
+	int32_t chunk_z) const noexcept
+{
+	const bool active_revision = this->pending_ || this->barriers_active_;
+	return (WorldRevisionChunkSet::contains(active_revision
+		? this->published_chunks_ : this->completed_published_chunks_,
+		chunk_x, chunk_z));
 }
 
 int32_t WorldRevisionManager::feature_reservation_upper_bound(
@@ -1562,11 +1874,84 @@ int32_t WorldRevisionManager::serialize_metadata(
 		|| this->selected_.empty()
 		|| this->selected_.size() > HARD_MAX_SELECTED_CHUNKS))
 		return (FT_ERR_INVALID_STATE);
+	if (this->generation_requested_
+		&& ((!this->pending_
+				&& this->progress_.error() == FT_ERR_SUCCESS)
+			|| !this->barriers_active_
+			|| this->selected_.empty()))
+		return (FT_ERR_INVALID_STATE);
+	if (this->replaying_completed_revision_
+		&& (!this->pending_ || !this->barriers_active_
+			|| !this->generation_requested_))
+		return (FT_ERR_INVALID_STATE);
+	if ((!this->published_chunks_.empty()
+			&& (!this->barriers_active_ || !this->generation_requested_))
+		|| this->published_chunks_.size() > this->selected_.size())
+		return (FT_ERR_INVALID_STATE);
+	for (const RevisionChunk &published : this->published_chunks_)
+	{
+		if (!WorldRevisionChunkSet::contains(this->selected_,
+				published.chunk_x, published.chunk_z))
+			return (FT_ERR_INVALID_STATE);
+	}
+	if (this->failed_chunks_.size() > this->selected_.size())
+		return (FT_ERR_INVALID_STATE);
+	for (const RegenerationChunkOutcome &outcome : this->failed_chunks_)
+	{
+		if (!WorldRevisionChunkSet::contains(this->selected_,
+				outcome.chunk_x, outcome.chunk_z)
+			|| WorldRevisionChunkSet::contains(this->published_chunks_,
+				outcome.chunk_x, outcome.chunk_z)
+			|| (!outcome.skipped && outcome.error_code == FT_ERR_SUCCESS))
+			return (FT_ERR_INVALID_STATE);
+	}
+	if (this->completed_selected_chunks_.size() > HARD_MAX_SELECTED_CHUNKS
+		|| this->completed_published_chunks_.size()
+			> this->completed_selected_chunks_.size()
+		|| this->completed_chunk_outcomes_.size()
+			> this->completed_selected_chunks_.size()
+		|| (this->completed_selected_chunks_.empty()
+			&& (this->completed_revision_id_ != 0U
+				|| !this->completed_published_chunks_.empty()
+				|| !this->completed_chunk_outcomes_.empty()))
+		|| (!this->completed_selected_chunks_.empty()
+			&& this->completed_revision_id_ == 0U))
+		return (FT_ERR_INVALID_STATE);
+	for (const RevisionChunk &completed : this->completed_selected_chunks_)
+	{
+		if (WorldRevisionChunkSet::contains(this->completed_selected_chunks_,
+				completed.chunk_x, completed.chunk_z)
+			&& std::count_if(this->completed_selected_chunks_.begin(),
+				this->completed_selected_chunks_.end(),
+				[&completed](const RevisionChunk &entry)
+				{
+					return (entry.chunk_x == completed.chunk_x
+						&& entry.chunk_z == completed.chunk_z);
+				}) != 1)
+			return (FT_ERR_INVALID_STATE);
+	}
+	for (const RevisionChunk &published : this->completed_published_chunks_)
+	{
+		if (!WorldRevisionChunkSet::contains(this->completed_selected_chunks_,
+				published.chunk_x, published.chunk_z))
+			return (FT_ERR_INVALID_STATE);
+	}
+	for (const RegenerationChunkOutcome &outcome
+		: this->completed_chunk_outcomes_)
+	{
+		if (!WorldRevisionChunkSet::contains(this->completed_selected_chunks_,
+				outcome.chunk_x, outcome.chunk_z)
+			|| WorldRevisionChunkSet::contains(
+				this->completed_published_chunks_, outcome.chunk_x,
+				outcome.chunk_z)
+			|| (!outcome.skipped && outcome.error_code == FT_ERR_SUCCESS))
+			return (FT_ERR_INVALID_STATE);
+	}
 	try
 	{
 		const std::size_t extension_start = bytes.size();
 		world_revision_lifecycle_append_u32(bytes, 0x314C5257U);
-		world_revision_lifecycle_append_u32(bytes, 2U);
+		world_revision_lifecycle_append_u32(bytes, 7U);
 		world_revision_lifecycle_append_u32(bytes,
 			this->barriers_active_ ? 1U : 0U);
 		world_revision_lifecycle_append_u32(bytes,
@@ -1576,6 +1961,10 @@ int32_t WorldRevisionManager::serialize_metadata(
 			this->selection_revision_);
 		world_revision_lifecycle_append_u64(bytes,
 			this->barriers_active_ ? this->decision_deadline_epoch_ : 0U);
+		world_revision_lifecycle_append_u32(bytes,
+			this->barriers_active_ && this->generation_requested_ ? 1U : 0U);
+		world_revision_lifecycle_append_u32(bytes,
+			this->replaying_completed_revision_ ? 1U : 0U);
 		world_revision_lifecycle_append_u32(bytes,
 			this->barriers_active_
 				? static_cast<uint32_t>(this->selected_.size()) : 0U);
@@ -1590,6 +1979,72 @@ int32_t WorldRevisionManager::serialize_metadata(
 				world_revision_lifecycle_append_u32(bytes,
 					entry.bonus ? 1U : 0U);
 			}
+		}
+		world_revision_lifecycle_append_u32(bytes,
+			this->barriers_active_
+				? static_cast<uint32_t>(this->published_chunks_.size()) : 0U);
+		if (this->barriers_active_)
+		{
+			for (const RevisionChunk &entry : this->published_chunks_)
+			{
+				world_revision_lifecycle_append_u32(bytes,
+					static_cast<uint32_t>(entry.chunk_x));
+				world_revision_lifecycle_append_u32(bytes,
+					static_cast<uint32_t>(entry.chunk_z));
+			}
+		}
+		world_revision_lifecycle_append_u32(bytes,
+			this->barriers_active_
+				? static_cast<uint32_t>(this->failed_chunks_.size()) : 0U);
+		if (this->barriers_active_)
+		{
+			for (const RegenerationChunkOutcome &entry : this->failed_chunks_)
+			{
+				world_revision_lifecycle_append_u32(bytes,
+					static_cast<uint32_t>(entry.chunk_x));
+				world_revision_lifecycle_append_u32(bytes,
+					static_cast<uint32_t>(entry.chunk_z));
+				world_revision_lifecycle_append_u32(bytes,
+					static_cast<uint32_t>(entry.error_code));
+				world_revision_lifecycle_append_u32(bytes,
+					entry.skipped ? 1U : 0U);
+			}
+		}
+		world_revision_lifecycle_append_u32(bytes,
+			this->completed_revision_id_);
+		world_revision_lifecycle_append_u32(bytes,
+			static_cast<uint32_t>(this->completed_selected_chunks_.size()));
+		for (const RevisionChunk &entry : this->completed_selected_chunks_)
+		{
+			world_revision_lifecycle_append_u32(bytes,
+				static_cast<uint32_t>(entry.chunk_x));
+			world_revision_lifecycle_append_u32(bytes,
+				static_cast<uint32_t>(entry.chunk_z));
+			world_revision_lifecycle_append_u32(bytes,
+				entry.bonus ? 1U : 0U);
+		}
+		world_revision_lifecycle_append_u32(bytes,
+			static_cast<uint32_t>(this->completed_published_chunks_.size()));
+		for (const RevisionChunk &entry : this->completed_published_chunks_)
+		{
+			world_revision_lifecycle_append_u32(bytes,
+				static_cast<uint32_t>(entry.chunk_x));
+			world_revision_lifecycle_append_u32(bytes,
+				static_cast<uint32_t>(entry.chunk_z));
+		}
+		world_revision_lifecycle_append_u32(bytes,
+			static_cast<uint32_t>(this->completed_chunk_outcomes_.size()));
+		for (const RegenerationChunkOutcome &entry
+			: this->completed_chunk_outcomes_)
+		{
+			world_revision_lifecycle_append_u32(bytes,
+				static_cast<uint32_t>(entry.chunk_x));
+			world_revision_lifecycle_append_u32(bytes,
+				static_cast<uint32_t>(entry.chunk_z));
+			world_revision_lifecycle_append_u32(bytes,
+				static_cast<uint32_t>(entry.error_code));
+			world_revision_lifecycle_append_u32(bytes,
+				entry.skipped ? 1U : 0U);
 		}
 		world_revision_lifecycle_append_u64(bytes,
 			world_revision_lifecycle_hash(bytes.data() + extension_start,
@@ -1668,12 +2123,20 @@ int32_t WorldRevisionManager::deserialize_metadata(const uint8_t *bytes,
 	int32_t staged_station_block_z = 0;
 	uint32_t staged_station_block_id = 0U;
 	std::vector<RevisionChunk> staged_restored_selected;
+	std::vector<RevisionChunk> staged_restored_published;
+	std::vector<RegenerationChunkOutcome> staged_failed_chunks;
+	uint32_t staged_completed_revision_id = 0U;
+	std::vector<RevisionChunk> staged_completed_selected;
+	std::vector<RevisionChunk> staged_completed_published;
+	std::vector<RegenerationChunkOutcome> staged_completed_outcomes;
 	uint64_t staged_restored_selection_revision = 0U;
 	uint64_t staged_restored_deadline_epoch = 0U;
 	int32_t staged_restored_mode = World::REGEN_FULL;
 	uint32_t staged_restored_stage_mask = 0U;
 	bool staged_restored_barrier_state = false;
 	bool staged_lifecycle_extension = false;
+	bool staged_generation_requested = false;
+	bool staged_replaying_completed_revision = false;
 	int32_t error_code;
 
 	if (bytes == nullptr || byte_count == 0U
@@ -1705,13 +2168,20 @@ int32_t WorldRevisionManager::deserialize_metadata(const uint8_t *bytes,
 			uint32_t mode = 0U;
 			uint32_t stage_mask = 0U;
 			uint32_t selected_count = 0U;
+			uint32_t generation_requested = 0U;
+			uint32_t replaying_completed_revision = 0U;
+			uint32_t published_count = 0U;
+			uint32_t failed_count = 0U;
+			uint32_t completed_selected_count = 0U;
+			uint32_t completed_published_count = 0U;
+			uint32_t completed_outcome_count = 0U;
 			uint64_t stored_checksum = 0U;
 		if (world_revision_lifecycle_read_u32(bytes, byte_count,
 					&offset, &magic)
 				&& magic == 0x314C5257U
 				&& world_revision_lifecycle_read_u32(bytes, byte_count,
 					&offset, &version)
-				&& (version == 1U || version == 2U)
+				&& version >= 1U && version <= 7U
 				&& world_revision_lifecycle_read_u32(bytes, byte_count,
 					&offset, &flags)
 				&& flags <= 1U
@@ -1724,14 +2194,25 @@ int32_t WorldRevisionManager::deserialize_metadata(const uint8_t *bytes,
 				&& (version == 1U
 					|| world_revision_lifecycle_read_u64(bytes, byte_count,
 						&offset, &staged_restored_deadline_epoch))
+				&& (version < 3U
+					|| (world_revision_lifecycle_read_u32(bytes, byte_count,
+						&offset, &generation_requested)
+						&& generation_requested <= 1U))
+				&& (version < 7U
+					|| (world_revision_lifecycle_read_u32(bytes, byte_count,
+						&offset, &replaying_completed_revision)
+						&& replaying_completed_revision <= 1U))
 				&& world_revision_lifecycle_read_u32(bytes, byte_count,
 					&offset, &selected_count)
 				&& selected_count <= HARD_MAX_SELECTED_CHUNKS
 				&& offset <= byte_count
 				&& byte_count - offset >= 12U
 				&& static_cast<uint64_t>(selected_count) * 12U
-					== byte_count - offset - 12U)
+					<= byte_count - offset - 12U)
 			{
+				staged_generation_requested = generation_requested == 1U;
+				staged_replaying_completed_revision =
+					replaying_completed_revision == 1U;
 				try
 				{
 					staged_restored_selected.reserve(selected_count);
@@ -1768,6 +2249,306 @@ int32_t WorldRevisionManager::deserialize_metadata(const uint8_t *bytes,
 					staged_restored_selected.push_back(
 						{chunk_x, chunk_z, bonus != 0U});
 				}
+			if (valid_extension && version >= 4U)
+			{
+				if (!world_revision_lifecycle_read_u32(bytes, byte_count,
+						&offset, &published_count)
+					|| published_count > HARD_MAX_SELECTED_CHUNKS
+					|| offset > byte_count || byte_count - offset < 12U
+					|| static_cast<uint64_t>(published_count) * 8U
+						+ (version >= 5U ? 16U : 12U)
+						> byte_count - offset)
+					valid_extension = false;
+				else
+				{
+					try
+					{
+						staged_restored_published.reserve(published_count);
+					}
+					catch (...)
+					{
+						return (FT_ERR_NO_MEMORY);
+					}
+					for (uint32_t index = 0U; index < published_count; ++index)
+					{
+						uint32_t x_value = 0U;
+						uint32_t z_value = 0U;
+						if (!world_revision_lifecycle_read_u32(bytes, byte_count,
+								&offset, &x_value)
+							|| !world_revision_lifecycle_read_u32(bytes, byte_count,
+								&offset, &z_value))
+						{
+							valid_extension = false;
+						break ;
+						}
+						const int32_t chunk_x = static_cast<int32_t>(x_value);
+						const int32_t chunk_z = static_cast<int32_t>(z_value);
+						if (!world_revision_contains_chunk(
+								staged_restored_selected, chunk_x, chunk_z)
+							|| world_revision_contains_chunk(
+								staged_restored_published, chunk_x, chunk_z))
+						{
+							valid_extension = false;
+							break ;
+						}
+						if (!staged_restored_published.empty())
+						{
+							const RevisionChunk &previous =
+								staged_restored_published.back();
+							if (chunk_x < previous.chunk_x
+								|| (chunk_x == previous.chunk_x
+									&& chunk_z < previous.chunk_z))
+							{
+								valid_extension = false;
+								break ;
+							}
+						}
+						staged_restored_published.push_back(
+							{chunk_x, chunk_z, false});
+					}
+				}
+				if (valid_extension && version >= 5U)
+				{
+					if (!world_revision_lifecycle_read_u32(bytes, byte_count,
+							&offset, &failed_count)
+						|| failed_count > HARD_MAX_SELECTED_CHUNKS
+						|| offset > byte_count || byte_count - offset < 12U
+						|| static_cast<uint64_t>(failed_count) * 16U
+							+ (version >= 6U ? 28U : 12U)
+							> byte_count - offset)
+						valid_extension = false;
+					else
+					{
+						try
+						{
+							staged_failed_chunks.reserve(failed_count);
+						}
+						catch (...)
+						{
+							return (FT_ERR_NO_MEMORY);
+						}
+						for (uint32_t index = 0U; index < failed_count; ++index)
+						{
+							uint32_t x_value = 0U;
+							uint32_t z_value = 0U;
+							uint32_t error_value = 0U;
+							uint32_t skipped_value = 0U;
+							if (!world_revision_lifecycle_read_u32(bytes,
+									byte_count, &offset, &x_value)
+								|| !world_revision_lifecycle_read_u32(bytes,
+									byte_count, &offset, &z_value)
+								|| !world_revision_lifecycle_read_u32(bytes,
+									byte_count, &offset, &error_value)
+								|| !world_revision_lifecycle_read_u32(bytes,
+									byte_count, &offset, &skipped_value)
+								|| skipped_value > 1U)
+							{
+								valid_extension = false;
+								break ;
+							}
+							const int32_t chunk_x = static_cast<int32_t>(x_value);
+							const int32_t chunk_z = static_cast<int32_t>(z_value);
+							const int32_t error = static_cast<int32_t>(error_value);
+							const bool skipped = skipped_value != 0U;
+							if (!WorldRevisionChunkSet::contains(
+									staged_restored_selected, chunk_x, chunk_z)
+								|| world_revision_contains_chunk(
+									staged_restored_published, chunk_x, chunk_z)
+								|| (!skipped && error == FT_ERR_SUCCESS)
+								|| (skipped && error != FT_ERR_SUCCESS)
+								|| (!staged_failed_chunks.empty()
+									&& (chunk_x < staged_failed_chunks.back().chunk_x
+										|| (chunk_x == staged_failed_chunks.back().chunk_x
+											&& chunk_z <= staged_failed_chunks.back().chunk_z))))
+							{
+								valid_extension = false;
+								break ;
+							}
+							staged_failed_chunks.push_back(
+								{chunk_x, chunk_z, error, skipped});
+						}
+					}
+				}
+				else if (valid_extension
+					&& version < 5U && byte_count - offset != 12U)
+					valid_extension = false;
+			}
+			else if (valid_extension
+				&& (offset > byte_count || byte_count - offset != 12U))
+				valid_extension = false;
+			if (valid_extension && version >= 6U)
+			{
+				if (!world_revision_lifecycle_read_u32(bytes, byte_count,
+						&offset, &staged_completed_revision_id)
+					|| !world_revision_lifecycle_read_u32(bytes, byte_count,
+						&offset, &completed_selected_count)
+					|| completed_selected_count > HARD_MAX_SELECTED_CHUNKS
+					|| offset > byte_count || byte_count - offset < 20U
+					|| static_cast<uint64_t>(completed_selected_count) * 12U
+						> byte_count - offset - 20U)
+					valid_extension = false;
+				else
+				{
+					try
+					{
+						staged_completed_selected.reserve(
+							completed_selected_count);
+					}
+					catch (...)
+					{
+						return (FT_ERR_NO_MEMORY);
+					}
+					for (uint32_t index = 0U;
+						index < completed_selected_count; ++index)
+					{
+						uint32_t x_value = 0U;
+						uint32_t z_value = 0U;
+						uint32_t bonus_value = 0U;
+						if (!world_revision_lifecycle_read_u32(bytes, byte_count,
+								&offset, &x_value)
+							|| !world_revision_lifecycle_read_u32(bytes, byte_count,
+								&offset, &z_value)
+							|| !world_revision_lifecycle_read_u32(bytes, byte_count,
+								&offset, &bonus_value)
+							|| bonus_value > 1U)
+						{
+							valid_extension = false;
+							break ;
+						}
+						const int32_t x = static_cast<int32_t>(x_value);
+						const int32_t z = static_cast<int32_t>(z_value);
+						if (world_revision_contains_chunk(
+								staged_completed_selected, x, z))
+						{
+							valid_extension = false;
+							break ;
+						}
+						staged_completed_selected.push_back(
+							{x, z, bonus_value != 0U});
+					}
+				}
+				if (valid_extension
+					&& (!world_revision_lifecycle_read_u32(bytes, byte_count,
+							&offset, &completed_published_count)
+						|| completed_published_count > completed_selected_count
+						|| offset > byte_count || byte_count - offset < 16U
+						|| static_cast<uint64_t>(completed_published_count) * 8U
+							> byte_count - offset - 16U))
+					valid_extension = false;
+				if (valid_extension)
+				{
+					try
+					{
+						staged_completed_published.reserve(
+							completed_published_count);
+					}
+					catch (...)
+					{
+						return (FT_ERR_NO_MEMORY);
+					}
+					for (uint32_t index = 0U;
+						index < completed_published_count; ++index)
+					{
+						uint32_t x_value = 0U;
+						uint32_t z_value = 0U;
+						if (!world_revision_lifecycle_read_u32(bytes, byte_count,
+								&offset, &x_value)
+							|| !world_revision_lifecycle_read_u32(bytes, byte_count,
+								&offset, &z_value))
+						{
+							valid_extension = false;
+							break ;
+						}
+						const int32_t x = static_cast<int32_t>(x_value);
+						const int32_t z = static_cast<int32_t>(z_value);
+						if (!world_revision_contains_chunk(
+								staged_completed_selected, x, z)
+							|| world_revision_contains_chunk(
+								staged_completed_published, x, z)
+							|| (!staged_completed_published.empty()
+								&& (x < staged_completed_published.back().chunk_x
+									|| (x == staged_completed_published.back().chunk_x
+									&& z <= staged_completed_published.back().chunk_z))))
+						{
+							valid_extension = false;
+							break ;
+						}
+						staged_completed_published.push_back({x, z, false});
+					}
+				}
+				if (valid_extension
+					&& (!world_revision_lifecycle_read_u32(bytes, byte_count,
+							&offset, &completed_outcome_count)
+						|| completed_outcome_count > completed_selected_count
+						|| offset > byte_count || byte_count - offset < 12U
+						|| static_cast<uint64_t>(completed_outcome_count) * 16U
+							!= byte_count - offset - 12U))
+					valid_extension = false;
+				if (valid_extension)
+				{
+					try
+					{
+						staged_completed_outcomes.reserve(
+							completed_outcome_count);
+					}
+					catch (...)
+					{
+						return (FT_ERR_NO_MEMORY);
+					}
+					for (uint32_t index = 0U;
+						index < completed_outcome_count; ++index)
+					{
+						uint32_t x_value = 0U;
+						uint32_t z_value = 0U;
+						uint32_t error_value = 0U;
+						uint32_t skipped_value = 0U;
+						if (!world_revision_lifecycle_read_u32(bytes, byte_count,
+								&offset, &x_value)
+							|| !world_revision_lifecycle_read_u32(bytes, byte_count,
+								&offset, &z_value)
+							|| !world_revision_lifecycle_read_u32(bytes, byte_count,
+								&offset, &error_value)
+							|| !world_revision_lifecycle_read_u32(bytes, byte_count,
+								&offset, &skipped_value)
+							|| skipped_value > 1U)
+						{
+							valid_extension = false;
+							break ;
+						}
+						const int32_t x = static_cast<int32_t>(x_value);
+						const int32_t z = static_cast<int32_t>(z_value);
+						const int32_t error = static_cast<int32_t>(error_value);
+						const bool skipped = skipped_value != 0U;
+						if (!world_revision_contains_chunk(
+								staged_completed_selected, x, z)
+							|| world_revision_contains_chunk(
+								staged_completed_published, x, z)
+							|| (!skipped && error == FT_ERR_SUCCESS)
+							|| (skipped && error != FT_ERR_SUCCESS)
+							|| (!staged_completed_outcomes.empty()
+								&& (x < staged_completed_outcomes.back().chunk_x
+									|| (x == staged_completed_outcomes.back().chunk_x
+									&& z <= staged_completed_outcomes.back().chunk_z))))
+						{
+							valid_extension = false;
+							break ;
+						}
+						staged_completed_outcomes.push_back(
+							{x, z, error, skipped});
+					}
+				}
+				if (valid_extension
+					&& ((completed_selected_count == 0U
+							&& (staged_completed_revision_id != 0U
+								|| completed_published_count != 0U
+								|| completed_outcome_count != 0U))
+						|| (completed_selected_count != 0U
+							&& staged_completed_revision_id == 0U)))
+					valid_extension = false;
+			}
+		if (valid_extension && version < 6U
+			&& (offset > byte_count || byte_count - offset != 12U))
+			valid_extension = false;
 			const std::size_t checksum_offset = offset;
 			if (!valid_extension
 				|| !world_revision_lifecycle_read_u64(bytes, byte_count,
@@ -1778,14 +2559,28 @@ int32_t WorldRevisionManager::deserialize_metadata(const uint8_t *bytes,
 				return (FT_ERR_INVALID_ARGUMENT);
 			if (flags == 1U
 				&& (selected_count == 0U
-					|| mode != static_cast<uint32_t>(World::REGEN_FULL)
+					|| mode > static_cast<uint32_t>(World::REGEN_FULL)
+					|| (replaying_completed_revision == 0U
+						&& mode != static_cast<uint32_t>(World::REGEN_FULL))
 					|| stage_mask != stage_mask_for_mode(
 						static_cast<int32_t>(mode))
 					|| staged_restored_selection_revision == 0U))
 				return (FT_ERR_INVALID_ARGUMENT);
 			if (flags == 0U && selected_count != 0U)
 				return (FT_ERR_INVALID_ARGUMENT);
+			if (flags == 0U && published_count != 0U)
+				return (FT_ERR_INVALID_ARGUMENT);
+			if (flags == 0U && failed_count != 0U)
+				return (FT_ERR_INVALID_ARGUMENT);
+			if (generation_requested != 0U && flags != 1U)
+				return (FT_ERR_INVALID_ARGUMENT);
+			if (replaying_completed_revision != 0U
+				&& (flags != 1U || generation_requested == 0U))
+				return (FT_ERR_INVALID_ARGUMENT);
+			if (published_count != 0U && generation_requested == 0U)
+				return (FT_ERR_INVALID_ARGUMENT);
 			staged_restored_barrier_state = flags == 1U;
+			staged_generation_requested = generation_requested == 1U;
 			staged_restored_mode = static_cast<int32_t>(mode);
 			staged_restored_stage_mask = stage_mask;
 			staged_lifecycle_extension = true;
@@ -1803,6 +2598,9 @@ int32_t WorldRevisionManager::deserialize_metadata(const uint8_t *bytes,
 		staged_station_block_id);
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
+	if (!staged_completed_selected.empty()
+		&& staged_completed_revision_id != staged_revision_id)
+		return (FT_ERR_INVALID_ARGUMENT);
 	this->revision_id_ = staged_revision_id;
 	this->manual_protected_.swap(staged_manual_protected);
 	if (staged_cost_policy_stored)
@@ -1823,12 +2621,21 @@ int32_t WorldRevisionManager::deserialize_metadata(const uint8_t *bytes,
 		this->loom_station_block_id_ = staged_station_block_id;
 	}
 	this->restored_selected_.swap(staged_restored_selected);
+	this->restored_published_chunks_.swap(staged_restored_published);
+	this->restored_failed_chunks_.swap(staged_failed_chunks);
+	this->completed_revision_id_ = staged_completed_revision_id;
+	this->completed_selected_chunks_.swap(staged_completed_selected);
+	this->completed_published_chunks_.swap(staged_completed_published);
+	this->completed_chunk_outcomes_.swap(staged_completed_outcomes);
 	this->restored_selection_revision_ =
 		staged_restored_selection_revision;
 	this->restored_deadline_epoch_ = staged_restored_deadline_epoch;
 	this->restored_mode_ = staged_restored_mode;
 	this->restored_stage_mask_ = staged_restored_stage_mask;
 	this->restored_barrier_state_ = staged_restored_barrier_state;
+	this->restored_generation_requested_ = staged_generation_requested;
+	this->restored_replaying_completed_revision_ =
+		staged_replaying_completed_revision;
 	this->lifecycle_restore_pending_ = staged_lifecycle_extension
 		&& staged_restored_barrier_state;
 	return (FT_ERR_SUCCESS);
@@ -1840,12 +2647,72 @@ int32_t WorldRevisionManager::restore_committed_revision(
 	int32_t error_code;
 	uint32_t maximum_selected_chunks;
 	if (!this->lifecycle_restore_pending_)
+	{
+		if (this->completed_selected_chunks_.empty())
+			return (FT_ERR_SUCCESS);
+		if (this->completed_revision_id_ == 0U
+			|| this->completed_revision_id_ != this->revision_id_
+			|| this->barriers_active_ || this->pending_
+			|| this->progress_.active()
+			|| this->selection_revision_ == 0U)
+			return (FT_ERR_INVALID_STATE);
+		std::vector<RevisionChunk> replay_selected;
+		std::vector<RevisionChunk> replay_published;
+		try
+		{
+			replay_selected = this->completed_selected_chunks_;
+			replay_published = this->completed_published_chunks_;
+		}
+		catch (...)
+		{
+			return (FT_ERR_NO_MEMORY);
+		}
+		const uint64_t completed_selection_revision =
+			this->selection_revision_;
+		const uint32_t completed_revision_id = this->revision_id_;
+		this->selection_revision_ = completed_selection_revision - 1U;
+		this->revision_id_ = completed_revision_id - 1U;
+		const int32_t replay_mode =
+			this->restored_mode_ >= World::REGEN_DECORATION_REFRESH
+			&& this->restored_mode_ <= World::REGEN_FULL
+			? this->restored_mode_ : World::REGEN_FULL;
+		error_code = this->begin(this->world_.voxel_generation_settings(),
+			replay_mode);
+		if (error_code != FT_ERR_SUCCESS)
+		{
+			this->selection_revision_ = completed_selection_revision;
+			this->revision_id_ = completed_revision_id;
+			return (error_code);
+		}
+		this->selection_revision_ = completed_selection_revision;
+		this->revision_id_ = completed_revision_id;
+		this->selected_.swap(replay_selected);
+		this->published_chunks_.swap(replay_published);
+		this->failed_chunks_.clear();
+		this->generation_requested_ = true;
+		this->barriers_active_ = true;
+		this->decision_deadline_epoch_ = 0U;
+		this->replaying_completed_revision_ = true;
+		this->completed_revision_rules_pending_ = true;
+		this->restored_selection_revision_ = completed_selection_revision;
+		this->pending_feature_assignments_.clear();
+		this->completed_feature_assignments_.clear();
+		this->completed_revision_id_ = 0U;
+		this->completed_selected_chunks_.clear();
+		this->completed_published_chunks_.clear();
+		this->completed_chunk_outcomes_.clear();
+		this->lifecycle_restore_pending_ = false;
 		return (FT_ERR_SUCCESS);
+	}
 	if (!this->restored_barrier_state_ || this->pending_ || this->barriers_active_
 		|| this->restored_selected_.empty())
 		return (FT_ERR_INVALID_STATE);
-	error_code = this->begin(this->world_.voxel_generation_settings(),
-		this->restored_mode_, rules);
+	if (this->restored_replaying_completed_revision_)
+		error_code = this->begin(this->world_.voxel_generation_settings(),
+			this->restored_mode_);
+	else
+		error_code = this->begin(this->world_.voxel_generation_settings(),
+			this->restored_mode_, rules);
 	if (error_code != FT_ERR_SUCCESS)
 	{
 		std::fprintf(stderr,
@@ -1905,10 +2772,28 @@ int32_t WorldRevisionManager::restore_committed_revision(
 			this->selected_.size(), this->restored_selected_.size());
 		return (FT_ERR_CONFIGURATION);
 	}
+	for (const RevisionChunk &published : this->restored_published_chunks_)
+	{
+		if (!WorldRevisionChunkSet::contains(this->selected_,
+				published.chunk_x, published.chunk_z))
+			return (FT_ERR_CONFIGURATION);
+	}
 	this->selection_revision_ = this->restored_selection_revision_;
 	this->decision_deadline_epoch_ = this->restored_deadline_epoch_;
+	this->generation_requested_ = this->restored_generation_requested_;
+	this->published_chunks_.swap(this->restored_published_chunks_);
+	this->failed_chunks_.swap(this->restored_failed_chunks_);
+	for (const RegenerationChunkOutcome &outcome : this->failed_chunks_)
+	{
+		if (!outcome.skipped)
+			this->progress_.record_error(outcome.error_code);
+	}
 	this->stage_mask_ = this->restored_stage_mask_;
 	this->barriers_active_ = true;
+	this->replaying_completed_revision_ =
+		this->restored_replaying_completed_revision_;
+	this->completed_revision_rules_pending_ =
+		this->restored_replaying_completed_revision_;
 	this->lifecycle_restore_pending_ = false;
 	return (FT_ERR_SUCCESS);
 }
@@ -1933,6 +2818,62 @@ void WorldRevisionManager::record_regeneration_skipped() noexcept
 	this->progress_.record_skipped();
 }
 
+static int32_t world_revision_record_chunk_outcome(
+	std::vector<WorldRevisionManager::RegenerationChunkOutcome> &outcomes,
+	int32_t chunk_x, int32_t chunk_z, int32_t error_code,
+	bool skipped) noexcept
+{
+	try
+	{
+		auto found = std::lower_bound(outcomes.begin(), outcomes.end(),
+			std::pair<int32_t, int32_t>(chunk_x, chunk_z),
+			[](const WorldRevisionManager::RegenerationChunkOutcome &entry,
+				const std::pair<int32_t, int32_t> &key)
+			{
+				return (entry.chunk_x < key.first
+					|| (entry.chunk_x == key.first && entry.chunk_z < key.second));
+			});
+		if (found != outcomes.end() && found->chunk_x == chunk_x
+			&& found->chunk_z == chunk_z)
+		{
+			found->error_code = error_code;
+			found->skipped = skipped;
+		}
+		else
+			outcomes.insert(found, {chunk_x, chunk_z, error_code, skipped});
+		return (FT_ERR_SUCCESS);
+	}
+	catch (const std::bad_alloc &)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+}
+
+int32_t WorldRevisionManager::record_regeneration_chunk_error(int32_t chunk_x,
+	int32_t chunk_z, int32_t error_code) noexcept
+{
+	this->progress_.record_error(error_code);
+	const int32_t outcome_result = world_revision_record_chunk_outcome(
+		this->failed_chunks_, chunk_x,
+		chunk_z, error_code == FT_ERR_SUCCESS ? FT_ERR_INVALID_STATE
+			: error_code, false);
+	if (outcome_result != FT_ERR_SUCCESS)
+		this->progress_.record_error(outcome_result);
+	return (outcome_result);
+}
+
+int32_t WorldRevisionManager::record_regeneration_chunk_skipped(int32_t chunk_x,
+	int32_t chunk_z) noexcept
+{
+	const int32_t outcome_result = world_revision_record_chunk_outcome(
+		this->failed_chunks_, chunk_x, chunk_z, FT_ERR_SUCCESS, true);
+	if (outcome_result == FT_ERR_SUCCESS)
+		this->progress_.record_skipped();
+	else
+		this->progress_.record_error(outcome_result);
+	return (outcome_result);
+}
+
 void WorldRevisionManager::record_regeneration_success() noexcept
 {
 	this->progress_.record_success();
@@ -1945,17 +2886,75 @@ bool WorldRevisionManager::all_regeneration_jobs_done() const noexcept
 
 int32_t WorldRevisionManager::finish_regeneration() noexcept
 {
+	std::vector<RevisionChunk> completed_selected;
+	std::vector<RevisionChunk> completed_published;
+	std::vector<RegenerationChunkOutcome> completed_outcomes;
+	if (this->progress_.error() == FT_ERR_SUCCESS)
+	{
+		try
+		{
+			completed_selected = this->selected_;
+			completed_published = this->published_chunks_;
+			completed_outcomes = this->failed_chunks_;
+		}
+		catch (const std::bad_alloc &)
+		{
+			return (FT_ERR_NO_MEMORY);
+		}
+	}
+	this->finish_previous_deadline_epoch_ = this->decision_deadline_epoch_;
 	const int32_t result = WorldRevisionRegenerator::finish(*this, this->world_);
 	if (result == FT_ERR_SUCCESS)
 	{
+		this->completed_revision_id_ = this->revision_id_;
+		this->completed_selected_chunks_.swap(completed_selected);
+		this->completed_published_chunks_.swap(completed_published);
+		this->completed_chunk_outcomes_.swap(completed_outcomes);
+		this->completed_feature_assignments_.swap(
+			this->pending_feature_assignments_);
+		this->pending_feature_assignments_.clear();
 		this->barriers_active_ = false;
+		this->generation_requested_ = false;
+		this->published_chunks_.clear();
+		this->failed_chunks_.clear();
 		this->decision_deadline_epoch_ = 0U;
 	}
+	else
+		this->progress_.record_error(result);
 	return (result);
+}
+
+void WorldRevisionManager::rollback_failed_regeneration_checkpoint() noexcept
+{
+	if (this->barriers_active_ || this->pending_ || this->progress_.active()
+		|| this->completed_selected_chunks_.empty()
+		|| this->completed_revision_id_ != this->revision_id_)
+		return ;
+	this->revision_id_ -= 1U;
+	this->selected_.swap(this->completed_selected_chunks_);
+	this->published_chunks_.swap(this->completed_published_chunks_);
+	this->failed_chunks_.swap(this->completed_chunk_outcomes_);
+	this->completed_revision_id_ = 0U;
+	this->barriers_active_ = true;
+	this->generation_requested_ = true;
+	this->decision_deadline_epoch_ = this->finish_previous_deadline_epoch_;
+	this->finish_previous_deadline_epoch_ = 0U;
 }
 
 int32_t WorldRevisionManager::start_regeneration() noexcept
 {
+	try
+	{
+		this->failed_chunks_.reserve(this->selected_.size());
+	}
+	catch (...)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	this->failed_chunks_.clear();
+	const int32_t request_result = this->set_generation_requested(true);
+	if (request_result != FT_ERR_SUCCESS)
+		return (request_result);
 	return (WorldRevisionRegenerator::start(*this, this->world_));
 }
 
@@ -1965,7 +2964,16 @@ int32_t WorldRevisionManager::retry_failed_regeneration() noexcept
 	if (!this->barriers_active_ || this->pending_
 		|| this->progress_.active() || this->selected_.empty())
 		return (FT_ERR_INVALID_STATE);
+	try
+	{
+		this->failed_chunks_.reserve(this->selected_.size());
+	}
+	catch (...)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
 	this->progress_.reset();
+	this->failed_chunks_.clear();
 	this->pending_ = true;
 	result = WorldRevisionRegenerator::start(*this, this->world_);
 	if (result != FT_ERR_SUCCESS && !this->progress_.active())

@@ -77,7 +77,34 @@ int32_t WorldBlockEditor::replace_block_state(World &world, int32_t world_x,
 	error_code = chunk->publish_read_state_after_block_edit(local_x, world_y,
 		local_z, replacement_block_id);
 	if (error_code != FT_ERR_SUCCESS)
-		return (error_code);
+	{
+		const int32_t edit_error = error_code;
+		if (chunk->chunk.write_block(local_x, world_y, local_z,
+				current_block_id) != FT_ERR_SUCCESS)
+			return (FT_ERR_INVALID_STATE);
+		chunk->mark_content_changed();
+		if (chunk->publish_read_state_after_block_edit(local_x, world_y,
+				local_z, current_block_id) != FT_ERR_SUCCESS)
+			return (FT_ERR_INVALID_STATE);
+		return (edit_error);
+	}
+	if (world.terrain_chunk_store().is_initialized())
+	{
+		error_code = world.terrain_chunk_store().save_chunk(chunk_x, chunk_z,
+			chunk->chunk);
+		if (error_code != FT_ERR_SUCCESS)
+		{
+			const int32_t restore_block_result = chunk->chunk.write_block(
+				local_x, world_y, local_z, current_block_id);
+			if (restore_block_result != FT_ERR_SUCCESS)
+				return (FT_ERR_INVALID_STATE);
+			chunk->mark_content_changed();
+			if (chunk->publish_read_state_after_block_edit(local_x, world_y,
+					local_z, current_block_id) != FT_ERR_SUCCESS)
+				return (FT_ERR_INVALID_STATE);
+			return (error_code);
+		}
+	}
 	world.mark_geometry_changed();
 	world.chunk_streamer.mark_remesh_dirty(*chunk);
 	chunk->cancel_remesh_work();

@@ -5,7 +5,7 @@
 namespace
 {
 	static const std::size_t CARD_SESSION_MAX_BYTES = 64U * 1024U * 1024U;
-	static const uint32_t CARD_SESSION_SERIAL_VERSION = 8U;
+	static const uint32_t CARD_SESSION_SERIAL_VERSION = 10U;
 	static const uint32_t CARD_SESSION_CHECKSUM_BYTES = 8U;
 
 	class card_session_writer
@@ -297,8 +297,10 @@ int32_t RegenerationCardSession::serialize_snapshot(
 		|| this->draw_cache_.size() > MAXIMUM_PLAY_REQUESTS
 		|| this->discard_cache_.size() > MAXIMUM_PLAY_REQUESTS
 		|| this->expiry_cache_.size() > MAXIMUM_PLAY_REQUESTS
+		|| this->choice_cache_.size() > MAXIMUM_PLAY_REQUESTS
 		|| this->play_cache_.size() + this->draw_cache_.size()
 			+ this->discard_cache_.size() + this->expiry_cache_.size()
+			+ this->choice_cache_.size()
 			> MAXIMUM_PLAY_REQUESTS
 		|| this->card_import_cache_.size() > MAXIMUM_IMPORTED_CARD_REQUESTS
 		|| this->card_export_cache_.size() > MAXIMUM_IMPORTED_CARD_REQUESTS
@@ -336,6 +338,7 @@ int32_t RegenerationCardSession::serialize_snapshot(
 		for (const auto &entry : this->play_cache_)
 		{
 			if (!writer.u64(entry.first)
+				|| !writer.u64(entry.second.authenticated_actor_id)
 				|| !writer.u32(entry.second.card_instance_id)
 				|| !write_choice(writer, entry.second.choice)
 				|| !writer.u32(entry.second.stabilizer_risk_basis_points)
@@ -353,6 +356,7 @@ int32_t RegenerationCardSession::serialize_snapshot(
 			return (FT_ERR_OUT_OF_RANGE);
 		for (const auto &entry : this->draw_cache_)
 			if (!writer.u64(entry.first)
+				|| !writer.u64(entry.second.authenticated_actor_id)
 				|| !writer.u64(entry.second.source_host_intent_sequence)
 				|| !writer.u32(entry.second.draw_count)
 				|| !writer.u32(entry.second.required_discard_count)
@@ -362,6 +366,7 @@ int32_t RegenerationCardSession::serialize_snapshot(
 			return (FT_ERR_OUT_OF_RANGE);
 		for (const auto &entry : this->discard_cache_)
 			if (!writer.u64(entry.first)
+				|| !writer.u64(entry.second.authenticated_actor_id)
 				|| !writer.u64(entry.second.source_draw_request_id)
 				|| !writer.u32(entry.second.card_instance_id)
 				|| !write_action_result(writer, entry.second.result))
@@ -409,6 +414,16 @@ int32_t RegenerationCardSession::serialize_snapshot(
 				|| !writer.u64(entry.second.command_sequence)
 				|| !writer.u32(entry.second.resolved_count))
 				return (FT_ERR_OUT_OF_RANGE);
+		if (!writer.u32(static_cast<uint32_t>(this->choice_cache_.size())))
+			return (FT_ERR_OUT_OF_RANGE);
+		for (const auto &entry : this->choice_cache_)
+			if (!writer.u64(entry.first)
+				|| !writer.u64(entry.second.authenticated_actor_id)
+				|| !writer.u32(entry.second.choice_id)
+				|| !writer.u32(entry.second.option_id)
+				|| !writer.u64(entry.second.authoritative_epoch)
+				|| !write_action_result(writer, entry.second.result))
+				return (FT_ERR_OUT_OF_RANGE);
 	}
 	catch (const std::bad_alloc &)
 	{
@@ -440,6 +455,7 @@ int32_t RegenerationCardSession::restore_snapshot(const uint8_t *bytes,
 	std::map<uint64_t, CachedDraw> staged_draws;
 	std::map<uint64_t, CachedDiscard> staged_discards;
 	std::map<uint64_t, CachedExpiry> staged_expiries;
+	std::map<uint64_t, CachedChoice> staged_choices;
 	std::map<uint64_t, CachedCardImport> staged_imports;
 	std::map<uint64_t, CachedCardExport> staged_exports;
 	std::map<uint64_t, PhysicalCardLink> staged_physical_cards;
@@ -520,6 +536,8 @@ int32_t RegenerationCardSession::restore_snapshot(const uint8_t *bytes,
 			uint8_t has_retry_payload = 0U;
 
 			if (!reader.u64(&request_id) || request_id == 0U
+				|| (version >= 9U
+					&& !reader.u64(&cached.authenticated_actor_id))
 				|| !reader.u32(&cached.card_instance_id)
 				|| cached.card_instance_id == 0U
 				|| !read_choice(reader, &cached.choice)
@@ -569,6 +587,8 @@ int32_t RegenerationCardSession::restore_snapshot(const uint8_t *bytes,
 			CachedDraw cached = {};
 
 			if (!reader.u64(&request_id) || request_id == 0U
+				|| (version >= 9U
+					&& !reader.u64(&cached.authenticated_actor_id))
 				|| !reader.u64(&cached.source_host_intent_sequence)
 				|| cached.source_host_intent_sequence == 0U
 				|| !reader.u32(&cached.draw_count)
@@ -592,6 +612,8 @@ int32_t RegenerationCardSession::restore_snapshot(const uint8_t *bytes,
 			CachedDiscard cached = {};
 
 			if (!reader.u64(&request_id) || request_id == 0U
+				|| (version >= 9U
+					&& !reader.u64(&cached.authenticated_actor_id))
 				|| !reader.u64(&cached.source_draw_request_id)
 				|| cached.source_draw_request_id == 0U
 				|| !reader.u32(&cached.card_instance_id)
@@ -710,6 +732,38 @@ int32_t RegenerationCardSession::restore_snapshot(const uint8_t *bytes,
 						!= staged_discards.end())
 					return (FT_ERR_INVALID_ARGUMENT);
 		}
+		if (version >= 10U)
+		{
+			if (!reader.u32(&count) || count > MAXIMUM_PLAY_REQUESTS)
+				return (FT_ERR_INVALID_ARGUMENT);
+			for (index = 0U; index < count; ++index)
+			{
+				uint64_t request_id = 0U;
+				CachedChoice cached = {};
+				if (!reader.u64(&request_id) || request_id == 0U
+					|| !reader.u64(&cached.authenticated_actor_id)
+					|| cached.authenticated_actor_id == 0U
+					|| !reader.u32(&cached.choice_id) || cached.choice_id == 0U
+					|| !reader.u32(&cached.option_id) || cached.option_id == 0U
+					|| !reader.u64(&cached.authoritative_epoch)
+					|| cached.authoritative_epoch == 0U
+					|| !read_action_result(reader, &cached.result)
+					|| cached.result.request_id != request_id
+					|| cached.result.command_sequence == 0U
+					|| cached.result.command_sequence >= next_command_sequence
+					|| cached.result.count != 1U
+					|| !staged_choices.emplace(request_id, cached).second)
+					return (FT_ERR_INVALID_ARGUMENT);
+			}
+			for (const auto &entry : staged_choices)
+				if (staged_plays.find(entry.first) != staged_plays.end()
+					|| staged_draws.find(entry.first) != staged_draws.end()
+					|| staged_discards.find(entry.first)
+						!= staged_discards.end()
+					|| staged_expiries.find(entry.first)
+						!= staged_expiries.end())
+					return (FT_ERR_INVALID_ARGUMENT);
+		}
 	}
 	catch (const std::bad_alloc &)
 	{
@@ -720,6 +774,7 @@ int32_t RegenerationCardSession::restore_snapshot(const uint8_t *bytes,
 			> MAXIMUM_IMPORTED_CARD_REQUESTS
 		|| staged_plays.size() + staged_draws.size()
 			+ staged_discards.size() + staged_expiries.size()
+			+ staged_choices.size()
 			> MAXIMUM_PLAY_REQUESTS)
 	{
 		return (FT_ERR_INVALID_ARGUMENT);
@@ -898,6 +953,7 @@ int32_t RegenerationCardSession::restore_snapshot(const uint8_t *bytes,
 	this->draw_cache_.swap(staged_draws);
 	this->discard_cache_.swap(staged_discards);
 	this->expiry_cache_.swap(staged_expiries);
+	this->choice_cache_.swap(staged_choices);
 	this->card_import_cache_.swap(staged_imports);
 	this->card_export_cache_.swap(staged_exports);
 	this->physical_card_instances_.swap(staged_physical_cards);

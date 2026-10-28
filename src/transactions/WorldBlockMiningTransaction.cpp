@@ -211,9 +211,18 @@ namespace
 		const int32_t z = static_cast<int32_t>(read_u32(record.payload, 24U));
 		const uint32_t original = read_u32(record.payload, 28U);
 		const uint32_t replacement = read_u32(record.payload, 32U);
+		MinecraftBlockItemRule acquisition_rule = {};
 		uint32_t current = GAME_VOXEL_AIR_BLOCK;
 		bool world_changed = false;
 		bool override_changed = false;
+		int32_t policy_result = catalog.resolve_block_item_rule(original,
+			&acquisition_rule);
+		if (policy_result != FT_ERR_SUCCESS)
+			return (policy_result);
+		if (acquisition_rule.policy
+				== MINECRAFT_BLOCK_ACQUISITION_ADMIN_ONLY
+			|| voxel_block_is_breakable(original) != FT_TRUE)
+			return (FT_ERR_PERMISSION_DENIED);
 		if (!world.block_id_at(x, y, z, &current))
 		{
 			const int32_t result = world.set_block_state_override(x, y, z,
@@ -457,8 +466,10 @@ int32_t WorldBlockMiningTransaction::execute(const char *snapshot_path,
 	result = checkpoint(snapshot_path, snapshot_writer);
 	if (result != FT_ERR_SUCCESS)
 	{
-		(void)journal.deserialize(journal_before.data(), journal_before.size());
-		return (result);
+		const int32_t rollback_result = journal.deserialize(
+			journal_before.data(), journal_before.size());
+		return (rollback_result == FT_ERR_SUCCESS
+			? result : FT_ERR_INVALID_STATE);
 	}
 	GameTransactionJournal::Record prepared_record = {};
 	prepared_record.sequence = sequence;
@@ -472,9 +483,14 @@ int32_t WorldBlockMiningTransaction::execute(const char *snapshot_path,
 	}
 	catch (...)
 	{
-		(void)journal.deserialize(journal_before.data(), journal_before.size());
-		(void)checkpoint(snapshot_path, snapshot_writer);
-		return (FT_ERR_NO_MEMORY);
+		const int32_t journal_rollback_result = journal.deserialize(
+			journal_before.data(), journal_before.size());
+		const int32_t checkpoint_rollback_result =
+			journal_rollback_result == FT_ERR_SUCCESS
+			? checkpoint(snapshot_path, snapshot_writer)
+			: journal_rollback_result;
+		return (checkpoint_rollback_result == FT_ERR_SUCCESS
+			? FT_ERR_NO_MEMORY : FT_ERR_INVALID_STATE);
 	}
 	result = apply(existing.state == GameTransactionJournal::PREPARED
 		? existing : prepared_record, world, catalog, items, inventory,

@@ -6,9 +6,33 @@
 #include <new>
 #include <cstring>
 #include <utility>
+#include <algorithm>
 
 namespace
 {
+	static int32_t world_revision_validate_actor_ids(
+		const std::vector<uint64_t> &actor_ids) noexcept
+	{
+		std::vector<uint64_t> sorted;
+		try
+		{
+			sorted = actor_ids;
+		}
+		catch (const std::bad_alloc &)
+		{
+			return (FT_ERR_NO_MEMORY);
+		}
+		for (uint64_t actor_id : sorted)
+		{
+			if (actor_id == 0U)
+				return (FT_ERR_INVALID_STATE);
+		}
+		std::sort(sorted.begin(), sorted.end());
+		if (std::adjacent_find(sorted.begin(), sorted.end()) != sorted.end())
+			return (FT_ERR_INVALID_STATE);
+		return (FT_ERR_SUCCESS);
+	}
+
 	static int32_t world_revision_server_read_checkpoint_file(
 		const char *file_path, std::vector<uint8_t> &bytes_out) noexcept
 	{
@@ -164,9 +188,17 @@ WorldRevisionServer::WorldRevisionServer(World &world) : world_(&world),
 	station_access_authorizer_(nullptr),
 	station_access_authorizer_user_data_(nullptr),
 	occupancy_provider_(nullptr), occupancy_provider_user_data_(nullptr),
+	epoch_provider_(nullptr), epoch_provider_user_data_(nullptr),
 	start_committer_(nullptr),
-	start_committer_user_data_(nullptr), checkpoint_committer_(nullptr),
-	checkpoint_committer_user_data_(nullptr), response_sender_(nullptr),
+	start_committer_user_data_(nullptr), start_policy_query_(nullptr),
+	start_policy_query_user_data_(nullptr), checkpoint_committer_(nullptr),
+	checkpoint_committer_user_data_(nullptr), card_play_handler_(nullptr),
+	card_play_handler_user_data_(nullptr), card_discard_handler_(nullptr),
+	card_discard_handler_user_data_(nullptr), card_draw_handler_(nullptr),
+	card_draw_handler_user_data_(nullptr), card_expiry_handler_(nullptr),
+	card_expiry_handler_user_data_(nullptr), card_hand_query_(nullptr),
+	card_hand_query_user_data_(nullptr), card_choice_handler_(nullptr),
+	card_choice_handler_user_data_(nullptr), response_sender_(nullptr),
 	response_sender_user_data_(nullptr), draft_actor_id_(0U), draft_loom_id_(0U),
 	draft_owned_(false), draft_start_committed_(false)
 {
@@ -192,9 +224,6 @@ int32_t WorldRevisionServer::query_start_cost(uint64_t actor_id,
 	if (!this->draft_owned_ || actor_id != this->draft_actor_id_
 		|| loom_id != this->draft_loom_id_)
 		return (FT_ERR_PERMISSION_DENIED);
-	result = this->refresh_occupied_chunks();
-	if (result != FT_ERR_SUCCESS)
-		return (result);
 	try
 	{
 		payload = "quote|" + std::to_string(expected_selection_revision)
@@ -236,6 +265,12 @@ int32_t WorldRevisionServer::query_start_cost(uint64_t actor_id,
 	{
 		return (FT_ERR_NO_MEMORY);
 	}
+	result = this->refresh_occupied_chunks();
+	if (result != FT_ERR_SUCCESS)
+	{
+		this->request_cache_.erase(cached);
+		return (result);
+	}
 	result = this->world_->query_revision_start_cost(
 		expected_selection_revision, expected_policy_revision,
 		opening_card_count, &quote);
@@ -263,20 +298,48 @@ int32_t WorldRevisionServer::set_occupancy_provider(
 	return (FT_ERR_SUCCESS);
 }
 
+int32_t WorldRevisionServer::set_epoch_provider(
+	WorldRevisionServerEpochProvider provider, void *user_data) noexcept
+{
+	if (this->initialized_ || provider == nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
+	this->epoch_provider_ = provider;
+	this->epoch_provider_user_data_ = user_data;
+	return (FT_ERR_SUCCESS);
+}
+
 int32_t WorldRevisionServer::refresh_occupied_chunks()
 {
-	std::vector<World::RevisionChunkCoordinate> occupied_chunks;
+	WorldRevisionOccupancySample sample = {};
 	uint64_t selection_revision = 0U;
+	uint64_t current_epoch_ms = 0U;
 	int32_t result;
 
 	if (!this->initialized_ || this->world_ == nullptr)
 		return (FT_ERR_NOT_INITIALISED);
-	if (this->occupancy_provider_ == nullptr)
+	if (this->occupancy_provider_ == nullptr || this->epoch_provider_ == nullptr)
 		return (FT_ERR_PERMISSION_DENIED);
-	result = this->occupancy_provider_(occupied_chunks,
+	result = this->occupancy_provider_(sample,
 		this->occupancy_provider_user_data_);
+	if (result == FT_ERR_SUCCESS
+		&& (sample.sampled_epoch_ms == 0U
+			|| sample.active_player_count
+				> WorldRevisionManager::MAXIMUM_OCCUPIED_CHUNKS
+			|| sample.active_player_count != sample.player_chunks.size()
+			|| sample.active_player_count != sample.player_actor_ids.size()))
+		result = FT_ERR_INVALID_STATE;
 	if (result == FT_ERR_SUCCESS)
-		result = this->world_->set_revision_occupied_chunks(occupied_chunks,
+		result = world_revision_validate_actor_ids(sample.player_actor_ids);
+	if (result == FT_ERR_SUCCESS)
+		result = this->epoch_provider_(&current_epoch_ms,
+			this->epoch_provider_user_data_);
+	if (result == FT_ERR_SUCCESS
+		&& (current_epoch_ms < sample.sampled_epoch_ms
+			|| current_epoch_ms - sample.sampled_epoch_ms
+				> WORLD_REVISION_OCCUPANCY_MAX_AGE_MS))
+		result = FT_ERR_INVALID_STATE;
+	if (result == FT_ERR_SUCCESS)
+		result = this->world_->set_revision_occupied_chunks(sample.player_chunks,
 			&selection_revision);
 	(void)selection_revision;
 	return (result);
@@ -289,9 +352,17 @@ WorldRevisionServer::WorldRevisionServer(const WorldRevisionServer &other) : wor
 	station_access_authorizer_(nullptr),
 	station_access_authorizer_user_data_(nullptr),
 	occupancy_provider_(nullptr), occupancy_provider_user_data_(nullptr),
+	epoch_provider_(nullptr), epoch_provider_user_data_(nullptr),
 	start_committer_(nullptr),
-	start_committer_user_data_(nullptr), checkpoint_committer_(nullptr),
-	checkpoint_committer_user_data_(nullptr), response_sender_(nullptr),
+	start_committer_user_data_(nullptr), start_policy_query_(nullptr),
+	start_policy_query_user_data_(nullptr), checkpoint_committer_(nullptr),
+	checkpoint_committer_user_data_(nullptr), card_play_handler_(nullptr),
+	card_play_handler_user_data_(nullptr), card_discard_handler_(nullptr),
+	card_discard_handler_user_data_(nullptr), card_draw_handler_(nullptr),
+	card_draw_handler_user_data_(nullptr), card_expiry_handler_(nullptr),
+	card_expiry_handler_user_data_(nullptr), card_hand_query_(nullptr),
+	card_hand_query_user_data_(nullptr), card_choice_handler_(nullptr),
+	card_choice_handler_user_data_(nullptr), response_sender_(nullptr),
 	response_sender_user_data_(nullptr), draft_actor_id_(0U), draft_loom_id_(0U),
 	draft_owned_(false), draft_start_committed_(false)
 {
@@ -398,6 +469,16 @@ int32_t WorldRevisionServer::set_start_committer(
 	return (FT_ERR_SUCCESS);
 }
 
+int32_t WorldRevisionServer::set_start_policy_query(
+	WorldRevisionServerStartPolicyQuery query, void *user_data) noexcept
+{
+	if (this->initialized_ || query == nullptr || user_data == nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
+	this->start_policy_query_ = query;
+	this->start_policy_query_user_data_ = user_data;
+	return (FT_ERR_SUCCESS);
+}
+
 int32_t WorldRevisionServer::set_checkpoint_committer(
 	WorldRevisionServerCheckpointCommitter committer,
 	void *user_data) noexcept
@@ -406,6 +487,66 @@ int32_t WorldRevisionServer::set_checkpoint_committer(
 		return (FT_ERR_INVALID_ARGUMENT);
 	this->checkpoint_committer_ = committer;
 	this->checkpoint_committer_user_data_ = user_data;
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t WorldRevisionServer::set_card_play_handler(
+	WorldRevisionServerCardPlayHandler handler, void *user_data) noexcept
+{
+	if (this->initialized_ || handler == nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
+	this->card_play_handler_ = handler;
+	this->card_play_handler_user_data_ = user_data;
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t WorldRevisionServer::set_card_discard_handler(
+	WorldRevisionServerCardDiscardHandler handler, void *user_data) noexcept
+{
+	if (this->initialized_ || handler == nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
+	this->card_discard_handler_ = handler;
+	this->card_discard_handler_user_data_ = user_data;
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t WorldRevisionServer::set_card_draw_handler(
+	WorldRevisionServerCardDrawHandler handler, void *user_data) noexcept
+{
+	if (this->initialized_ || (handler == nullptr && user_data != nullptr))
+		return (FT_ERR_INVALID_ARGUMENT);
+	this->card_draw_handler_ = handler;
+	this->card_draw_handler_user_data_ = user_data;
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t WorldRevisionServer::set_card_expiry_handler(
+	WorldRevisionServerCardExpiryHandler handler, void *user_data) noexcept
+{
+	if (this->initialized_ || (handler == nullptr && user_data != nullptr))
+		return (FT_ERR_INVALID_ARGUMENT);
+	this->card_expiry_handler_ = handler;
+	this->card_expiry_handler_user_data_ = user_data;
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t WorldRevisionServer::set_card_hand_query(
+	WorldRevisionServerCardHandQuery query, void *user_data) noexcept
+{
+	if (this->initialized_ || (query == nullptr && user_data != nullptr))
+		return (FT_ERR_INVALID_ARGUMENT);
+	this->card_hand_query_ = query;
+	this->card_hand_query_user_data_ = user_data;
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t WorldRevisionServer::set_card_choice_handler(
+	WorldRevisionServerCardChoiceHandler handler, void *user_data) noexcept
+{
+	if (this->initialized_ || (handler == nullptr && user_data != nullptr))
+		return (FT_ERR_INVALID_ARGUMENT);
+	this->card_choice_handler_ = handler;
+	this->card_choice_handler_user_data_ = user_data;
 	return (FT_ERR_SUCCESS);
 }
 
@@ -429,7 +570,10 @@ int32_t WorldRevisionServer::initialize()
 		return (FT_ERR_INVALID_OPERATION);
 	if (this->authorizer_ == nullptr
 		|| this->station_access_authorizer_ == nullptr
-		|| this->occupancy_provider_ == nullptr)
+		|| this->occupancy_provider_ == nullptr
+		|| this->epoch_provider_ == nullptr
+		|| this->start_committer_ == nullptr
+		|| this->checkpoint_committer_ == nullptr)
 		return (FT_ERR_PERMISSION_DENIED);
 	error_code = this->server_.initialize();
 	if (error_code != FT_ERR_SUCCESS)
@@ -525,7 +669,7 @@ int32_t WorldRevisionServer::serialize_request_cache(
 		staged.reserve(32U + (completed_request_count
 			+ this->wire_request_cache_.size()) * 128U);
 		staged.insert(staged.end(), {'W', 'R', 'C', '1'});
-		world_revision_state_append_u32(staged, 1U);
+		world_revision_state_append_u32(staged, 6U);
 		world_revision_state_append_u32(staged,
 			completed_request_count);
 		world_revision_state_append_u32(staged,
@@ -546,7 +690,12 @@ int32_t WorldRevisionServer::serialize_request_cache(
 			uint32_t flags = (entry.second.completed ? 1U : 0U)
 				| (entry.second.has_quote ? 2U : 0U)
 				| (entry.second.has_instability_view ? 4U : 0U)
-				| (entry.second.has_revision_state ? 8U : 0U);
+				| (entry.second.has_revision_state ? 8U : 0U)
+				| (entry.second.has_card_play_result ? 16U : 0U)
+				| (entry.second.has_card_discard_result ? 32U : 0U)
+				| (entry.second.has_card_draw_result ? 64U : 0U)
+				| (entry.second.has_card_expiry_result ? 128U : 0U)
+				| (entry.second.has_card_choice_result ? 256U : 0U);
 			world_revision_state_append_u32(staged, flags);
 			world_revision_state_append_u32(staged,
 				static_cast<uint32_t>(entry.second.result));
@@ -578,6 +727,78 @@ int32_t WorldRevisionServer::serialize_request_cache(
 				entry.second.cost_policy_revision);
 			world_revision_state_append_u32(staged,
 				entry.second.selected_count);
+			if (entry.second.has_card_play_result)
+			{
+				const RegenerationPolicyIntent &card =
+					entry.second.card_play_result;
+				world_revision_state_append_u64(staged, card.request_id);
+				world_revision_state_append_u64(staged,
+					card.host_intent_sequence);
+				world_revision_state_append_u32(staged, card.content_version);
+				world_revision_state_append_u32(staged,
+					card.card_definition_id);
+				world_revision_state_append_u32(staged,
+					card.card_instance_id);
+				world_revision_state_append_u32(staged,
+					static_cast<uint32_t>(card.effect_kind));
+				world_revision_state_append_u32(staged,
+					static_cast<uint32_t>(card.choice.kind));
+				world_revision_state_append_u32(staged,
+					card.choice.value_primary);
+				world_revision_state_append_u32(staged,
+					card.choice.value_secondary);
+				world_revision_state_append_u32(staged,
+					card.no_effect_choice_mask);
+				world_revision_state_append_u32(staged,
+					card.private_result);
+				world_revision_state_append_u32(staged,
+					card.private_ordinal);
+				world_revision_state_append_u32(staged,
+					card.replayed ? 1U : 0U);
+			}
+			if (entry.second.has_card_discard_result)
+			{
+				const RegenerationCardActionResult &card =
+					entry.second.card_discard_result;
+				world_revision_state_append_u64(staged, card.session_id);
+				world_revision_state_append_u64(staged, card.request_id);
+				world_revision_state_append_u64(staged,
+					card.command_sequence);
+				world_revision_state_append_u32(staged, card.count);
+				world_revision_state_append_u32(staged,
+					card.replayed ? 1U : 0U);
+			}
+			if (entry.second.has_card_draw_result)
+			{
+				const RegenerationCardActionResult &card =
+					entry.second.card_draw_result;
+				world_revision_state_append_u64(staged, card.session_id);
+				world_revision_state_append_u64(staged, card.request_id);
+				world_revision_state_append_u64(staged,
+					card.command_sequence);
+				world_revision_state_append_u32(staged, card.count);
+				world_revision_state_append_u32(staged,
+					card.replayed ? 1U : 0U);
+			}
+			if (entry.second.has_card_expiry_result)
+			{
+				world_revision_state_append_u32(staged,
+					entry.second.card_expiry_resolved_count);
+				world_revision_state_append_u32(staged,
+					entry.second.card_expiry_replayed ? 1U : 0U);
+			}
+			if (entry.second.has_card_choice_result)
+			{
+				const RegenerationCardActionResult &card =
+					entry.second.card_choice_result;
+				world_revision_state_append_u64(staged, card.session_id);
+				world_revision_state_append_u64(staged, card.request_id);
+				world_revision_state_append_u64(staged,
+					card.command_sequence);
+				world_revision_state_append_u32(staged, card.count);
+				world_revision_state_append_u32(staged,
+					card.replayed ? 1U : 0U);
+			}
 		}
 		for (const auto &entry : this->wire_request_cache_)
 		{
@@ -643,8 +864,14 @@ int32_t WorldRevisionServer::restore_request_cache(const uint8_t *bytes,
 		return (FT_ERR_INVALID_STATE);
 	if (byte_count < 24U || byte_count > 64U * 1024U * 1024U
 		|| std::memcmp(bytes, "WRC1", 4U) != 0
-		|| world_revision_state_read_u32(bytes, 4U) != 1U)
+		|| (world_revision_state_read_u32(bytes, 4U) != 1U
+			&& world_revision_state_read_u32(bytes, 4U) != 2U
+			&& world_revision_state_read_u32(bytes, 4U) != 3U
+			&& world_revision_state_read_u32(bytes, 4U) != 4U
+			&& world_revision_state_read_u32(bytes, 4U) != 5U
+			&& world_revision_state_read_u32(bytes, 4U) != 6U))
 		return (FT_ERR_INVALID_ARGUMENT);
+	const uint32_t version = world_revision_state_read_u32(bytes, 4U);
 	request_count = world_revision_state_read_u32(bytes, 8U);
 	wire_count = world_revision_state_read_u32(bytes, 12U);
 	if (request_count > REQUEST_CACHE_LIMIT || wire_count > REQUEST_CACHE_LIMIT)
@@ -662,14 +889,40 @@ int32_t WorldRevisionServer::restore_request_cache(const uint8_t *bytes,
 			if (!read_u64(&actor_id) || !read_u64(&loom_id)
 				|| !read_u64(&request_id) || actor_id == 0U || loom_id == 0U
 				|| request_id == 0U || !read_string(&entry.payload)
-				|| !read_u32(&flags) || (flags & ~15U) != 0U
+				|| !read_u32(&flags)
+				|| (flags & (version == 1U ? ~15U
+					: (version == 2U ? ~31U
+						: (version == 3U ? ~63U
+							: (version == 4U ? ~127U
+								: (version == 5U ? ~255U : ~511U)))))) != 0U
 				|| !read_u32(&result_code))
 				return (FT_ERR_INVALID_ARGUMENT);
 			entry.completed = (flags & 1U) != 0U;
 			entry.has_quote = (flags & 2U) != 0U;
 			entry.has_instability_view = (flags & 4U) != 0U;
 			entry.has_revision_state = (flags & 8U) != 0U;
+			entry.has_card_play_result = (flags & 16U) != 0U;
+			entry.has_card_discard_result = (flags & 32U) != 0U;
+			entry.has_card_draw_result = (flags & 64U) != 0U;
+			entry.has_card_expiry_result = (flags & 128U) != 0U;
+			entry.has_card_choice_result = (flags & 256U) != 0U;
+			if (version == 1U && entry.has_card_play_result)
+				return (FT_ERR_INVALID_ARGUMENT);
+			if (version < 3U && entry.has_card_discard_result)
+				return (FT_ERR_INVALID_ARGUMENT);
+			if (version < 4U && entry.has_card_draw_result)
+				return (FT_ERR_INVALID_ARGUMENT);
+			if (version < 5U && entry.has_card_expiry_result)
+				return (FT_ERR_INVALID_ARGUMENT);
+			if (version < 6U && entry.has_card_choice_result)
+				return (FT_ERR_INVALID_ARGUMENT);
 			entry.result = static_cast<int32_t>(result_code);
+			if ((entry.has_card_play_result || entry.has_card_discard_result
+					|| entry.has_card_draw_result
+					|| entry.has_card_expiry_result
+					|| entry.has_card_choice_result)
+				&& entry.result != FT_ERR_SUCCESS)
+				return (FT_ERR_INVALID_ARGUMENT);
 			if (!entry.completed)
 				return (FT_ERR_INVALID_ARGUMENT);
 			WorldRevisionCostQuote &quote = entry.quote;
@@ -696,6 +949,101 @@ int32_t WorldRevisionServer::restore_request_cache(const uint8_t *bytes,
 				|| !read_u64(&entry.cost_policy_revision)
 				|| !read_u32(&entry.selected_count))
 				return (FT_ERR_INVALID_ARGUMENT);
+			if (entry.has_card_play_result)
+			{
+				RegenerationPolicyIntent &card = entry.card_play_result;
+				uint32_t effect_kind, choice_kind, replayed;
+				if (!read_u64(&card.request_id)
+					|| !read_u64(&card.host_intent_sequence)
+					|| !read_u32(&card.content_version)
+					|| !read_u32(&card.card_definition_id)
+					|| !read_u32(&card.card_instance_id)
+					|| !read_u32(&effect_kind)
+					|| !read_u32(&choice_kind)
+					|| !read_u32(&card.choice.value_primary)
+					|| !read_u32(&card.choice.value_secondary)
+					|| !read_u32(&card.no_effect_choice_mask)
+					|| !read_u32(&card.private_result)
+					|| !read_u32(&card.private_ordinal)
+					|| !read_u32(&replayed)
+					|| card.request_id != request_id
+					|| card.card_instance_id == 0U
+					|| card.content_version
+						!= RegenerationCardSession::CONTENT_VERSION
+					|| !RegenerationCardSession::is_supported_card_definition(
+						card.card_definition_id)
+					|| effect_kind < REGENERATION_CARD_EFFECT_BIOME_EXCLUSION
+					|| effect_kind > REGENERATION_CARD_EFFECT_SPIDER_NEST_SEAL
+					|| effect_kind != static_cast<uint32_t>(
+						RegenerationCardSession::effect_kind_for_card(
+							card.card_definition_id))
+					|| choice_kind > REGENERATION_CARD_CHOICE_TARGET_CHUNK
+					|| (card.no_effect_choice_mask & ~3U) != 0U
+					|| (card.card_definition_id
+						!= RegenerationCardSession::BIOME_RUPTURE_CARD_DEFINITION_ID
+						&& card.no_effect_choice_mask != 0U)
+					|| replayed > 1U)
+					return (FT_ERR_INVALID_ARGUMENT);
+				card.effect_kind = static_cast<RegenerationCardEffectKind>(
+					effect_kind);
+				card.choice.kind = static_cast<RegenerationCardChoiceKind>(
+					choice_kind);
+				card.replayed = replayed != 0U;
+			}
+			if (entry.has_card_discard_result)
+			{
+				RegenerationCardActionResult &card =
+					entry.card_discard_result;
+				uint32_t replayed;
+				if (!read_u64(&card.session_id)
+					|| !read_u64(&card.request_id)
+					|| !read_u64(&card.command_sequence)
+					|| !read_u32(&card.count)
+					|| !read_u32(&replayed)
+					|| card.request_id != request_id
+					|| card.command_sequence == 0U || card.count != 1U
+					|| replayed > 1U)
+					return (FT_ERR_INVALID_ARGUMENT);
+				card.replayed = replayed != 0U;
+			}
+			if (entry.has_card_draw_result)
+			{
+				RegenerationCardActionResult &card = entry.card_draw_result;
+				uint32_t replayed;
+				if (!read_u64(&card.session_id)
+					|| !read_u64(&card.request_id)
+					|| !read_u64(&card.command_sequence)
+					|| !read_u32(&card.count) || !read_u32(&replayed)
+					|| card.request_id != request_id
+					|| card.command_sequence == 0U || card.count == 0U
+					|| replayed > 1U)
+					return (FT_ERR_INVALID_ARGUMENT);
+				card.replayed = replayed != 0U;
+			}
+			if (entry.has_card_expiry_result)
+			{
+				uint32_t replayed;
+				if (!read_u32(&entry.card_expiry_resolved_count)
+					|| entry.card_expiry_resolved_count > 4096U
+					|| !read_u32(&replayed) || replayed > 1U)
+					return (FT_ERR_INVALID_ARGUMENT);
+				entry.card_expiry_replayed = replayed != 0U;
+			}
+			if (entry.has_card_choice_result)
+			{
+				RegenerationCardActionResult &card =
+					entry.card_choice_result;
+				uint32_t replayed;
+				if (!read_u64(&card.session_id)
+					|| !read_u64(&card.request_id)
+					|| !read_u64(&card.command_sequence)
+					|| !read_u32(&card.count) || !read_u32(&replayed)
+					|| card.request_id != request_id
+					|| card.command_sequence == 0U || card.count != 1U
+					|| replayed > 1U)
+					return (FT_ERR_INVALID_ARGUMENT);
+				card.replayed = replayed != 0U;
+			}
 			const auto key = std::make_tuple(actor_id, loom_id, request_id);
 			if (!staged.emplace(key, std::move(entry)).second)
 				return (FT_ERR_ALREADY_EXISTS);
@@ -875,11 +1223,16 @@ int32_t WorldRevisionServer::handle_message(int32_t client_handle,
 	uint64_t loom_id = 0U;
 	int32_t error_code;
 	json_item *request_id_item;
+	json_item *protocol_version_item;
 	uint64_t request_id;
+	uint64_t protocol_version;
+	std::size_t message_length = 0U;
 
 	if (user_data == nullptr || message == nullptr)
 		return (FT_ERR_INVALID_ARGUMENT);
-	if (std::strlen(message) > 4096U)
+	while (message_length <= 4096U && message[message_length] != '\0')
+		++message_length;
+	if (message_length > 4096U)
 		return (FT_ERR_OUT_OF_RANGE);
 	server = static_cast<WorldRevisionServer *>(user_data);
 	if (server->authorizer_ == nullptr)
@@ -894,8 +1247,42 @@ int32_t WorldRevisionServer::handle_message(int32_t client_handle,
 	if (groups == nullptr)
 		return (FT_ERR_INVALID_ARGUMENT);
 	json_group *revision = json_find_group(groups, "world_revision");
+	protocol_version_item = revision == nullptr ? nullptr
+		: json_find_item(revision, "protocol_version");
+	if (protocol_version_item == nullptr
+		|| world_revision_parse_u64(protocol_version_item->value,
+			&protocol_version) != FT_ERR_SUCCESS
+		|| protocol_version != 1U)
+	{
+		json_free_groups(groups);
+		return (FT_ERR_CONFIGURATION);
+	}
 	json_item *action_item = revision == nullptr ? nullptr
 		: json_find_item(revision, "action");
+	if (action_item != nullptr
+		&& std::strcmp(action_item->value, "status") == 0)
+	{
+		error_code = server->handle_status_message(client_handle, revision,
+			actor_id, loom_id);
+		json_free_groups(groups);
+		return (error_code);
+	}
+	if (action_item != nullptr
+		&& std::strcmp(action_item->value, "card_hand") == 0)
+	{
+		error_code = server->handle_card_hand_message(client_handle, message,
+			revision, actor_id, loom_id);
+		json_free_groups(groups);
+		return (error_code);
+	}
+	if (action_item != nullptr
+		&& std::strcmp(action_item->value, "preview") == 0)
+	{
+		error_code = server->handle_preview_message(client_handle, message,
+			revision, actor_id, loom_id);
+		json_free_groups(groups);
+		return (error_code);
+	}
 	if (action_item != nullptr
 		&& std::strcmp(action_item->value, "quote") == 0)
 	{
@@ -954,7 +1341,102 @@ int32_t WorldRevisionServer::send_action_response(int32_t client_handle,
 	}
 	try
 	{
-		payload = "{\"world_revision_result\":{\"request_id\":\""
+		if (cached != this->request_cache_.end()
+			&& cached->second.completed
+			&& cached->second.has_card_play_result
+			&& cached->second.payload == message)
+		{
+			const RegenerationPolicyIntent &card =
+				cached->second.card_play_result;
+			payload = "{\"world_revision_card_play_result\":{\"protocol_version\":1,\"request_id\":\""
+				+ std::to_string(request_id) + "\",\"result\":"
+				+ std::to_string(result) + ",\"card_definition_id\":"
+				+ std::to_string(card.card_definition_id)
+				+ ",\"card_instance_id\":"
+				+ std::to_string(card.card_instance_id)
+				+ ",\"content_version\":"
+				+ std::to_string(card.content_version)
+				+ ",\"effect_kind\":"
+				+ std::to_string(static_cast<uint32_t>(card.effect_kind))
+				+ ",\"host_intent_sequence\":\""
+				+ std::to_string(card.host_intent_sequence)
+				+ "\",\"choice_kind\":"
+				+ std::to_string(static_cast<uint32_t>(card.choice.kind))
+				+ ",\"choice_primary\":\""
+				+ std::to_string(card.choice.value_primary)
+				+ "\",\"choice_secondary\":\""
+				+ std::to_string(card.choice.value_secondary)
+				+ "\",\"no_effect_choice_mask\":"
+				+ std::to_string(card.no_effect_choice_mask)
+				+ ",\"replayed\":"
+				+ (card.replayed ? "true" : "false") + "}}";
+		}
+		else if (cached != this->request_cache_.end()
+			&& cached->second.completed
+			&& cached->second.has_card_discard_result
+			&& cached->second.payload == message)
+		{
+			const RegenerationCardActionResult &card =
+				cached->second.card_discard_result;
+			payload = "{\"world_revision_card_discard_result\":{\"protocol_version\":1,\"request_id\":\""
+				+ std::to_string(request_id) + "\",\"result\":"
+				+ std::to_string(result) + ",\"session_id\":\""
+				+ std::to_string(card.session_id)
+				+ "\",\"command_sequence\":\""
+				+ std::to_string(card.command_sequence)
+				+ "\",\"count\":" + std::to_string(card.count)
+				+ ",\"replayed\":"
+				+ (card.replayed ? "true" : "false") + "}}";
+		}
+		else if (cached != this->request_cache_.end()
+			&& cached->second.completed
+			&& cached->second.has_card_draw_result
+			&& cached->second.payload == message)
+		{
+			const RegenerationCardActionResult &card =
+				cached->second.card_draw_result;
+			payload = "{\"world_revision_card_draw_result\":{\"protocol_version\":1,\"request_id\":\""
+				+ std::to_string(request_id) + "\",\"result\":"
+				+ std::to_string(result) + ",\"session_id\":\""
+				+ std::to_string(card.session_id)
+				+ "\",\"command_sequence\":\""
+				+ std::to_string(card.command_sequence)
+				+ "\",\"count\":" + std::to_string(card.count)
+				+ ",\"replayed\":"
+				+ (card.replayed ? "true" : "false") + "}}";
+		}
+		else if (cached != this->request_cache_.end()
+			&& cached->second.completed
+			&& cached->second.has_card_expiry_result
+			&& cached->second.payload == message)
+		{
+			payload = "{\"world_revision_card_choice_expiry_result\":{\"protocol_version\":1,\"request_id\":\""
+				+ std::to_string(request_id) + "\",\"result\":"
+				+ std::to_string(result) + ",\"resolved_count\":"
+				+ std::to_string(cached->second.card_expiry_resolved_count)
+				+ ",\"replayed\":"
+				+ (cached->second.card_expiry_replayed ? "true" : "false")
+				+ "}}";
+		}
+		else if (cached != this->request_cache_.end()
+			&& cached->second.completed
+			&& cached->second.has_card_choice_result
+			&& cached->second.payload == message)
+		{
+			const RegenerationCardActionResult &card =
+				cached->second.card_choice_result;
+			payload = "{\"world_revision_card_choice_result\":{\"protocol_version\":1,\"request_id\":\""
+				+ std::to_string(request_id) + "\",\"result\":"
+				+ std::to_string(result) + ",\"session_id\":\""
+				+ std::to_string(card.session_id)
+				+ "\",\"command_sequence\":\""
+				+ std::to_string(card.command_sequence)
+				+ "\",\"count\":" + std::to_string(card.count)
+				+ ",\"replayed\":"
+				+ (card.replayed ? "true" : "false") + "}}";
+		}
+		else
+		payload = "{\"world_revision_result\":{\"protocol_version\":1,\"request_id\":\""
 			+ std::to_string(request_id) + "\",\"result\":"
 			+ std::to_string(result) + ",\"revision_identifier\":"
 			+ std::to_string(revision.identifier)
@@ -974,6 +1456,128 @@ int32_t WorldRevisionServer::send_action_response(int32_t client_handle,
 	if (this->response_sender_ != nullptr)
 		send_result = this->response_sender_(client_handle,
 			response.c_str(), this->response_sender_user_data_);
+	else
+		send_result = this->server_.send_to_client(client_handle, response);
+	(void)response.destroy();
+	return (send_result);
+}
+
+int32_t WorldRevisionServer::handle_card_hand_message(int32_t client_handle,
+	const char *message, json_group *revision, uint64_t actor_id,
+	uint64_t loom_id)
+{
+	json_item *request_id_item = revision == nullptr ? nullptr
+		: json_find_item(revision, "request_id");
+	uint64_t request_id = 0U;
+	RegenerationCardHandView hand = {};
+	std::string payload;
+	ft_string response;
+	int32_t result;
+	int32_t send_result;
+	if (request_id_item == nullptr
+		|| world_revision_parse_u64(request_id_item->value, &request_id)
+			!= FT_ERR_SUCCESS || request_id == 0U)
+		return (FT_ERR_INVALID_ARGUMENT);
+	if (!this->draft_owned_ || !this->draft_start_committed_
+		|| actor_id != this->draft_actor_id_ || loom_id != this->draft_loom_id_)
+		result = FT_ERR_PERMISSION_DENIED;
+	else
+		result = this->authorize_station_access(actor_id, loom_id, message);
+	if (result == FT_ERR_SUCCESS && this->card_hand_query_ == nullptr)
+		result = FT_ERR_INVALID_OPERATION;
+	if (result == FT_ERR_SUCCESS)
+		result = this->card_hand_query_(actor_id, loom_id, hand,
+			this->card_hand_query_user_data_);
+	if (result == FT_ERR_SUCCESS && (hand.card_session_id == 0U
+		|| hand.cards.size() > FT_CARD_GAME_MAX_CARDS
+		hand.required_discard_count > hand.cards.size()
+		|| hand.pending_choices.size() > FT_CARD_GAME_MAX_CHOICES))
+		result = FT_ERR_INVALID_STATE;
+	if (result == FT_ERR_SUCCESS)
+		for (const card_game_pending_choice_view &choice : hand.pending_choices)
+		{
+			if (choice.choice_id == 0U || choice.option_count == 0U
+				|| choice.option_count > FT_CARD_GAME_MAX_CHOICE_OPTIONS)
+			{
+				result = FT_ERR_INVALID_STATE;
+				break;
+			}
+			for (uint32_t index = 0U; index < choice.option_count; ++index)
+				if (choice.options[index].option_id == 0U)
+				{
+					result = FT_ERR_INVALID_STATE;
+					break;
+				}
+			if (result != FT_ERR_SUCCESS)
+				break;
+		}
+	try
+	{
+		payload = "{\"world_revision_card_hand\":{\"protocol_version\":1,\"request_id\":\""
+			+ std::to_string(request_id) + "\",\"result\":"
+			+ std::to_string(result);
+		if (result == FT_ERR_SUCCESS)
+		{
+			payload += ",\"session_id\":\""
+				+ std::to_string(hand.card_session_id)
+				+ "\",\"required_discard_count\":"
+				+ std::to_string(hand.required_discard_count)
+				+ ",\"cards\":[";
+			for (std::size_t index = 0U; index < hand.cards.size(); ++index)
+			{
+				if (index != 0U)
+					payload += ",";
+				payload += "{\"instance_id\":"
+					+ std::to_string(hand.cards[index].card_instance_id)
+					+ ",\"definition_id\":"
+					+ std::to_string(hand.cards[index].card_definition_id) + "}";
+			}
+			payload += "],\"pending_choices\":[";
+			for (std::size_t choice_index = 0U;
+				choice_index < hand.pending_choices.size(); ++choice_index)
+			{
+				const card_game_pending_choice_view &choice =
+					hand.pending_choices[choice_index];
+				if (choice_index != 0U)
+					payload += ",";
+				payload += "{\"choice_id\":"
+					+ std::to_string(choice.choice_id)
+					+ ",\"kind\":"
+					+ std::to_string(static_cast<uint32_t>(choice.kind))
+					+ ",\"deadline_epoch\":\""
+					+ std::to_string(choice.deadline_epoch)
+					+ "\",\"options\":[";
+				for (uint32_t option_index = 0U;
+					option_index < choice.option_count; ++option_index)
+				{
+					if (option_index != 0U)
+						payload += ",";
+					const card_game_choice_option &option =
+						choice.options[option_index];
+					payload += "{\"option_id\":"
+						+ std::to_string(option.option_id)
+						+ ",\"value_a\":"
+						+ std::to_string(option.value_a)
+						+ ",\"value_b\":"
+						+ std::to_string(option.value_b) + "}";
+				}
+				payload += "]}";
+			}
+			payload += "]";
+		}
+		payload += "}}";
+	}
+	catch (const std::bad_alloc &)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	if (payload.size() > 4096U)
+		return (FT_ERR_OUT_OF_RANGE);
+	if (response.initialize(payload.c_str()) != FT_ERR_SUCCESS)
+		return (FT_ERR_NO_MEMORY);
+	if (this->response_sender_ != nullptr)
+		send_result = this->response_sender_(client_handle, response.c_str(),
+			this->response_sender_user_data_);
 	else
 		send_result = this->server_.send_to_client(client_handle, response);
 	(void)response.destroy();
@@ -1011,7 +1615,7 @@ int32_t WorldRevisionServer::handle_quote_message(int32_t client_handle,
 			!= FT_ERR_SUCCESS
 		|| world_revision_parse_u64(count_item->value, &count)
 			!= FT_ERR_SUCCESS
-		|| count > UINT32_MAX)
+		|| request_id == 0U || count < 4U || count > 7U)
 		return (FT_ERR_INVALID_ARGUMENT);
 	result = this->authorize_station_access(actor_id, loom_id, message);
 	if (result != FT_ERR_SUCCESS)
@@ -1042,7 +1646,7 @@ int32_t WorldRevisionServer::handle_quote_message(int32_t client_handle,
 		&quote);
 	try
 	{
-		payload = "{\"world_revision_quote\":{\"request_id\":\""
+		payload = "{\"world_revision_quote\":{\"protocol_version\":1,\"request_id\":\""
 			+ std::to_string(request_id) + "\",\"result\":"
 			+ std::to_string(result);
 		if (result == FT_ERR_SUCCESS)
@@ -1083,6 +1687,370 @@ int32_t WorldRevisionServer::handle_quote_message(int32_t client_handle,
 		result = this->server_.send_to_client(client_handle, response);
 	(void)response.destroy();
 	return (result);
+}
+
+int32_t WorldRevisionServer::handle_status_message(int32_t client_handle,
+	json_group *revision_group, uint64_t actor_id, uint64_t loom_id)
+{
+	json_item *request_id_item = revision_group == nullptr ? nullptr
+		: json_find_item(revision_group, "request_id");
+	uint64_t request_id = 0U;
+	World::WorldRevision revision = {};
+	std::vector<WorldRevisionManager::RevisionChunk> selected_chunks;
+	WorldRevisionStartPolicyStatus start_policy = {};
+	uint32_t status_revision_id = 0U;
+	bool completed = false;
+	bool has_start_policy = false;
+	bool player_cancel_allowed = false;
+	bool selection_edit_allowed = false;
+	bool trusted_retry_available = false;
+	uint64_t deadline_epoch_ms = 0U;
+	const char *lifecycle_state = "UNKNOWN";
+	std::string payload;
+	ft_string response;
+	int32_t result = FT_ERR_SUCCESS;
+	int32_t send_result;
+
+	if (request_id_item == nullptr
+		|| world_revision_parse_u64(request_id_item->value, &request_id)
+			!= FT_ERR_SUCCESS
+		|| request_id == 0U)
+		return (FT_ERR_INVALID_ARGUMENT);
+	if (this->world_ == nullptr || !this->initialized_)
+		result = FT_ERR_NOT_INITIALISED;
+	else if (!this->draft_owned_ || actor_id == 0U || loom_id == 0U
+		|| actor_id != this->draft_actor_id_
+		|| loom_id != this->draft_loom_id_)
+		result = FT_ERR_PERMISSION_DENIED;
+	if (result == FT_ERR_SUCCESS)
+	{
+		revision = this->world_->world_revision();
+		result = this->world_->revision_manager.copy_status_chunks(
+			selected_chunks, &status_revision_id, &completed);
+		deadline_epoch_ms = this->world_->revision_decision_deadline_epoch();
+		if (result == FT_ERR_SUCCESS && this->start_policy_query_ != nullptr)
+		{
+			const int32_t policy_result = this->start_policy_query_(actor_id,
+				loom_id, start_policy,
+				this->start_policy_query_user_data_);
+			if (policy_result == FT_ERR_SUCCESS)
+				has_start_policy = true;
+			else if (policy_result != FT_ERR_NOT_FOUND)
+				result = policy_result;
+		}
+		if (result == FT_ERR_SUCCESS && completed)
+		{
+			revision.completed_jobs = selected_chunks.size();
+			revision.total_jobs = selected_chunks.size();
+			revision.regenerated_chunks = 0;
+			revision.skipped_chunks = 0;
+			revision.regeneration_error = FT_ERR_SUCCESS;
+			for (const WorldRevisionManager::RevisionChunk &chunk
+				: selected_chunks)
+			{
+				if (this->world_->revision_manager.status_chunk_is_published(
+						chunk.chunk_x, chunk.chunk_z))
+					++revision.regenerated_chunks;
+				WorldRevisionManager::RegenerationChunkOutcome outcome = {};
+				if (this->world_->revision_manager
+					.get_regeneration_chunk_outcome(chunk.chunk_x, chunk.chunk_z,
+						&outcome) == FT_ERR_SUCCESS)
+				{
+					if (outcome.skipped)
+						++revision.skipped_chunks;
+					else if (revision.regeneration_error == FT_ERR_SUCCESS)
+						revision.regeneration_error = outcome.error_code;
+				}
+			}
+		}
+		if (result == FT_ERR_SUCCESS)
+		{
+			if (revision.regenerating)
+				lifecycle_state = "GENERATING";
+			else if (revision.pending && this->draft_start_committed_
+				&& this->world_->revision_generation_requested())
+				lifecycle_state = "GENERATION_QUEUED";
+			else if (revision.pending && this->draft_start_committed_)
+				lifecycle_state = "DECISION_WINDOW";
+			else if (revision.pending)
+			{
+				lifecycle_state = "DRAFT_OPEN";
+				player_cancel_allowed = true;
+				selection_edit_allowed = true;
+			}
+			else if (completed && this->draft_start_committed_)
+				lifecycle_state = "COMPLETE";
+			else if (this->world_->revision_barriers_active())
+			{
+				lifecycle_state = "FAILED_RETRYABLE";
+				trusted_retry_available = true;
+			}
+			else
+				lifecycle_state = "NO_DRAFT";
+			if (std::strcmp(lifecycle_state, "NO_DRAFT") == 0)
+			{
+				selected_chunks.clear();
+				completed = false;
+				status_revision_id = revision.identifier;
+				revision.completed_jobs = 0U;
+				revision.total_jobs = 0U;
+				revision.regenerated_chunks = 0U;
+				revision.skipped_chunks = 0U;
+				revision.regeneration_error = FT_ERR_SUCCESS;
+				start_policy = {};
+				has_start_policy = false;
+			}
+		}
+	}
+	try
+	{
+		payload = "{\"world_revision_status\":{\"protocol_version\":1,\"request_id\":\""
+			+ std::to_string(request_id) + "\",\"result\":"
+			+ std::to_string(result);
+		if (result == FT_ERR_SUCCESS)
+		{
+			payload += ",\"revision_identifier\":"
+				+ std::to_string(status_revision_id)
+				+ ",\"lifecycle_state\":\""
+				+ lifecycle_state
+				+ "\",\"player_cancel_allowed\":"
+				+ (player_cancel_allowed ? "true" : "false")
+				+ ",\"selection_edit_allowed\":"
+				+ (selection_edit_allowed ? "true" : "false")
+				+ ",\"trusted_retry_available\":"
+				+ (trusted_retry_available ? "true" : "false")
+				+ ",\"selection_revision\":\""
+				+ std::to_string(revision.selection_revision)
+				+ "\",\"policy_revision\":\""
+				+ std::to_string(revision.cost_policy_revision)
+				+ "\",\"pending\":"
+				+ (revision.pending ? "true" : "false")
+				+ ",\"completed\":"
+				+ (completed ? "true" : "false")
+				+ ",\"regenerating\":"
+				+ (revision.regenerating ? "true" : "false")
+				+ ",\"completed_jobs\":"
+				+ std::to_string(revision.completed_jobs)
+				+ ",\"total_jobs\":"
+				+ std::to_string(revision.total_jobs)
+				+ ",\"regenerated_chunks\":"
+				+ std::to_string(revision.regenerated_chunks)
+				+ ",\"skipped_chunks\":"
+				+ std::to_string(revision.skipped_chunks)
+				+ ",\"regeneration_error\":"
+				+ std::to_string(revision.regeneration_error)
+				+ ",\"barriers_active\":"
+				+ (this->world_->revision_barriers_active()
+					? "true" : "false")
+				+ ",\"decision_deadline_epoch_ms\":\""
+				+ std::to_string(deadline_epoch_ms)
+				+ "\",\"decision_mode\":\""
+				+ (has_start_policy && start_policy.mode == 1U ? "solo"
+					: has_start_policy && start_policy.mode == 2U ? "multiplayer"
+					: has_start_policy && start_policy.decision_timeout_ms != 0U
+						? "legacy" : "unknown")
+				+ "\",\"active_player_count\":"
+				+ std::to_string(has_start_policy
+					? start_policy.active_player_count : 0U)
+				+ ",\"decision_timeout_ms\":\""
+				+ std::to_string(has_start_policy
+					? start_policy.decision_timeout_ms : 0U)
+				+ "\",\"currency_item_id\":"
+				+ std::to_string(has_start_policy
+					? start_policy.currency_item_id : 0U)
+				+ ",\"committed_currency_amount\":\""
+				+ std::to_string(has_start_policy
+					? start_policy.committed_currency_amount : 0U)
+				+ "\",\"selected_paid_chunks\":"
+				+ std::to_string(has_start_policy
+					? start_policy.selected_paid_chunks : 0U)
+				+ ",\"selected_bonus_chunks\":"
+				+ std::to_string(has_start_policy
+					? start_policy.selected_bonus_chunks : 0U)
+				+ ",\"settlement_policy\":"
+				+ std::to_string(has_start_policy
+					? start_policy.settlement_policy : 0U)
+				+ ",\"start_revision_identifier\":"
+				+ std::to_string(has_start_policy
+					? start_policy.revision_identifier : 0U)
+				+ ",\"card_content_version\":"
+				+ std::to_string(has_start_policy
+					? start_policy.card_content_version : 0U)
+				+ ",\"generation_manifest_hash\":\""
+				+ std::to_string(has_start_policy
+					? start_policy.generation_manifest_hash : 0U)
+				+ "\",\"trusted_script_manifest_hash\":\""
+				+ std::to_string(has_start_policy
+					? start_policy.trusted_script_manifest_hash : 0U)
+				+ "\",\"settlement_policy_name\":\""
+				+ (has_start_policy
+					&& start_policy.settlement_policy
+						== WORLD_REVISION_SETTLEMENT_RETAIN_COMMITTED_COST
+					? "retain_committed_cost" : "unknown")
+				+ "\",\"participant_actor_ids\":[";
+			for (std::size_t index = 0U;
+				index < start_policy.participant_actor_ids.size(); ++index)
+			{
+				if (index != 0U)
+					payload += ",";
+				payload += "\""
+					+ std::to_string(start_policy.participant_actor_ids[index])
+					+ "\"";
+			}
+			payload += "],\"chunks\":[";
+			for (std::size_t index = 0U; index < selected_chunks.size(); ++index)
+			{
+				const WorldRevisionManager::RevisionChunk &chunk =
+					selected_chunks[index];
+				const bool publication_committed =
+					this->world_->revision_manager.status_chunk_is_published(
+						chunk.chunk_x, chunk.chunk_z);
+				WorldRevisionManager::RegenerationChunkOutcome outcome = {};
+				const bool has_outcome = this->world_->revision_manager
+					.get_regeneration_chunk_outcome(chunk.chunk_x, chunk.chunk_z,
+						&outcome) == FT_ERR_SUCCESS;
+				if (index != 0U)
+					payload += ",";
+				payload += "{\"x\":" + std::to_string(chunk.chunk_x)
+					+ ",\"z\":" + std::to_string(chunk.chunk_z)
+					+ ",\"state\":" + std::to_string(static_cast<int32_t>(
+						this->world_->revision_state(chunk.chunk_x,
+							chunk.chunk_z)))
+					+ ",\"publication_status\":\""
+					+ (publication_committed ? "committed\""
+						: has_outcome ? (outcome.skipped ? "skipped\""
+							: "failed\"") : "pending\"");
+				if (has_outcome)
+					payload += ",\"error_code\":"
+						+ std::to_string(outcome.error_code);
+				payload += "}";
+			}
+			payload += "]";
+		}
+		payload += "}}";
+	}
+	catch (const std::bad_alloc &)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	if (payload.size() > 64U * 1024U)
+		return (FT_ERR_OUT_OF_RANGE);
+	if (response.initialize(payload.c_str()) != FT_ERR_SUCCESS)
+		return (FT_ERR_NO_MEMORY);
+	if (this->response_sender_ != nullptr)
+		send_result = this->response_sender_(client_handle,
+			response.c_str(), this->response_sender_user_data_);
+	else
+		send_result = this->server_.send_to_client(client_handle, response);
+	(void)response.destroy();
+	return (send_result);
+}
+
+int32_t WorldRevisionServer::handle_preview_message(int32_t client_handle,
+	const char *message, json_group *revision_group, uint64_t actor_id,
+	uint64_t loom_id)
+{
+	static const uint64_t MAX_PREVIEW_RADIUS = 8U;
+	json_item *request_id_item = revision_group == nullptr ? nullptr
+		: json_find_item(revision_group, "request_id");
+	json_item *center_x_item = revision_group == nullptr ? nullptr
+		: json_find_item(revision_group, "center_chunk_x");
+	json_item *center_z_item = revision_group == nullptr ? nullptr
+		: json_find_item(revision_group, "center_chunk_z");
+	json_item *radius_item = revision_group == nullptr ? nullptr
+		: json_find_item(revision_group, "radius");
+	uint64_t request_id = 0U;
+	uint64_t radius = 0U;
+	int32_t center_x = 0;
+	int32_t center_z = 0;
+	int32_t result = FT_ERR_SUCCESS;
+	bool occupancy_refreshed = false;
+	std::vector<World::RevisionPreviewEntry> entries;
+	std::string payload;
+	ft_string response;
+	int32_t send_result;
+
+	if (message == nullptr || this->world_ == nullptr
+		|| request_id_item == nullptr || center_x_item == nullptr
+		|| center_z_item == nullptr || radius_item == nullptr
+		|| world_revision_parse_u64(request_id_item->value, &request_id)
+			!= FT_ERR_SUCCESS || request_id == 0U
+		|| world_revision_parse_i32(center_x_item->value, &center_x)
+			!= FT_ERR_SUCCESS
+		|| world_revision_parse_i32(center_z_item->value, &center_z)
+			!= FT_ERR_SUCCESS
+		|| world_revision_parse_u64(radius_item->value, &radius)
+			!= FT_ERR_SUCCESS || radius > MAX_PREVIEW_RADIUS)
+		return (FT_ERR_INVALID_ARGUMENT);
+	if (!this->initialized_)
+		result = FT_ERR_NOT_INITIALISED;
+	if (result == FT_ERR_SUCCESS)
+		result = this->authorize_station_access(actor_id, loom_id, message);
+	if (result == FT_ERR_SUCCESS)
+	{
+		result = this->refresh_occupied_chunks();
+		occupancy_refreshed = result == FT_ERR_SUCCESS;
+	}
+	if (result == FT_ERR_SUCCESS)
+		result = this->world_->build_revision_preview(center_x, center_z,
+			static_cast<int32_t>(radius), entries);
+	if (occupancy_refreshed)
+	{
+		const int32_t checkpoint_result = this->commit_checkpoint();
+		if (checkpoint_result != FT_ERR_SUCCESS)
+			result = checkpoint_result;
+	}
+	try
+	{
+		payload = "{\"world_revision_preview\":{\"protocol_version\":1,\"request_id\":\""
+			+ std::to_string(request_id) + "\",\"result\":"
+			+ std::to_string(result);
+		if (result == FT_ERR_SUCCESS)
+		{
+			payload += ",\"center_chunk_x\":" + std::to_string(center_x)
+				+ ",\"center_chunk_z\":" + std::to_string(center_z)
+				+ ",\"radius\":" + std::to_string(radius)
+				+ ",\"selection_revision\":\""
+				+ std::to_string(this->world_->world_revision().selection_revision)
+				+ "\",\"chunks\":[";
+			for (std::size_t index = 0U; index < entries.size(); ++index)
+			{
+				const World::RevisionPreviewEntry &entry = entries[index];
+				if (index != 0U)
+					payload += ",";
+				payload += "{\"x\":" + std::to_string(entry.chunk_x)
+					+ ",\"z\":" + std::to_string(entry.chunk_z)
+					+ ",\"state\":"
+					+ std::to_string(static_cast<int32_t>(entry.state))
+					+ ",\"generation_protected\":"
+					+ (entry.protection_info.generation_protected ? "true" : "false")
+					+ ",\"loom_safe_zone\":"
+					+ (entry.protection_info.loom_safe_zone ? "true" : "false")
+					+ ",\"manually_protected\":"
+					+ (entry.protection_info.manually_protected ? "true" : "false")
+					+ ",\"occupied_player_exclusion\":"
+					+ (entry.protection_info.occupied_player_exclusion
+						? "true}" : "false}");
+			}
+			payload += "]";
+		}
+		payload += "}}";
+	}
+	catch (const std::bad_alloc &)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	if (payload.size() > 64U * 1024U)
+		return (FT_ERR_OUT_OF_RANGE);
+	if (response.initialize(payload.c_str()) != FT_ERR_SUCCESS)
+		return (FT_ERR_NO_MEMORY);
+	if (this->response_sender_ != nullptr)
+		send_result = this->response_sender_(client_handle,
+			response.c_str(), this->response_sender_user_data_);
+	else
+		send_result = this->server_.send_to_client(client_handle, response);
+	(void)response.destroy();
+	return (send_result);
 }
 
 int32_t WorldRevisionServer::handle_instability_view_message(
@@ -1166,7 +2134,7 @@ int32_t WorldRevisionServer::handle_instability_view_message(
 		return (checkpoint_result);
 	try
 	{
-		payload = "{\"world_chunk_instability_view\":{\"request_id\":\""
+		payload = "{\"world_chunk_instability_view\":{\"protocol_version\":1,\"request_id\":\""
 			+ std::to_string(request_id) + "\",\"result\":"
 			+ std::to_string(result);
 		if (result == FT_ERR_SUCCESS)
@@ -1339,7 +2307,8 @@ int32_t WorldRevisionServer::handle_select_or_protect_action(json_group *revisio
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
 	return (this->world_->update_revision_chunk_protection(
-		expected_selection_revision, chunk_x, chunk_z, true,
+		expected_selection_revision, chunk_x, chunk_z,
+		std::strcmp(action, "protect") == 0,
 		&current_selection_revision));
 }
 
@@ -1379,19 +2348,6 @@ int32_t WorldRevisionServer::handle_revision_message(const char *message,
 		return (FT_ERR_INVALID_ARGUMENT);
 	}
 	action = action_item->value;
-	if (std::strcmp(action, "begin") == 0
-		|| std::strcmp(action, "select") == 0
-		|| std::strcmp(action, "unselect") == 0
-		|| std::strcmp(action, "protect") == 0
-		|| std::strcmp(action, "confirm") == 0)
-	{
-		result = this->refresh_occupied_chunks();
-		if (result != FT_ERR_SUCCESS)
-		{
-			json_free_groups(groups);
-			return (result);
-		}
-	}
 	request_key = std::make_tuple(actor_id, loom_id, request_id);
 	cached_request = this->request_cache_.find(request_key);
 	if (cached_request != this->request_cache_.end())
@@ -1405,8 +2361,14 @@ int32_t WorldRevisionServer::handle_revision_message(const char *message,
 			|| std::strcmp(action, "select") == 0
 			|| std::strcmp(action, "unselect") == 0
 			|| std::strcmp(action, "protect") == 0
+			|| std::strcmp(action, "unprotect") == 0
 			|| std::strcmp(action, "cancel") == 0
-			|| std::strcmp(action, "confirm") == 0)
+			|| std::strcmp(action, "confirm") == 0
+			|| std::strcmp(action, "play_card") == 0
+			|| std::strcmp(action, "discard_card") == 0
+			|| std::strcmp(action, "draw_cards") == 0
+			|| std::strcmp(action, "resolve_expired_choices") == 0
+			|| std::strcmp(action, "choose_card_option") == 0)
 		{
 			result = this->authorize_station_access(actor_id, loom_id, message);
 			if (result != FT_ERR_SUCCESS)
@@ -1417,11 +2379,38 @@ int32_t WorldRevisionServer::handle_revision_message(const char *message,
 		}
 		result = cached_request->second.completed
 			? cached_request->second.result : FT_ERR_INVALID_STATE;
+		if (result == FT_ERR_SUCCESS
+			&& cached_request->second.has_card_play_result)
+			cached_request->second.card_play_result.replayed = true;
+		if (result == FT_ERR_SUCCESS
+			&& cached_request->second.has_card_discard_result)
+			cached_request->second.card_discard_result.replayed = true;
+		if (result == FT_ERR_SUCCESS
+			&& cached_request->second.has_card_draw_result)
+			cached_request->second.card_draw_result.replayed = true;
+		if (result == FT_ERR_SUCCESS
+			&& cached_request->second.has_card_expiry_result)
+			cached_request->second.card_expiry_replayed = true;
+		if (result == FT_ERR_SUCCESS
+			&& cached_request->second.has_card_choice_result)
+			cached_request->second.card_choice_result.replayed = true;
 		const int32_t checkpoint_result = this->commit_checkpoint();
 		if (checkpoint_result != FT_ERR_SUCCESS)
 			result = checkpoint_result;
 		json_free_groups(groups);
 		return (result);
+	}
+	if ((std::strcmp(action, "begin") == 0
+		|| std::strcmp(action, "select") == 0
+		|| std::strcmp(action, "unselect") == 0
+		|| std::strcmp(action, "protect") == 0
+		|| std::strcmp(action, "unprotect") == 0
+		|| std::strcmp(action, "confirm") == 0)
+		&& this->request_cache_.size()
+			>= WorldRevisionServer::REQUEST_CACHE_LIMIT)
+	{
+		json_free_groups(groups);
+		return (FT_ERR_FULL);
 	}
 	if (this->request_cache_.size() >= WorldRevisionServer::REQUEST_CACHE_LIMIT)
 	{
@@ -1443,6 +2432,17 @@ int32_t WorldRevisionServer::handle_revision_message(const char *message,
 		staged_request.selection_revision = 0U;
 		staged_request.cost_policy_revision = 0U;
 		staged_request.selected_count = 0U;
+		staged_request.has_card_play_result = false;
+		staged_request.card_play_result = {};
+		staged_request.has_card_discard_result = false;
+		staged_request.card_discard_result = {};
+		staged_request.has_card_draw_result = false;
+		staged_request.card_draw_result = {};
+		staged_request.has_card_expiry_result = false;
+		staged_request.card_expiry_resolved_count = 0U;
+		staged_request.card_expiry_replayed = false;
+		staged_request.has_card_choice_result = false;
+		staged_request.card_choice_result = {};
 		cached_request = this->request_cache_.emplace(request_key,
 			std::move(staged_request)).first;
 	}
@@ -1451,22 +2451,25 @@ int32_t WorldRevisionServer::handle_revision_message(const char *message,
 		json_free_groups(groups);
 		return (FT_ERR_NO_MEMORY);
 	}
+	if (std::strcmp(action, "begin") == 0
+		|| std::strcmp(action, "select") == 0
+		|| std::strcmp(action, "unselect") == 0
+		|| std::strcmp(action, "protect") == 0
+		|| std::strcmp(action, "unprotect") == 0
+		|| std::strcmp(action, "confirm") == 0)
 	{
-		const World::WorldRevision current_revision =
-			this->world_->world_revision();
-
-		if (!current_revision.pending && !current_revision.regenerating)
+		result = this->refresh_occupied_chunks();
+		if (result != FT_ERR_SUCCESS)
 		{
-			this->draft_owned_ = false;
-			this->draft_start_committed_ = false;
-			this->draft_actor_id_ = 0U;
-			this->draft_loom_id_ = 0U;
+			this->request_cache_.erase(cached_request);
+			json_free_groups(groups);
+			return (result);
 		}
 	}
 	result = FT_ERR_INVALID_ARGUMENT;
 	if (std::strcmp(action, "begin") == 0)
 	{
-		if (this->draft_owned_ || this->world_->world_revision().pending
+		if (this->world_->world_revision().pending
 			|| this->world_->world_revision().regenerating)
 			result = FT_ERR_INVALID_OPERATION;
 		else
@@ -1487,11 +2490,226 @@ int32_t WorldRevisionServer::handle_revision_message(const char *message,
 	else if (!this->draft_owned_ || actor_id != this->draft_actor_id_
 		|| loom_id != this->draft_loom_id_)
 		result = FT_ERR_PERMISSION_DENIED;
+	else if (this->draft_start_committed_
+		&& (std::strcmp(action, "play_card") == 0
+			|| std::strcmp(action, "discard_card") == 0
+			|| std::strcmp(action, "draw_cards") == 0
+			|| std::strcmp(action, "resolve_expired_choices") == 0
+			|| std::strcmp(action, "choose_card_option") == 0))
+	{
+		result = this->authorize_station_access(actor_id, loom_id, message);
+		if (result == FT_ERR_SUCCESS
+			&& std::strcmp(action, "play_card") == 0)
+		{
+			json_item *card_instance_item = json_find_item(revision,
+				"card_instance_id");
+			json_item *choice_kind_item = json_find_item(revision, "choice_kind");
+			json_item *choice_primary_item = json_find_item(revision,
+				"choice_primary");
+			json_item *choice_secondary_item = json_find_item(revision,
+				"choice_secondary");
+			uint64_t card_instance_id = 0U;
+			uint64_t choice_kind = 0U;
+			uint64_t choice_primary = 0U;
+			uint64_t choice_secondary = 0U;
+			RegenerationCardChoice choice = {};
+			RegenerationPolicyIntent intent = {};
+
+			if (this->card_play_handler_ == nullptr)
+				result = FT_ERR_INVALID_OPERATION;
+			else if (card_instance_item == nullptr || choice_kind_item == nullptr
+				|| choice_primary_item == nullptr
+				|| choice_secondary_item == nullptr
+				|| world_revision_parse_u64(card_instance_item->value,
+					&card_instance_id) != FT_ERR_SUCCESS
+				|| world_revision_parse_u64(choice_kind_item->value,
+					&choice_kind) != FT_ERR_SUCCESS
+				|| world_revision_parse_u64(choice_primary_item->value,
+					&choice_primary) != FT_ERR_SUCCESS
+				|| world_revision_parse_u64(choice_secondary_item->value,
+					&choice_secondary) != FT_ERR_SUCCESS
+				|| card_instance_id == 0U || card_instance_id > UINT32_MAX
+				|| choice_kind > REGENERATION_CARD_CHOICE_TARGET_CHUNK
+				|| choice_primary > UINT32_MAX || choice_secondary > UINT32_MAX)
+				result = FT_ERR_INVALID_ARGUMENT;
+			else
+			{
+				choice.kind = static_cast<RegenerationCardChoiceKind>(choice_kind);
+				choice.value_primary = static_cast<uint32_t>(choice_primary);
+				choice.value_secondary = static_cast<uint32_t>(choice_secondary);
+				result = this->card_play_handler_(actor_id, loom_id, request_id,
+					static_cast<uint32_t>(card_instance_id), choice, &intent,
+					this->card_play_handler_user_data_);
+				if (result == FT_ERR_SUCCESS
+					&& (intent.request_id != request_id
+						|| intent.card_instance_id != card_instance_id
+						|| !RegenerationCardSession::is_supported_card_definition(
+							intent.card_definition_id)
+						|| intent.content_version
+							!= RegenerationCardSession::CONTENT_VERSION
+						|| intent.effect_kind
+							!= RegenerationCardSession::effect_kind_for_card(
+								intent.card_definition_id)
+						|| intent.choice.kind != choice.kind
+						|| intent.choice.value_primary != choice.value_primary
+						|| intent.choice.value_secondary
+							!= choice.value_secondary))
+					result = FT_ERR_INVALID_STATE;
+				if (result == FT_ERR_SUCCESS)
+				{
+					cached_request->second.has_card_play_result = true;
+					cached_request->second.card_play_result = intent;
+				}
+			}
+		}
+		else if (result == FT_ERR_SUCCESS
+			&& std::strcmp(action, "discard_card") == 0)
+		{
+			json_item *source_draw_item = json_find_item(revision,
+				"source_draw_request_id");
+			json_item *card_instance_item = json_find_item(revision,
+				"card_instance_id");
+			uint64_t source_draw_request_id = 0U;
+			uint64_t card_instance_id = 0U;
+			RegenerationCardActionResult card_result = {};
+
+			if (this->card_discard_handler_ == nullptr)
+				result = FT_ERR_INVALID_OPERATION;
+			else if (source_draw_item == nullptr || card_instance_item == nullptr
+				|| world_revision_parse_u64(source_draw_item->value,
+					&source_draw_request_id) != FT_ERR_SUCCESS
+				|| world_revision_parse_u64(card_instance_item->value,
+					&card_instance_id) != FT_ERR_SUCCESS
+				|| source_draw_request_id == 0U || card_instance_id == 0U
+				|| card_instance_id > UINT32_MAX)
+				result = FT_ERR_INVALID_ARGUMENT;
+			else
+			{
+				result = this->card_discard_handler_(actor_id, loom_id,
+					request_id, source_draw_request_id,
+					static_cast<uint32_t>(card_instance_id), &card_result,
+					this->card_discard_handler_user_data_);
+				if (result == FT_ERR_SUCCESS
+					&& (card_result.request_id != request_id
+						|| card_result.count != 1U
+						|| card_result.command_sequence == 0U))
+					result = FT_ERR_INVALID_STATE;
+				if (result == FT_ERR_SUCCESS)
+				{
+					cached_request->second.has_card_discard_result = true;
+					cached_request->second.card_discard_result = card_result;
+				}
+			}
+		}
+		else if (result == FT_ERR_SUCCESS
+			&& std::strcmp(action, "draw_cards") == 0)
+		{
+			json_item *source_intent_item = json_find_item(revision,
+				"source_host_intent_sequence");
+			json_item *draw_count_item = json_find_item(revision, "draw_count");
+			json_item *discard_count_item = json_find_item(revision,
+				"required_discard_count");
+			uint64_t source_intent = 0U;
+			uint64_t draw_count = 0U;
+			uint64_t discard_count = 0U;
+			RegenerationCardActionResult card_result = {};
+
+			if (this->card_draw_handler_ == nullptr)
+				result = FT_ERR_INVALID_OPERATION;
+			else if (source_intent_item == nullptr || draw_count_item == nullptr
+				|| discard_count_item == nullptr
+				|| world_revision_parse_u64(source_intent_item->value,
+					&source_intent) != FT_ERR_SUCCESS
+				|| world_revision_parse_u64(draw_count_item->value,
+					&draw_count) != FT_ERR_SUCCESS
+				|| world_revision_parse_u64(discard_count_item->value,
+					&discard_count) != FT_ERR_SUCCESS
+				|| source_intent == 0U || draw_count == 0U
+				|| draw_count > UINT32_MAX || discard_count > UINT32_MAX)
+				result = FT_ERR_INVALID_ARGUMENT;
+			else
+			{
+				result = this->card_draw_handler_(actor_id, loom_id, request_id,
+					source_intent, static_cast<uint32_t>(draw_count),
+					static_cast<uint32_t>(discard_count), &card_result,
+					this->card_draw_handler_user_data_);
+				if (result == FT_ERR_SUCCESS
+					&& (card_result.request_id != request_id
+						|| card_result.count != draw_count
+						|| card_result.command_sequence == 0U))
+					result = FT_ERR_INVALID_STATE;
+				if (result == FT_ERR_SUCCESS)
+				{
+					cached_request->second.has_card_draw_result = true;
+					cached_request->second.card_draw_result = card_result;
+				}
+			}
+		}
+		else if (result == FT_ERR_SUCCESS
+			&& std::strcmp(action, "resolve_expired_choices") == 0)
+		{
+			uint32_t resolved_count = 0U;
+			bool replayed = false;
+			if (this->card_expiry_handler_ == nullptr)
+				result = FT_ERR_INVALID_OPERATION;
+			else
+			{
+				result = this->card_expiry_handler_(actor_id, loom_id,
+					request_id, &resolved_count, &replayed,
+					this->card_expiry_handler_user_data_);
+				if (result == FT_ERR_SUCCESS && resolved_count > 4096U)
+					result = FT_ERR_INVALID_STATE;
+				if (result == FT_ERR_SUCCESS)
+				{
+					cached_request->second.has_card_expiry_result = true;
+					cached_request->second.card_expiry_resolved_count =
+						resolved_count;
+					cached_request->second.card_expiry_replayed = replayed;
+				}
+			}
+		}
+		else if (result == FT_ERR_SUCCESS)
+		{
+			json_item *choice_id_item = json_find_item(revision, "choice_id");
+			json_item *option_id_item = json_find_item(revision, "option_id");
+			uint64_t choice_id = 0U;
+			uint64_t option_id = 0U;
+			RegenerationCardActionResult card_result = {};
+			if (this->card_choice_handler_ == nullptr)
+				result = FT_ERR_INVALID_OPERATION;
+			else if (choice_id_item == nullptr || option_id_item == nullptr
+				|| world_revision_parse_u64(choice_id_item->value,
+					&choice_id) != FT_ERR_SUCCESS
+				|| world_revision_parse_u64(option_id_item->value,
+					&option_id) != FT_ERR_SUCCESS
+				|| choice_id == 0U || choice_id > UINT32_MAX
+				|| option_id == 0U || option_id > UINT32_MAX)
+				result = FT_ERR_INVALID_ARGUMENT;
+			else
+			{
+				result = this->card_choice_handler_(actor_id, loom_id,
+					request_id, static_cast<uint32_t>(choice_id),
+					static_cast<uint32_t>(option_id), &card_result,
+					this->card_choice_handler_user_data_);
+				if (result == FT_ERR_SUCCESS
+					&& (card_result.request_id != request_id
+						|| card_result.count != 1U
+						|| card_result.command_sequence == 0U))
+					result = FT_ERR_INVALID_STATE;
+				if (result == FT_ERR_SUCCESS)
+				{
+					cached_request->second.has_card_choice_result = true;
+					cached_request->second.card_choice_result = card_result;
+				}
+			}
+		}
+	}
 	else if (this->draft_start_committed_)
 		result = FT_ERR_INVALID_OPERATION;
 	else if (std::strcmp(action, "select") == 0
 		|| std::strcmp(action, "unselect") == 0
-		|| std::strcmp(action, "protect") == 0)
+		|| std::strcmp(action, "protect") == 0
+		|| std::strcmp(action, "unprotect") == 0)
 	{
 		result = this->authorize_station_access(actor_id, loom_id, message);
 		if (result == FT_ERR_SUCCESS)
@@ -1504,9 +2722,9 @@ int32_t WorldRevisionServer::handle_revision_message(const char *message,
 			result = this->world_->cancel_world_revision();
 		if (result == FT_ERR_SUCCESS)
 		{
-			this->draft_owned_ = false;
-			this->draft_actor_id_ = 0U;
-			this->draft_loom_id_ = 0U;
+			/* Retain the terminal owner so an authenticated reconnect can query
+			 * NO_DRAFT status. A later successful begin replaces this identity. */
+			this->draft_owned_ = true;
 			this->draft_start_committed_ = false;
 		}
 	}
@@ -1542,6 +2760,26 @@ int32_t WorldRevisionServer::handle_revision_message(const char *message,
 				this->start_committer_user_data_);
 		if (result == FT_ERR_SUCCESS)
 			this->draft_start_committed_ = true;
+	}
+	if (std::strcmp(action, "resolve_expired_choices") == 0
+		&& result == FT_ERR_INVALID_OPERATION)
+	{
+		/* An early timeout poll must not consume its request ID; the exact same
+		 * request can be retried when the host clock reaches a deadline. */
+		this->request_cache_.erase(cached_request);
+		json_free_groups(groups);
+		return (result);
+	}
+	if (std::strcmp(action, "confirm") == 0
+		&& (result == FT_ERR_IO || result == FT_ERR_NO_MEMORY))
+	{
+		/* A transient failure from the host start transaction must not consume
+		 * this request ID when the prepared checkpoint was not committed. The
+		 * GameSession callback restores its journal to the pre-request snapshot
+		 * on that boundary, so an exact retry can safely attempt preparation. */
+		this->request_cache_.erase(cached_request);
+		json_free_groups(groups);
+		return (result);
 	}
 	cached_request->second.result = result;
 	cached_request->second.completed = true;

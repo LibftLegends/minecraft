@@ -253,6 +253,25 @@ int32_t GameTransactionJournal::mark_aborted(uint64_t scope_id,
 	return (FT_ERR_NOT_FOUND);
 }
 
+int32_t GameTransactionJournal::retry_aborted(uint64_t scope_id,
+	uint64_t request_id) noexcept
+{
+	if (!this->initialized_)
+		return (FT_ERR_INVALID_OPERATION);
+	if (scope_id == 0U || request_id == 0U)
+		return (FT_ERR_INVALID_ARGUMENT);
+	for (Record &record : this->records_)
+	{
+		if (record.scope_id != scope_id || record.request_id != request_id)
+			continue ;
+		if (record.state != ABORTED)
+			return (FT_ERR_INVALID_OPERATION);
+		record.state = PREPARED;
+		return (FT_ERR_SUCCESS);
+	}
+	return (FT_ERR_NOT_FOUND);
+}
+
 int32_t GameTransactionJournal::find(uint64_t scope_id,
 	uint64_t request_id, Record *record_out) const noexcept
 {

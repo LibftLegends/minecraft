@@ -134,9 +134,30 @@ int32_t WorldEditHistory::apply(World &world, const Record &entry,
 		entry.edit.world_y, local_z, block_id_to_write);
 	if (error_code != FT_ERR_SUCCESS)
 	{
-		(void)wc->chunk.write_block(local_x, entry.edit.world_y, local_z,
-			previous_block_id);
-		return (error_code);
+		if (wc->chunk.write_block(local_x, entry.edit.world_y, local_z,
+				previous_block_id) != FT_ERR_SUCCESS)
+			return (FT_ERR_INVALID_STATE);
+		wc->mark_content_changed();
+		return (wc->publish_read_state_after_block_edit(local_x,
+			entry.edit.world_y, local_z, previous_block_id)
+			== FT_ERR_SUCCESS ? error_code : FT_ERR_INVALID_STATE);
+	}
+	if (world.terrain_chunk_store().is_initialized())
+	{
+		error_code = world.terrain_chunk_store().save_chunk(chunk_x, chunk_z,
+			wc->chunk);
+		if (error_code != FT_ERR_SUCCESS)
+		{
+			if (wc->chunk.write_block(local_x, entry.edit.world_y, local_z,
+					previous_block_id) != FT_ERR_SUCCESS)
+				return (FT_ERR_INVALID_STATE);
+			wc->mark_content_changed();
+			if (wc->publish_read_state_after_block_edit(local_x,
+					entry.edit.world_y, local_z, previous_block_id)
+				!= FT_ERR_SUCCESS)
+				return (FT_ERR_INVALID_STATE);
+			return (error_code);
+	}
 	}
 	world.fluid_cell_overrides_.swap(staged_overrides);
 	world.mark_geometry_changed();

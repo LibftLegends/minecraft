@@ -45,6 +45,12 @@ int32_t BlockInteractor::try_delete_target_block(World *world,
 	if (world->raycast_solid(camera.x, camera.y, camera.z, dx, dy, dz, 10.0,
 			&bx, &by, &bz) != FT_ERR_SUCCESS)
 		return (FT_ERR_SUCCESS);
+	const int32_t chunk_x = WorldCoordinates::floor_divide(bx,
+		GAME_VOXEL_CHUNK_WIDTH);
+	const int32_t chunk_z = WorldCoordinates::floor_divide(bz,
+		GAME_VOXEL_CHUNK_DEPTH);
+	if (world->revision_barrier_blocks_chunk(chunk_x, chunk_z))
+		return (FT_ERR_PERMISSION_DENIED);
 	DeleteBlockCommand cmd(bx, by, bz);
 	return (cmd.execute(*world));
 }
@@ -113,6 +119,12 @@ int32_t BlockInteractor::try_delete_target_block(World *world,
 			10.0, &bx, &by, &bz, &place_x, &place_y, &place_z,
 			&hit_block_id) != FT_ERR_SUCCESS)
 		return (FT_ERR_SUCCESS);
+	const int32_t chunk_x = WorldCoordinates::floor_divide(bx,
+		GAME_VOXEL_CHUNK_WIDTH);
+	const int32_t chunk_z = WorldCoordinates::floor_divide(bz,
+		GAME_VOXEL_CHUNK_DEPTH);
+	if (world->revision_barrier_blocks_chunk(chunk_x, chunk_z))
+		return (FT_ERR_PERMISSION_DENIED);
 	if (!world->block_id_at(bx, by, bz, &block_id)
 		|| voxel_block_is_breakable(block_id) == FT_FALSE)
 		return (FT_ERR_SUCCESS);
@@ -286,6 +298,17 @@ int32_t BlockInteractor::try_pick_target_block(const World *world,
 	if (world->raycast_edit_target(camera.x, camera.y, camera.z, dx, dy, dz,
 			10.0, &hx, &hy, &hz, &px, &py, &pz, &hit_id) != FT_ERR_SUCCESS)
 		return (FT_ERR_SUCCESS);
+	const int32_t hit_chunk_x = WorldCoordinates::floor_divide(hx,
+		GAME_VOXEL_CHUNK_WIDTH);
+	const int32_t hit_chunk_z = WorldCoordinates::floor_divide(hz,
+		GAME_VOXEL_CHUNK_DEPTH);
+	const int32_t place_chunk_x = WorldCoordinates::floor_divide(px,
+		GAME_VOXEL_CHUNK_WIDTH);
+	const int32_t place_chunk_z = WorldCoordinates::floor_divide(pz,
+		GAME_VOXEL_CHUNK_DEPTH);
+	if (world->revision_barrier_blocks_chunk(hit_chunk_x, hit_chunk_z)
+		|| world->revision_barrier_blocks_chunk(place_chunk_x, place_chunk_z))
+		return (FT_ERR_PERMISSION_DENIED);
 	if (hit_id != GAME_VOXEL_AIR_BLOCK
 		&& voxel_block_is_known(hit_id) == FT_TRUE
 		&& voxel_block_is_breakable(hit_id) == FT_TRUE)
@@ -309,6 +332,12 @@ int32_t BlockInteractor::try_place_selected_block(World *world,
 	if (world->raycast_edit_target(camera.x, camera.y, camera.z, dx, dy, dz,
 			10.0, &hx, &hy, &hz, &px, &py, &pz, &hit_id) != FT_ERR_SUCCESS)
 		return (FT_ERR_SUCCESS);
+	const int32_t chunk_x = WorldCoordinates::floor_divide(px,
+		GAME_VOXEL_CHUNK_WIDTH);
+	const int32_t chunk_z = WorldCoordinates::floor_divide(pz,
+		GAME_VOXEL_CHUNK_DEPTH);
+	if (world->revision_barrier_blocks_chunk(chunk_x, chunk_z))
+		return (FT_ERR_PERMISSION_DENIED);
 	if (PlayerController::block_overlaps_player(camera, px, py, pz))
 		return (FT_ERR_SUCCESS);
 	PlaceBlockCommand cmd(px, py, pz, selected_block_id);

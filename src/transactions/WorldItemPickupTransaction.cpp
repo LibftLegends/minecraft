@@ -179,6 +179,7 @@ int32_t WorldItemPickupTransaction::prepare(const char *snapshot_path,
 	const GameSessionSnapshotWriter *snapshot_writer) noexcept
 {
 	std::vector<uint8_t> payload;
+	std::vector<uint8_t> journal_before;
 	uint64_t x_bits;
 	uint64_t y_bits;
 	uint64_t z_bits;
@@ -220,6 +221,9 @@ int32_t WorldItemPickupTransaction::prepare(const char *snapshot_path,
 	}
 	if (payload.size() != WORLD_ITEM_PICKUP_PAYLOAD_SIZE)
 		return (FT_ERR_INVALID_STATE);
+	error_code = journal.serialize(journal_before);
+	if (error_code != FT_ERR_SUCCESS)
+		return (error_code);
 	error_code = journal.prepare(WORLD_ITEM_PICKUP_SCOPE, request_id,
 		WORLD_ITEM_PICKUP_TYPE, payload.data(),
 		static_cast<uint32_t>(payload.size()), &sequence, &replayed);
@@ -232,7 +236,12 @@ int32_t WorldItemPickupTransaction::prepare(const char *snapshot_path,
 		error_code = GameSessionPersistence::save_file(snapshot_path, character,
 			world_items, recipe_catalog, journal);
 	if (error_code != FT_ERR_SUCCESS)
-		(void)journal.mark_aborted(WORLD_ITEM_PICKUP_SCOPE, request_id);
+	{
+		const int32_t rollback_result = journal.deserialize(
+			journal_before.data(), journal_before.size());
+		if (rollback_result != FT_ERR_SUCCESS)
+			return (FT_ERR_INVALID_STATE);
+	}
 	return (error_code);
 }
 
@@ -277,8 +286,9 @@ int32_t WorldItemPickupTransaction::execute(const char *snapshot_path,
 		return (WorldItemPickupTransaction::apply_prepared(snapshot_path,
 			character, world_items, recipe_catalog, journal, record, result_out,
 			snapshot_writer));
-	if (record.state != GameTransactionJournal::COMMITTED
-		&& record.state != GameTransactionJournal::ABORTED)
+	if (record.state == GameTransactionJournal::ABORTED)
+		return (FT_ERR_INVALID_OPERATION);
+	if (record.state != GameTransactionJournal::COMMITTED)
 		return (FT_ERR_INVALID_STATE);
 	return (world_items.pickup(item.entity_id, item.entity_revision, actor_id,
 		request_id, expected_inventory_revision, item.quantity, actor_x, actor_y,

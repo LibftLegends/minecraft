@@ -3,6 +3,7 @@
 
 # include "../../Libft/Modules/Game/game_server.hpp"
 # include "../../src/world/World.hpp"
+# include "../cards/RegenerationCardSession.hpp"
 # include "../ft_vox.hpp"
 # include <cstddef>
 # include <cstdint>
@@ -10,6 +11,8 @@
 # include <string>
 # include <tuple>
 # include <vector>
+
+enum { WORLD_REVISION_OCCUPANCY_MAX_AGE_MS = 1000U };
 
 typedef int32_t (*WorldRevisionServerAuthorizer)(int32_t client_handle,
 	const char *message, uint64_t *actor_id_out, uint64_t *loom_id_out,
@@ -22,8 +25,20 @@ typedef int32_t (*WorldRevisionServerStationAccessAuthorizer)(
 	int32_t station_chunk_z, bool has_station_block, int32_t station_block_x,
 	int32_t station_block_y, int32_t station_block_z,
 	uint32_t station_block_id, const char *request_message, void *user_data);
+struct WorldRevisionOccupancySample
+{
+	/* One entry per active player. Keep duplicate chunk coordinates when
+	 * players share a chunk; the revision manager performs spatial dedupe. */
+	std::vector<World::RevisionChunkCoordinate> player_chunks;
+	/* Stable authenticated identities parallel to the active-player list. */
+	std::vector<uint64_t> player_actor_ids;
+	uint32_t active_player_count;
+	/* Must use the same restart-stable epoch as the GameSession clock. */
+	uint64_t sampled_epoch_ms;
+};
 typedef int32_t (*WorldRevisionServerOccupancyProvider)(
-	std::vector<World::RevisionChunkCoordinate> &occupied_chunks_out,
+	WorldRevisionOccupancySample &sample_out, void *user_data);
+typedef int32_t (*WorldRevisionServerEpochProvider)(uint64_t *epoch_ms_out,
 	void *user_data);
 typedef int32_t (*WorldRevisionServerResponseSender)(int32_t client_handle,
 	const char *message, void *user_data);
@@ -32,8 +47,54 @@ typedef int32_t (*WorldRevisionServerStartCommitter)(uint64_t actor_id,
 	uint64_t expected_selection_revision,
 	uint64_t expected_policy_revision, uint32_t opening_card_count,
 	void *user_data);
+struct WorldRevisionStartPolicyStatus
+{
+	uint32_t mode; /* 0 legacy/unknown, 1 solo, 2 multiplayer */
+	uint32_t active_player_count;
+	uint64_t decision_timeout_ms;
+	uint32_t currency_item_id;
+	uint64_t committed_currency_amount;
+	uint32_t selected_paid_chunks;
+	uint32_t selected_bonus_chunks;
+	uint32_t settlement_policy; /* 0 legacy/unknown, 1 retain after commit */
+	uint32_t revision_identifier;
+	uint32_t card_content_version;
+	uint64_t generation_manifest_hash;
+	uint64_t trusted_script_manifest_hash;
+	std::vector<uint64_t> participant_actor_ids;
+};
+enum
+{
+	WORLD_REVISION_SETTLEMENT_UNKNOWN = 0U,
+	WORLD_REVISION_SETTLEMENT_RETAIN_COMMITTED_COST = 1U
+};
+typedef int32_t (*WorldRevisionServerStartPolicyQuery)(
+	uint64_t actor_id, uint64_t loom_id,
+	WorldRevisionStartPolicyStatus &status_out, void *user_data);
 typedef int32_t (*WorldRevisionServerCheckpointCommitter)(
 	const uint8_t *checkpoint_bytes, std::size_t checkpoint_byte_count,
+	void *user_data);
+typedef int32_t (*WorldRevisionServerCardPlayHandler)(uint64_t actor_id,
+	uint64_t loom_id, uint64_t request_id, uint32_t card_instance_id,
+	const RegenerationCardChoice &choice, RegenerationPolicyIntent *intent_out,
+	void *user_data);
+typedef int32_t (*WorldRevisionServerCardDiscardHandler)(uint64_t actor_id,
+	uint64_t loom_id, uint64_t request_id, uint64_t source_draw_request_id,
+	uint32_t card_instance_id, RegenerationCardActionResult *result_out,
+	void *user_data);
+typedef int32_t (*WorldRevisionServerCardDrawHandler)(uint64_t actor_id,
+	uint64_t loom_id, uint64_t request_id,
+	uint64_t source_host_intent_sequence, uint32_t draw_count,
+	uint32_t required_discard_count,
+	RegenerationCardActionResult *result_out, void *user_data);
+typedef int32_t (*WorldRevisionServerCardExpiryHandler)(uint64_t actor_id,
+	uint64_t loom_id, uint64_t request_id, uint32_t *resolved_count_out,
+	bool *replayed_out, void *user_data);
+typedef int32_t (*WorldRevisionServerCardHandQuery)(uint64_t actor_id,
+	uint64_t loom_id, RegenerationCardHandView &view_out, void *user_data);
+typedef int32_t (*WorldRevisionServerCardChoiceHandler)(uint64_t actor_id,
+	uint64_t loom_id, uint64_t request_id, uint32_t choice_id,
+	uint32_t option_id, RegenerationCardActionResult *result_out,
 	void *user_data);
 
 class WorldRevisionServer
@@ -45,6 +106,26 @@ class WorldRevisionServer
 	~WorldRevisionServer();
 	WorldRevisionServer &operator=(const WorldRevisionServer &other);
 
+	/* The wire handler accepts a JSON `world_revision` object with
+	 * `protocol_version: 1`; messages are capped at 4096 bytes. Every response
+	 * envelope includes protocol_version 1. The authenticated read-only `status`
+	 * action includes logical lifecycle state and permitted actions, the
+	 * persisted start policy and participant actor IDs when available, and each
+	 * selected chunk's state and
+	 * publication status plus
+	 * completed/total jobs, regenerated/skipped chunk counts, and the current
+	 * regeneration error code. The authenticated `preview` query accepts a
+	 * center chunk and radius up to eight, refreshes occupancy, and reports the
+	 * state and protection reasons for every chunk in the bounded circle.
+	 * Draft actions include `protect` and `unprotect`, both compare-and-set
+	 * against the current selection revision. After start, owner-bound
+	 * `card_hand`, `play_card`, `choose_card_option`, `draw_cards`,
+	 * `discard_card`, and `resolve_expired_choices`
+	 * requests run after start and bind to the draft owner. Expiry uses the
+	 * GameSession host clock and accepts only due choices. The server caches
+	 * exact results in its checkpoint and omits
+	 * private card-result fields from responses. Unsupported versions fail
+	 * closed. */
 	int32_t set_authorizer(WorldRevisionServerAuthorizer authorizer,
 		void *user_data) noexcept;
 	/* Instability views fail closed until the host applies its exploration and
@@ -58,19 +139,46 @@ class WorldRevisionServer
 	int32_t set_station_access_authorizer(
 		WorldRevisionServerStationAccessAuthorizer authorizer,
 		void *user_data) noexcept;
-	/* Multiplayer selection fails closed until all active player chunks are
-	 * supplied and refreshed before selection, quote, and start actions. */
+	/* Multiplayer selection fails closed until a complete, timestamped sample
+	 * with unique nonzero actor IDs is supplied before selection, quote, and
+	 * start actions. Through the
+	 * GameSession binding, samples are checked against its authoritative host
+	 * clock; direct hosts must install the matching epoch provider as well. */
 	int32_t set_occupancy_provider(
 		WorldRevisionServerOccupancyProvider provider,
 		void *user_data) noexcept;
-	/* Confirm must pass through the host that coordinates resources, cards and
-	 * world revisions. The world network adapter never starts generation alone. */
+	/* Required authoritative time source in the sample's epoch domain. */
+	int32_t set_epoch_provider(WorldRevisionServerEpochProvider provider,
+		void *user_data) noexcept;
+	/* Required before initialization. Confirm must pass through the host that
+	 * coordinates resources, cards and world revisions. */
 	int32_t set_start_committer(
 		WorldRevisionServerStartCommitter committer,
 		void *user_data) noexcept;
-	/* Persists completed request/draft state through the host before replying. */
+	/* Optional actor/Loom-scoped durable policy source for owner-only status. */
+	int32_t set_start_policy_query(
+		WorldRevisionServerStartPolicyQuery query,
+		void *user_data) noexcept;
+	/* Required before initialization. Persists request/draft state through the
+	 * host before replying. */
 	int32_t set_checkpoint_committer(
 		WorldRevisionServerCheckpointCommitter committer,
+		void *user_data) noexcept;
+	/* Routes an owner-authenticated CardGame play through GameSession. Wire
+	 * results redact private_result and private_ordinal. */
+	int32_t set_card_play_handler(WorldRevisionServerCardPlayHandler handler,
+		void *user_data) noexcept;
+	int32_t set_card_discard_handler(
+		WorldRevisionServerCardDiscardHandler handler,
+		void *user_data) noexcept;
+	int32_t set_card_draw_handler(WorldRevisionServerCardDrawHandler handler,
+		void *user_data) noexcept;
+	int32_t set_card_expiry_handler(
+		WorldRevisionServerCardExpiryHandler handler, void *user_data) noexcept;
+	int32_t set_card_hand_query(WorldRevisionServerCardHandQuery query,
+		void *user_data) noexcept;
+	int32_t set_card_choice_handler(
+		WorldRevisionServerCardChoiceHandler handler,
 		void *user_data) noexcept;
 	/* Owner-bound read-only quote. Reusing an ID with changed revisions/count is
 	 * rejected; exact retries return the original quote or error. */
@@ -113,6 +221,17 @@ class WorldRevisionServer
 		uint64_t selection_revision;
 		uint64_t cost_policy_revision;
 		uint32_t selected_count;
+		bool has_card_play_result;
+		RegenerationPolicyIntent card_play_result;
+		bool has_card_discard_result;
+		RegenerationCardActionResult card_discard_result;
+		bool has_card_draw_result;
+		RegenerationCardActionResult card_draw_result;
+		bool has_card_expiry_result;
+		uint32_t card_expiry_resolved_count;
+		bool card_expiry_replayed;
+		bool has_card_choice_result;
+		RegenerationCardActionResult card_choice_result;
 	};
 	static const std::size_t REQUEST_CACHE_LIMIT = 4096U;
 	World *world_;
@@ -126,10 +245,26 @@ class WorldRevisionServer
 	void *station_access_authorizer_user_data_;
 	WorldRevisionServerOccupancyProvider occupancy_provider_;
 	void *occupancy_provider_user_data_;
+	WorldRevisionServerEpochProvider epoch_provider_;
+	void *epoch_provider_user_data_;
 	WorldRevisionServerStartCommitter start_committer_;
 	void *start_committer_user_data_;
+	WorldRevisionServerStartPolicyQuery start_policy_query_;
+	void *start_policy_query_user_data_;
 	WorldRevisionServerCheckpointCommitter checkpoint_committer_;
 	void *checkpoint_committer_user_data_;
+	WorldRevisionServerCardPlayHandler card_play_handler_;
+	void *card_play_handler_user_data_;
+	WorldRevisionServerCardDiscardHandler card_discard_handler_;
+	void *card_discard_handler_user_data_;
+	WorldRevisionServerCardDrawHandler card_draw_handler_;
+	void *card_draw_handler_user_data_;
+	WorldRevisionServerCardExpiryHandler card_expiry_handler_;
+	void *card_expiry_handler_user_data_;
+	WorldRevisionServerCardHandQuery card_hand_query_;
+	void *card_hand_query_user_data_;
+	WorldRevisionServerCardChoiceHandler card_choice_handler_;
+	void *card_choice_handler_user_data_;
 	WorldRevisionServerResponseSender response_sender_;
 	void *response_sender_user_data_;
 	uint64_t draft_actor_id_;
@@ -147,9 +282,15 @@ class WorldRevisionServer
 		uint64_t loom_id);
 	int32_t handle_quote_message(int32_t client_handle, const char *message,
 		json_group *revision, uint64_t actor_id, uint64_t loom_id);
+	int32_t handle_status_message(int32_t client_handle, json_group *revision,
+		uint64_t actor_id, uint64_t loom_id);
+	int32_t handle_preview_message(int32_t client_handle, const char *message,
+		json_group *revision, uint64_t actor_id, uint64_t loom_id);
 	int32_t handle_instability_view_message(int32_t client_handle,
 		const char *message, json_group *revision, uint64_t actor_id,
 		uint64_t loom_id);
+	int32_t handle_card_hand_message(int32_t client_handle, const char *message,
+		json_group *revision, uint64_t actor_id, uint64_t loom_id);
 	int32_t send_action_response(int32_t client_handle, const char *message,
 		uint64_t actor_id, uint64_t loom_id, uint64_t request_id,
 		int32_t result);
