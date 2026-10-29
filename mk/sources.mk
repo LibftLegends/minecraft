@@ -4,6 +4,21 @@ SRC = \
     src/app/ApplicationBootstrap.cpp \
     src/app/ApplicationPhaseController.cpp \
     src/app/GameSession.cpp \
+    src/app/GameSessionPersistence.cpp \
+    src/app/GameSessionEntityState.cpp \
+    src/transactions/GameTransactionJournal.cpp \
+    src/transactions/WorldItemPickupTransaction.cpp \
+    src/transactions/WorldItemCraftTransaction.cpp \
+    src/transactions/WorldItemProcessingTransaction.cpp \
+    src/transactions/WorldItemProcessingAdvanceTransaction.cpp \
+    src/transactions/WorldItemCardTransferTransaction.cpp \
+    src/transactions/WorldBoatTransferTransaction.cpp \
+    src/transactions/WorldFarmlandTransaction.cpp \
+    src/transactions/WorldBlockMiningTransaction.cpp \
+    src/transactions/WorldEquipmentRepairTransaction.cpp \
+    src/transactions/WorldEquipmentLoadoutTransaction.cpp \
+	src/transactions/WorldProjectileLaunchTransaction.cpp \
+    src/transactions/RecipeDiscoveryTransaction.cpp \
     src/app/GameSessionDebugInfo.cpp \
     src/app/PerfSession.cpp \
     src/config/ApplicationOptions.cpp \
@@ -17,6 +32,8 @@ SRC = \
     src/diagnostics/DebugCrashHandler.cpp \
     src/diagnostics/FramebufferHasher.cpp \
     src/diagnostics/SystemMemoryInfo.cpp \
+    src/diagnostics/RuntimeAnalytics.cpp \
+    src/diagnostics/BlockEditWorkloadAnalytics.cpp \
     src/camera/CameraInput.cpp \
     src/camera/Camera.cpp \
     src/player/PlayerController.cpp \
@@ -26,18 +43,33 @@ SRC = \
     src/physics/PlayerCollision.cpp \
     src/spawn/PlayerSpawner.cpp \
     src/interaction/BlockInteractor.cpp \
+    src/cards/RegenerationCardSession.cpp \
+    src/cards/RegenerationCardSessionPersistence.cpp \
+    src/cards/RegenerationWorldRules.cpp \
+    src/inventory/MinecraftItemCatalog.cpp \
+    src/inventory/MinecraftLootCatalog.cpp \
+    src/crafting/MinecraftRecipeCatalog.cpp \
     src/validators/IValidator.cpp \
     src/validators/ApplicationValidator.cpp \
     src/validators/CameraSpeedValidator.cpp \
     src/validators/CollisionValidator.cpp \
     src/validators/CollisionTerrainScenarios.cpp \
     src/validators/BlockEditValidator.cpp \
+    src/validators/BlockEditPerformanceValidator.cpp \
+	src/validators/CameraInteractionValidator.cpp \
+    src/validators/RendererPublicationValidator.cpp \
+    src/validators/LightingTestHarness.cpp \
     src/validators/WorldVisibilityValidator.cpp \
     src/validators/TerrainDeterminismValidator.cpp \
     src/validators/TerrainCaveValidator.cpp \
     src/validators/TerrainConfigValidator.cpp \
     src/validators/WorldRevisionValidator.cpp \
+    src/validators/ItemCatalogValidator.cpp \
+    src/validators/WorldItemStoreValidator.cpp \
+    src/validators/GameTransactionJournalValidator.cpp \
+    src/validators/RegenerationCardValidator.cpp \
     src/validators/WorldAsyncGenerationValidator.cpp \
+    src/validators/WorldReplicationValidator.cpp \
     src/validators/WorldScaleValidator.cpp \
     src/policy/RenderDistanceStrategy.cpp \
     src/policy/AdaptiveRenderStrategy.cpp \
@@ -65,6 +97,9 @@ SRC = \
     src/meshes/PerspectiveTriangleRasterizer.cpp \
     src/meshes/ChunkMeshRenderer.cpp \
     src/world/World.cpp \
+    src/world/WorldChunkInstabilityFacade.cpp \
+    src/world/WorldChunkInstabilityStore.cpp \
+    src/world/WorldTerrainChunkStore.cpp \
     src/world/WorldStreamingFacade.cpp \
     src/world/WorldRevisionFacade.cpp \
     src/world/WorldGenerationPipeline.cpp \
@@ -87,6 +122,7 @@ SRC = \
     src/world/WorldRevisionMetadataStore.cpp \
     src/world/WorldRevisionChunkSet.cpp \
     src/world/WorldRevisionServer.cpp \
+    src/world/WorldSaveCatalog.cpp \
     src/coordinates/WorldCoordinates.cpp \
     src/chunks/WorldChunk.cpp \
     src/chunks/WorldChunkStore.cpp \
@@ -100,13 +136,45 @@ SRC = \
     src/edits/WorldBlockEditor.cpp \
     src/edits/WorldEditHistory.cpp \
     src/entities/EntityState.cpp \
+    src/entities/WorldEntityStore.cpp \
+	src/entities/WorldAnimalSimulation.cpp \
+	src/entities/WorldProjectileSimulation.cpp \
+	src/entities/WorldSpawnerStore.cpp \
+    src/entities/WorldItemStore.cpp \
     src/network/ProtocolMessageHeader.cpp \
     src/network/ProtocolJoinMessage.cpp \
     src/network/ProtocolLeaveMessage.cpp \
     src/network/ProtocolChunkRequestMessage.cpp \
+    src/network/ProtocolChunkSyncRequestMessage.cpp \
     src/network/ProtocolChunkResponseMessage.cpp \
+    src/network/ProtocolChunkBlockDeltaMessage.cpp \
+    src/network/ProtocolChunkAcknowledgementMessage.cpp \
+    src/network/ProtocolChunkInterestMessage.cpp \
+    src/network/ProtocolChunkHashManifestMessage.cpp \
+    src/network/ProtocolChunkRepairRequestMessage.cpp \
+    src/network/ProtocolChunkRepairResponseMessage.cpp \
+    src/network/ProtocolChunkLightDeltaMessage.cpp \
+    src/network/ProtocolChunkSnapshotMessage.cpp \
     src/network/ProtocolEditBroadcastMessage.cpp \
+    src/network/ProtocolEditIntentMessage.cpp \
+    src/network/ProtocolEditResultMessage.cpp \
+    src/network/WorldReplicationService.cpp \
+    src/network/WorldReplicationClient.cpp \
+    src/network/WorldReplicationBlockReplica.cpp \
+    src/network/WorldReplicationReplicaStore.cpp \
+    src/network/WorldReplicationServerSession.cpp \
+    src/network/WorldReplicationServer.cpp \
+    src/network/WorldReplicationDeltaJournal.cpp \
+    src/network/WorldReplicationLightJournal.cpp \
+    src/network/WorldReplicationTransportPump.cpp \
+    src/network/WorldReplicationServerRuntime.cpp \
+    src/network/WorldReplicationClientRuntime.cpp \
+    src/network/WorldReplicationCursorStore.cpp \
     src/network/ProtocolEntityUpdateMessage.cpp \
+    src/network/ProtocolBoatMoveIntentMessage.cpp \
+    src/network/ProtocolBoatMoveResultMessage.cpp \
+    src/network/ProtocolWorldItemSnapshotMessage.cpp \
+    src/network/WorldItemReplicaStore.cpp \
     src/network/ProtocolChatMessage.cpp \
     src/network/ProtocolPingMessage.cpp \
     src/network/ProtocolPongMessage.cpp \

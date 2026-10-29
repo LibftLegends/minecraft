@@ -1,18 +1,30 @@
 #include "../../src/gpur/GpuWorldRenderer.hpp"
+#include "../../src/diagnostics/RuntimeAnalytics.hpp"
+#include <cstdio>
 
 GpuWorldRenderer::GpuWorldRenderer() : _sky_vao(0), _crosshair_vao(0),
-	_crosshair_vbo(0), _width(0), _height(0), _u_mvp(-1), _u_chunk_offset(-1),
+	_crosshair_vbo(0), _shadow_vao(0), _shadow_vbo(0), _barrier_vao(0),
+	_barrier_vbo(0), _width(0), _height(0), _u_mvp(-1), _u_chunk_offset(-1),
 	_u_atlas(-1), _u_atlas_loaded(-1), _u_tile_uvs(-1), _u_fallback(-1),
-	_u_sky_size(-1), _u_crosshair_color(-1)
+	_u_sky_darkening(-1),
+	_u_sky_size(-1), _u_crosshair_color(-1), _u_shadow_mvp(-1),
+	_u_shadow_center(-1), _u_shadow_radius(-1), _u_shadow_y(-1),
+	_u_shadow_alpha(-1), _u_barrier_mvp(-1),
+	_barrier_selection_revision(0U), _barrier_geometry_valid(false)
 {
 	std::memset(_tile_uvs, 0, sizeof(_tile_uvs));
 	std::memset(_fallback_colors, 0, sizeof(_fallback_colors));
 }
 
 GpuWorldRenderer::GpuWorldRenderer(const GpuWorldRenderer &other) : _sky_vao(0),
-	_crosshair_vao(0), _crosshair_vbo(0), _width(0), _height(0), _u_mvp(-1),
+	_crosshair_vao(0), _crosshair_vbo(0), _shadow_vao(0), _shadow_vbo(0),
+	_barrier_vao(0), _barrier_vbo(0), _width(0), _height(0), _u_mvp(-1),
 	_u_chunk_offset(-1), _u_atlas(-1), _u_atlas_loaded(-1), _u_tile_uvs(-1),
-	_u_fallback(-1), _u_sky_size(-1), _u_crosshair_color(-1)
+	_u_fallback(-1), _u_sky_darkening(-1), _u_sky_size(-1),
+	_u_crosshair_color(-1), _u_shadow_mvp(-1), _u_shadow_center(-1),
+	_u_shadow_radius(-1), _u_shadow_y(-1), _u_shadow_alpha(-1),
+	_u_barrier_mvp(-1), _barrier_selection_revision(0U),
+	_barrier_geometry_valid(false)
 {
 	(void)other;
 	std::memset(_tile_uvs, 0, sizeof(_tile_uvs));
@@ -48,6 +60,10 @@ bool GpuWorldRenderer::compile_shaders(const std::string &d)
 	const std::string sky_frag = d + "sky.frag.glsl";
 	const std::string cross_vert = d + "overlay.vert.glsl";
 	const std::string cross_frag = d + "overlay.frag.glsl";
+	const std::string shadow_vert = d + "shadow.vert.glsl";
+	const std::string shadow_frag = d + "shadow.frag.glsl";
+	const std::string barrier_vert = d + "barrier.vert.glsl";
+	const std::string barrier_frag = d + "barrier.frag.glsl";
 	if (!compile_shader_from_file(_world_shader, world_vert.c_str(),
 			world_frag.c_str()))
 		return (false);
@@ -56,6 +72,12 @@ bool GpuWorldRenderer::compile_shaders(const std::string &d)
 		return (false);
 	if (!compile_shader_from_file(_crosshair_shader, cross_vert.c_str(),
 			cross_frag.c_str()))
+		return (false);
+	if (!compile_shader_from_file(_shadow_shader, shadow_vert.c_str(),
+			shadow_frag.c_str()))
+		return (false);
+	if (!compile_shader_from_file(_barrier_shader, barrier_vert.c_str(),
+			barrier_frag.c_str()))
 		return (false);
 	return (true);
 }
@@ -68,8 +90,15 @@ void GpuWorldRenderer::cache_uniforms()
 	_u_atlas_loaded = _world_shader.uniform("u_atlas_loaded");
 	_u_tile_uvs = _world_shader.uniform("u_tile_uvs");
 	_u_fallback = _world_shader.uniform("u_fallback_colors");
+	_u_sky_darkening = _world_shader.uniform("u_sky_darkening");
 	_u_sky_size = _sky_shader.uniform("u_sky_size");
 	_u_crosshair_color = _crosshair_shader.uniform("u_overlay_color");
+	_u_shadow_mvp = _shadow_shader.uniform("u_mvp");
+	_u_shadow_center = _shadow_shader.uniform("u_shadow_center");
+	_u_shadow_radius = _shadow_shader.uniform("u_shadow_radius");
+	_u_shadow_y = _shadow_shader.uniform("u_shadow_y");
+	_u_shadow_alpha = _shadow_shader.uniform("u_shadow_alpha");
+	_u_barrier_mvp = _barrier_shader.uniform("u_mvp");
 }
 
 void GpuWorldRenderer::upload_atlas_uniforms()
@@ -79,6 +108,7 @@ void GpuWorldRenderer::upload_atlas_uniforms()
 	glUniform1i(_u_atlas_loaded, _atlas.is_loaded() ? 1 : 0);
 	glUniform4fv(_u_tile_uvs, 384, _tile_uvs);
 	glUniform3fv(_u_fallback, 64, _fallback_colors);
+	glUniform1i(_u_sky_darkening, 0);
 }
 
 bool GpuWorldRenderer::initialize(int width, int height, GLuint sky_vao,
@@ -88,10 +118,31 @@ bool GpuWorldRenderer::initialize(int width, int height, GLuint sky_vao,
 	_sky_vao = sky_vao;
 	_crosshair_vao = crosshair_vao;
 	_crosshair_vbo = crosshair_vbo;
+	glGenVertexArrays(1, &_shadow_vao);
+	glGenBuffers(1, &_shadow_vbo);
+	glGenVertexArrays(1, &_barrier_vao);
+	glGenBuffers(1, &_barrier_vbo);
+	glBindVertexArray(_barrier_vao);
+	glBindBuffer(GL_ARRAY_BUFFER, _barrier_vbo);
+	glBufferData(GL_ARRAY_BUFFER, 0, nullptr, GL_DYNAMIC_DRAW);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE,
+		static_cast<GLsizei>(3U * sizeof(float)), nullptr);
+	glEnableVertexAttribArray(0);
+	glBindVertexArray(0);
+	const float shadow_vertices[] = {-1.0f, -1.0f, 1.0f, -1.0f,
+		1.0f, 1.0f, -1.0f, 1.0f};
+	glBindVertexArray(_shadow_vao);
+	glBindBuffer(GL_ARRAY_BUFFER, _shadow_vbo);
+	glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(sizeof(shadow_vertices)),
+		shadow_vertices, GL_STATIC_DRAW);
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE,
+		static_cast<GLsizei>(2 * sizeof(float)), nullptr);
+	glEnableVertexAttribArray(0);
+	glBindVertexArray(0);
 	if (!compile_shaders(shader_dir))
 		return (false);
 	cache_uniforms();
-	if (!_batch.initialize(0))
+	if (!_batch.initialize())
 		return (false);
 	const TextureAtlas &cpu_atlas = TextureAtlas::instance();
 	_atlas.upload(cpu_atlas);
@@ -115,6 +166,30 @@ void GpuWorldRenderer::destroy()
 	(void)_world_shader.destroy();
 	(void)_sky_shader.destroy();
 	(void)_crosshair_shader.destroy();
+	(void)_shadow_shader.destroy();
+	(void)_barrier_shader.destroy();
+	if (_shadow_vao != 0)
+	{
+		glDeleteVertexArrays(1, &_shadow_vao);
+		_shadow_vao = 0;
+	}
+	if (_shadow_vbo != 0)
+	{
+		glDeleteBuffers(1, &_shadow_vbo);
+		_shadow_vbo = 0;
+	}
+	if (_barrier_vao != 0)
+	{
+		glDeleteVertexArrays(1, &_barrier_vao);
+		_barrier_vao = 0;
+	}
+	if (_barrier_vbo != 0)
+	{
+		glDeleteBuffers(1, &_barrier_vbo);
+		_barrier_vbo = 0;
+	}
+	_barrier_vertices.clear();
+	_barrier_geometry_valid = false;
 }
 
 void GpuWorldRenderer::resize(int width, int height)
@@ -156,6 +231,13 @@ void GpuWorldRenderer::draw_sky() const
 
 void GpuWorldRenderer::draw_crosshair() const
 {
+	int32_t analytics_error;
+
+	analytics_error = RuntimeAnalytics::begin_scope(
+		RuntimeAnalyticsScope::GPU_DRAW_CROSSHAIR);
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: crosshair scope start failed (%d)\n",
+			analytics_error);
 	glBindVertexArray(_crosshair_vao);
 	const float color[4] = {0.96f, 0.96f, 0.92f, 1.0f};
 	_crosshair_shader.use();
@@ -164,22 +246,235 @@ void GpuWorldRenderer::draw_crosshair() const
 	glDrawArrays(GL_LINES, 0, 4);
 	glEnable(GL_DEPTH_TEST);
 	glBindVertexArray(0);
+	analytics_error = RuntimeAnalytics::end_scope();
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: crosshair scope end failed (%d)\n",
+			analytics_error);
+}
+
+static ft_bool gpu_shadow_solid_lookup(void *user_data, int32_t world_x,
+	int32_t world_y, int32_t world_z) noexcept
+{
+	const World *world = static_cast<const World *>(user_data);
+	if (world == nullptr)
+		return (FT_FALSE);
+	return (world->solid_block_at(world_x, world_y, world_z) ? FT_TRUE : FT_FALSE);
+}
+
+void GpuWorldRenderer::draw_player_shadow(const Camera &camera,
+	const World &world, const float *mvp)
+{
+	const double entity_bottom_y = camera.y - 1.5;
+	const int32_t world_x = static_cast<int32_t>(std::floor(camera.x));
+	const int32_t world_z = static_cast<int32_t>(std::floor(camera.z));
+	const int32_t start_y = static_cast<int32_t>(std::floor(entity_bottom_y));
+	int32_t receiver_y = 0;
+	if (voxel_shadow_find_receiver(world_x, start_y, world_z, 8,
+			gpu_shadow_solid_lookup, const_cast<World *>(&world), &receiver_y)
+		!= FT_ERR_SUCCESS)
+		return ;
+	const double alpha = voxel_shadow_height_fade(entity_bottom_y, receiver_y,
+		8.0) * 0.42;
+	if (alpha <= 0.0)
+		return ;
+	_shadow_shader.use();
+	glUniformMatrix4fv(_u_shadow_mvp, 1, GL_FALSE, mvp);
+	glUniform2f(_u_shadow_center, static_cast<float>(camera.x),
+		static_cast<float>(camera.z));
+	glUniform1f(_u_shadow_radius, 0.38f);
+	glUniform1f(_u_shadow_y, static_cast<float>(receiver_y + 1) + 0.012f);
+	glUniform1f(_u_shadow_alpha, static_cast<float>(alpha));
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glDisable(GL_CULL_FACE);
+	glBindVertexArray(_shadow_vao);
+	glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+	glBindVertexArray(0);
+	glEnable(GL_CULL_FACE);
+	glDisable(GL_BLEND);
+}
+
+static bool gpu_barrier_has_chunk(
+	const std::vector<World::RevisionChunkCoordinate> &chunks,
+	int32_t chunk_x, int32_t chunk_z)
+{
+	for (const World::RevisionChunkCoordinate &chunk : chunks)
+	{
+		if (chunk.chunk_x == chunk_x && chunk.chunk_z == chunk_z)
+			return (true);
+	}
+	return (false);
+}
+
+void GpuWorldRenderer::draw_revision_barriers(const World &world,
+	const float *mvp)
+{
+	const World::WorldRevision revision = world.world_revision();
+	const float top = static_cast<float>(GAME_VOXEL_CHUNK_HEIGHT);
+	bool geometry_changed = false;
+	if (!world.revision_barriers_active()
+		|| revision.selected_count == 0U)
+		return ;
+	if (!_barrier_geometry_valid
+		|| _barrier_selection_revision != revision.selection_revision)
+	{
+		std::vector<World::RevisionChunkCoordinate> chunks;
+		std::vector<float> staged_vertices;
+		try
+		{
+			if (world.copy_selected_revision_chunks(chunks)
+				!= FT_ERR_SUCCESS)
+				return ;
+			staged_vertices.reserve(chunks.size() * 4U * 18U);
+			for (const World::RevisionChunkCoordinate &chunk : chunks)
+			{
+				const float x0 = static_cast<float>(
+					static_cast<double>(chunk.chunk_x)
+						* GAME_VOXEL_CHUNK_WIDTH);
+				const float x1 = x0
+					+ static_cast<float>(GAME_VOXEL_CHUNK_WIDTH);
+				const float z0 = static_cast<float>(
+					static_cast<double>(chunk.chunk_z)
+						* GAME_VOXEL_CHUNK_DEPTH);
+				const float z1 = z0
+					+ static_cast<float>(GAME_VOXEL_CHUNK_DEPTH);
+				const auto stage_quad = [&staged_vertices, top](float ax,
+					float az, float bx, float bz)
+				{
+					const float quad[18] = {ax, 0.0f, az, bx, 0.0f, bz,
+						bx, top, bz, ax, 0.0f, az, bx, top, bz,
+						ax, top, az};
+					staged_vertices.insert(staged_vertices.end(), quad,
+						quad + 18);
+				};
+				if (chunk.chunk_x == INT32_MIN
+					|| !gpu_barrier_has_chunk(chunks, chunk.chunk_x - 1,
+						chunk.chunk_z))
+					stage_quad(x0, z0, x0, z1);
+				if (chunk.chunk_x == INT32_MAX
+					|| !gpu_barrier_has_chunk(chunks, chunk.chunk_x + 1,
+						chunk.chunk_z))
+					stage_quad(x1, z0, x1, z1);
+				if (chunk.chunk_z == INT32_MIN
+					|| !gpu_barrier_has_chunk(chunks, chunk.chunk_x,
+						chunk.chunk_z - 1))
+					stage_quad(x0, z0, x1, z0);
+				if (chunk.chunk_z == INT32_MAX
+					|| !gpu_barrier_has_chunk(chunks, chunk.chunk_x,
+						chunk.chunk_z + 1))
+					stage_quad(x0, z1, x1, z1);
+			}
+		}
+		catch (...)
+		{
+			return ;
+		}
+		_barrier_vertices.swap(staged_vertices);
+		_barrier_selection_revision = revision.selection_revision;
+		_barrier_geometry_valid = true;
+		geometry_changed = true;
+	}
+	if (_barrier_vertices.empty())
+		return ;
+	_barrier_shader.use();
+	glUniformMatrix4fv(_u_barrier_mvp, 1, GL_FALSE, mvp);
+	glBindVertexArray(_barrier_vao);
+	if (geometry_changed)
+	{
+		glBindBuffer(GL_ARRAY_BUFFER, _barrier_vbo);
+		glBufferData(GL_ARRAY_BUFFER,
+			static_cast<GLsizeiptr>(_barrier_vertices.size() * sizeof(float)),
+			_barrier_vertices.data(), GL_DYNAMIC_DRAW);
+	}
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+	glDepthMask(GL_FALSE);
+	glDisable(GL_CULL_FACE);
+	glDrawArrays(GL_TRIANGLES, 0,
+		static_cast<GLsizei>(_barrier_vertices.size() / 3U));
+	glEnable(GL_CULL_FACE);
+	glDepthMask(GL_TRUE);
+	glDisable(GL_BLEND);
+	glBindVertexArray(0);
 }
 
 void GpuWorldRenderer::render(const Camera &camera, const World &world)
 {
 	float	mvp[16];
 	float	far_z;
+	int32_t analytics_error;
+#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	static bool startup_render_reported = false;
+#endif
 
+	analytics_error = RuntimeAnalytics::begin_scope(
+		RuntimeAnalyticsScope::GPU_CLEAR_SKY);
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: GPU clear scope start failed (%d)\n",
+			analytics_error);
 	glViewport(0, 0, _width, _height);
 	glClear(GL_DEPTH_BUFFER_BIT);
 	draw_sky();
+	analytics_error = RuntimeAnalytics::end_scope();
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: GPU clear scope end failed (%d)\n",
+			analytics_error);
 	far_z = static_cast<float>(world.active_render_distance) + 64.0f;
 	GpuMvpBuilder::build(mvp, camera, _width, _height, 0.08f, far_z);
+	analytics_error = RuntimeAnalytics::begin_scope(
+		RuntimeAnalyticsScope::GPU_BATCH_COLLECT);
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: GPU collect scope start failed (%d)\n",
+			analytics_error);
+#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	if (!startup_render_reported)
+		std::fprintf(stderr, "[Startup] GPU world: before batch collect\n");
+#endif
 	_batch.collect(camera, world, _width, _height);
+#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	if (!startup_render_reported)
+		std::fprintf(stderr, "[Startup] GPU world: after batch collect\n");
+#endif
+	analytics_error = RuntimeAnalytics::end_scope();
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: GPU collect scope end failed (%d)\n",
+			analytics_error);
+	analytics_error = RuntimeAnalytics::begin_scope(
+		RuntimeAnalyticsScope::GPU_SOLID_FLUSH);
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: GPU solid scope start failed (%d)\n",
+			analytics_error);
 	_world_shader.use();
+#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	if (!startup_render_reported)
+		std::fprintf(stderr, "[Startup] GPU world: before solid flush\n");
+#endif
 	_batch.flush_solid(0, _u_mvp, _u_chunk_offset, mvp, _atlas);
+#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	if (!startup_render_reported)
+		std::fprintf(stderr, "[Startup] GPU world: after solid flush\n");
+#endif
+	analytics_error = RuntimeAnalytics::end_scope();
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: GPU solid scope end failed (%d)\n",
+			analytics_error);
+	draw_player_shadow(camera, world, mvp);
+	analytics_error = RuntimeAnalytics::begin_scope(
+		RuntimeAnalyticsScope::GPU_WATER_FLUSH);
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: GPU water scope start failed (%d)\n",
+			analytics_error);
 	_batch.flush_water(0, _u_mvp, _u_chunk_offset, mvp, _atlas);
+#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	if (!startup_render_reported)
+		std::fprintf(stderr, "[Startup] GPU world: after water flush\n");
+	startup_render_reported = true;
+#endif
+	analytics_error = RuntimeAnalytics::end_scope();
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: GPU water scope end failed (%d)\n",
+			analytics_error);
+	draw_revision_barriers(world, mvp);
 	draw_crosshair();
 }
 
@@ -188,4 +483,12 @@ size_t GpuWorldRenderer::gpu_bytes() const
 	size_t b = _batch.gpu_bytes();
 	b += static_cast<size_t>(_atlas.is_loaded() ? 384 * 384 * 4 : 0);
 	return (b);
+}
+
+bool GpuWorldRenderer::uploaded_identity_matches(int32_t slot,
+	uint64_t revision, int32_t chunk_x, int32_t chunk_z,
+	uint64_t voxel_revision) const
+{
+	return (this->_batch.uploaded_identity_matches(slot, revision, chunk_x,
+		chunk_z, voxel_revision));
 }

@@ -26,7 +26,8 @@ class WorldGenerationResultCommitter
 		World &world, WorldGenerationPipeline::Result &result,
 		WorldChunkStreamer::StreamCandidate &candidate) noexcept;
 	static void populate_chunk_slot(WorldChunk &slot,
-		const WorldGenerationPipeline::Result &result) noexcept;
+		const WorldGenerationPipeline::Result &result,
+		uint64_t geometry_revision) noexcept;
 };
 
 # include "../../src/world/WorldDeferredEditApplier.hpp"

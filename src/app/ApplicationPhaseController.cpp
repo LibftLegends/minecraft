@@ -1,4 +1,6 @@
 #include "../../src/app/ApplicationPhaseController.hpp"
+#include "../../src/diagnostics/RuntimeAnalytics.hpp"
+#include <cstdio>
 
 ApplicationPhaseController::ApplicationPhaseController()
 {
@@ -48,8 +50,11 @@ ApplicationPhaseController::Phase ApplicationPhaseController::tick_menu(Phase ph
 	menu.update(in);
 	if (phase == Phase::MAIN_MENU)
 	{
-		if (menu.wants_start() && session.start(menu.start_seed(), window,
-				renderer) == FT_ERR_SUCCESS)
+		if (menu.wants_start()
+			&& session.configure_local_processing_station_authorizer()
+				== FT_ERR_SUCCESS
+			&& session.start(menu.start_seed(), window, renderer)
+				== FT_ERR_SUCCESS)
 		{
 			menu.show_loading();
 			menu.clear_flags();
@@ -60,12 +65,22 @@ ApplicationPhaseController::Phase ApplicationPhaseController::tick_menu(Phase ph
 	}
 	if (session.loading_tick(strategy) != FT_ERR_SUCCESS)
 	{
-		session.stop();
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+		std::fprintf(stderr,
+			"[Application] loading failed; returning to main menu error=%d\n",
+			session.error_code());
+	#endif
+		if (session.stop() != FT_ERR_SUCCESS)
+			return (Phase::LOADING);
 		menu.show_main_menu();
 		return (Phase::MAIN_MENU);
 	}
 	if (session.is_ready_to_play() && ++loading_frames >= 30)
 	{
+		session.activate_configured_render_distance();
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+		std::fprintf(stderr, "World loading: playable area ready; entering game\n");
+	#endif
 		window.set_cursor_visible(false);
 		return (Phase::IN_GAME);
 	}
@@ -87,7 +102,17 @@ ApplicationPhaseController::Phase ApplicationPhaseController::tick_in_game(Appli
 	if (action == GameSession::Action::EXIT_TO_MENU
 		|| action == GameSession::Action::FAILED)
 	{
-		session.stop();
+	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+		if (action == GameSession::Action::EXIT_TO_MENU)
+			std::fprintf(stderr,
+				"[Application] explicit back input; returning to main menu\n");
+		else
+			std::fprintf(stderr,
+				"[Application] session failed; returning to main menu error=%d\n",
+				session.error_code());
+	#endif
+		if (session.stop() != FT_ERR_SUCCESS)
+			return (Phase::IN_GAME);
 		menu.show_main_menu();
 		window.set_cursor_visible(true);
 		return (Phase::MAIN_MENU);
@@ -109,7 +134,8 @@ ApplicationPhaseController::Phase ApplicationPhaseController::tick_in_game_setti
 	}
 	if (menu.wants_main_menu())
 	{
-		session.stop();
+		if (session.stop() != FT_ERR_SUCCESS)
+			return (Phase::IN_GAME_SETTINGS);
 		menu.show_main_menu();
 		menu.clear_flags();
 		window.set_cursor_visible(true);
@@ -175,10 +201,20 @@ void ApplicationPhaseController::render_frame(Phase phase,
 	VoxelRenderer &renderer)
 {
 	GpuRenderer	*gpu;
+	int32_t analytics_error;
 
+	analytics_error = RuntimeAnalytics::begin_scope(
+		RuntimeAnalyticsScope::APPLICATION_RENDER);
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: application render scope start failed (%d)\n",
+			analytics_error);
 	gpu = renderer.get_gpu_renderer();
 	if (window.is_gpu_mode() && gpu != nullptr)
 		render_gpu_frame(phase, window, menu, session, renderer);
 	else
 		render_cpu_frame(phase, window, menu, session, renderer);
+	analytics_error = RuntimeAnalytics::end_scope();
+	if (analytics_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: application render scope end failed (%d)\n",
+			analytics_error);
 }

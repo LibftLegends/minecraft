@@ -38,15 +38,37 @@ class VoxelRenderer
 	static const int OVERLAY_H;
 
 	uint32_t _overlay_buf[512 * 360];
+	uint32_t _debug_overlay_buf[512 * 360];
 	ft_render_framebuffer _overlay_fb;
+	ft_render_framebuffer _debug_overlay_fb;
 	uint64_t _overlay_frame;
+	bool _gpu_debug_overlay_valid;
+	bool _gpu_item_overlay_visible;
+	uint64_t _software_diagnostic_frame;
+	bool _software_visibility_cache_valid;
+	uint64_t _software_visibility_geometry_signature;
+	double _software_visibility_camera_x;
+	double _software_visibility_camera_y;
+	double _software_visibility_camera_z;
+	double _software_visibility_camera_yaw;
+	double _software_visibility_camera_pitch;
+	int _software_visibility_width;
+	int _software_visibility_height;
+	int _software_visibility_render_distance;
+	int32_t _software_visibility_loaded_chunk_count;
+	int32_t _software_visibility_center_chunk_x;
+	int32_t _software_visibility_center_chunk_z;
+	std::vector<int32_t> _software_visible_chunk_slots;
 	RenderTarget target;
 	ChunkMeshRenderer mesh_renderer;
 	GpuRenderer gpu;
 
 	void render_world_gpu(const Camera &camera, const World &world,
 		const RenderDebug *debug);
-	void render_gpu_overlay(const RenderDebug *debug);
+	void render_gpu_overlay(const RenderDebug *debug, const Camera &camera,
+		const World &world);
+	bool draw_world_item_markers(ft_render_framebuffer &framebuffer,
+		const Camera &camera, const World &world) const;
 	void render_world_software(ft_render_framebuffer &framebuffer,
 		const Camera &camera, const World &world, const RenderDebug *debug);
 };

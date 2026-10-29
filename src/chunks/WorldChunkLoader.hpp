@@ -4,9 +4,10 @@
 # ifndef GAME_USE_VOXEL_REGION_BACKEND
 #  define GAME_USE_VOXEL_REGION_BACKEND
 # endif
-# include "../../Libft/Modules/Voxel/voxel.hpp"
+# include "../../Libft/Modules/Voxel/voxel_api.hpp"
 # include "../../src/chunks/ChunkNeighborMesher.hpp"
 # include "../../src/chunks/WorldChunkStore.hpp"
+# include "../../src/world/WorldTerrainChunkStore.hpp"
 # include "../../src/coordinates/WorldCoordinates.hpp"
 # include "../ft_vox.hpp"
 
@@ -21,11 +22,14 @@ class WorldChunkLoader
 	static int32_t initialize_chunk(WorldChunk *world_chunk, int32_t chunk_x,
 		int32_t chunk_z, const char *seed);
 	static int32_t initialize_chunk(WorldChunk *world_chunk, int32_t chunk_x,
-		int32_t chunk_z, const char *seed, WorldChunk *chunks,
-		int32_t chunk_count);
+		int32_t chunk_z, const char *seed, WorldTerrainChunkStore *terrain_store);
 	static int32_t initialize_chunk(WorldChunk *world_chunk, int32_t chunk_x,
 		int32_t chunk_z, const char *seed, WorldChunk *chunks,
-		int32_t chunk_count, const terrain_generation_config &config);
+		int32_t chunk_count, WorldTerrainChunkStore *terrain_store = nullptr);
+	static int32_t initialize_chunk(WorldChunk *world_chunk, int32_t chunk_x,
+		int32_t chunk_z, const char *seed, WorldChunk *chunks,
+		int32_t chunk_count, const voxel_generation_config &config,
+		WorldTerrainChunkStore *terrain_store = nullptr);
 	static int32_t generate_missing_chunk(WorldChunk *chunks,
 		int32_t chunk_count, int32_t *loaded_chunk_count, int32_t chunk_x,
 		int32_t chunk_z, const char *seed);
@@ -33,15 +37,13 @@ class WorldChunkLoader
 		int32_t chunk_x, int32_t chunk_z);
 	static int32_t remesh_chunk(WorldChunk *chunks, int32_t chunk_count,
 		int32_t chunk_x, int32_t chunk_z, bool use_neighbors);
-	static int32_t remesh_edited_chunk_border(WorldChunk *chunks,
-		int32_t chunk_count, int32_t chunk_x, int32_t chunk_z, int32_t local_x,
-		int32_t local_z);
 
   private:
 	static int32_t setup_chunk_coordinates(WorldChunk *world_chunk,
 		int32_t chunk_x, int32_t chunk_z);
 	static int32_t init_chunk_data(WorldChunk *world_chunk, const char *seed,
-		const terrain_generation_config *config = nullptr);
+		const voxel_generation_config *config = nullptr,
+		WorldTerrainChunkStore *terrain_store = nullptr);
 	static int32_t build_mesh_with_neighbors(WorldChunk *world_chunk,
 		int32_t chunk_x, int32_t chunk_z, WorldChunk *chunks,
 		int32_t chunk_count);

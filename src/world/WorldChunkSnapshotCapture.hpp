@@ -13,7 +13,20 @@ class WorldChunkSnapshotCapture
 
 	static int32_t capture(const WorldChunk &target, const WorldChunk *west,
 		const WorldChunk *east, const WorldChunk *north,
-		const WorldChunk *south,
+		const WorldChunk *south, const WorldChunk *northwest,
+		const WorldChunk *northeast, const WorldChunk *southwest,
+		const WorldChunk *southeast,
+		WorldGenerationPipeline::WorldChunkSnapshot &snapshot) noexcept;
+	static int32_t capture_read_states(
+		const std::shared_ptr<const WorldChunkReadState> &target,
+		const std::shared_ptr<const WorldChunkReadState> &west,
+		const std::shared_ptr<const WorldChunkReadState> &east,
+		const std::shared_ptr<const WorldChunkReadState> &north,
+		const std::shared_ptr<const WorldChunkReadState> &south,
+		const std::shared_ptr<const WorldChunkReadState> &northwest,
+		const std::shared_ptr<const WorldChunkReadState> &northeast,
+		const std::shared_ptr<const WorldChunkReadState> &southwest,
+		const std::shared_ptr<const WorldChunkReadState> &southeast,
 		WorldGenerationPipeline::WorldChunkSnapshot &snapshot) noexcept;
 
   private:
@@ -22,6 +35,12 @@ class WorldChunkSnapshotCapture
 	static int32_t capture_border_column(const WorldChunk *source,
 		std::vector<uint32_t> &border, int32_t border_local_x,
 		int32_t border_local_z) noexcept;
+	static int32_t capture_lighting_halo(const WorldChunk &target,
+		const WorldChunk *west, const WorldChunk *east,
+		const WorldChunk *north, const WorldChunk *south,
+		const WorldChunk *northwest, const WorldChunk *northeast,
+		const WorldChunk *southwest, const WorldChunk *southeast,
+		WorldGenerationPipeline::WorldChunkSnapshot &snapshot) noexcept;
 };
 
 #endif

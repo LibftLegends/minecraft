@@ -9,3 +9,4 @@ objs_tests/
 /objs*_cfg*/
 build_logs/
 ft_vox_config.json
+/saves/
