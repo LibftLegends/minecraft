@@ -1,10 +1,208 @@
 #include "../../src/validators/WorldReplicationValidator.hpp"
 #include "../../src/network/WorldReplicationBlockReplica.hpp"
+#include "../../src/network/WorldReplicationClient.hpp"
 #include "../../src/network/WorldReplicationCursorStore.hpp"
 #include "../../src/network/ProtocolChunkSyncRequestMessage.hpp"
 #include "../../Libft/Modules/Networking/networking_replication_protocol.hpp"
 #include <cstdio>
 #include <cstring>
+
+namespace
+{
+	template <typename Message>
+	int32_t queue_chunk_message(WorldReplicationClient &client,
+		ProtocolMessageHeader::Type type, const Message &data, uint64_t sequence)
+	{
+		ft_byte_buffer payload;
+		ft_byte_buffer frame;
+		networking_received_message message;
+		networking_replication_envelope envelope;
+		int32_t error = payload.initialize();
+		if (error == FT_ERR_SUCCESS)
+			error = data.serialize(payload);
+		if (error == FT_ERR_SUCCESS)
+			error = frame.initialize();
+		if (error == FT_ERR_SUCCESS)
+		{
+			envelope.message_type = static_cast<uint16_t>(type);
+			envelope.payload_size = static_cast<uint32_t>(payload.size());
+			envelope.server_instance_id = client.server_instance_id();
+			envelope.session_id = client.session_id();
+			envelope.message_sequence = sequence;
+			error = networking_replication_envelope_serialize(envelope, frame);
+		}
+		if (error == FT_ERR_SUCCESS)
+			error = frame.append(payload.data(), payload.size());
+		if (error == FT_ERR_SUCCESS)
+			error = message.payload.initialize();
+		if (error == FT_ERR_SUCCESS)
+		{
+			message.payload.reserve(frame.size());
+			error = message.payload.get_error();
+		}
+		for (ft_size_t index = 0U; error == FT_ERR_SUCCESS
+			&& index < frame.size(); ++index)
+			error = message.payload.push_back(frame.data()[index]);
+		if (error == FT_ERR_SUCCESS)
+			error = client.enqueue_received_message(message);
+		return (error);
+	}
+
+	int32_t validate_chunk_deletion_delivery(
+		const ProtocolChunkSnapshotMessage &first_snapshot)
+	{
+		WorldReplicationReplicaStore store;
+		WorldReplicationClient client;
+		struct BlockDelivery
+		{
+			WorldReplicationReplicaStore &store;
+			uint32_t applied;
+			uint32_t light_applied;
+		} delivery = {store, 0U, 0U};
+		ProtocolChunkSnapshotMessage second_snapshot = first_snapshot;
+		second_snapshot.chunk_x -= 1;
+		int32_t error = store.initialize(2U);
+		if (error == FT_ERR_SUCCESS)
+			error = client.initialize(11U, first_snapshot.session_id,
+				first_snapshot.world_id, 3U, 1024U * 1024U, 1U);
+		if (error == FT_ERR_SUCCESS)
+			error = client.set_replica_store(&store);
+		if (error == FT_ERR_SUCCESS)
+			error = client.set_callbacks(
+				[](const ProtocolChunkSnapshotMessage &, void *) noexcept
+					-> int32_t { return (FT_ERR_SUCCESS); },
+				[](const ProtocolChunkBlockDeltaMessage &message,
+					void *context) noexcept -> int32_t
+				{
+					const auto &delta = message.delta;
+					auto &state = *static_cast<BlockDelivery *>(context);
+					const auto *replica = state.store.find(
+						delta.chunk_x, delta.chunk_z);
+					uint32_t block_id = 0U;
+					if (replica == nullptr
+						|| replica->block_revision() != delta.revision
+						|| replica->read_block(delta.local_x, delta.local_y,
+							delta.local_z, &block_id) != FT_ERR_SUCCESS
+						|| block_id != delta.current_block_id)
+						return (FT_ERR_INVALID_STATE);
+					state.applied += 1U;
+					return (FT_ERR_SUCCESS);
+				},
+				[](const ProtocolChunkLightDeltaMessage &message, void *context) noexcept
+					-> int32_t
+				{
+					auto &state = *static_cast<BlockDelivery *>(context);
+					const auto *replica = state.store.find(message.chunk_x, message.chunk_z);
+					if (replica == nullptr || replica->light_revision() != message.final_light_revision
+						|| replica->light().get(0, 0, 0) != message.light_payload.back())
+						return (FT_ERR_INVALID_STATE);
+					state.light_applied += 1U;
+					return (FT_ERR_SUCCESS);
+				},
+				[](const ProtocolEditResultMessage &, void *) noexcept
+					-> int32_t { return (FT_ERR_SUCCESS); }, &delivery);
+		if (error == FT_ERR_SUCCESS)
+			error = queue_chunk_message(client,
+				ProtocolMessageHeader::Type::CHUNK_SNAPSHOT, first_snapshot, 1U);
+		if (error == FT_ERR_SUCCESS)
+			error = queue_chunk_message(client,
+				ProtocolMessageHeader::Type::CHUNK_SNAPSHOT, second_snapshot, 2U);
+		uint32_t processed = 0U;
+		if (error == FT_ERR_SUCCESS)
+			error = client.drain_received_messages(2U, processed);
+		if (error != FT_ERR_SUCCESS || processed != 1U || store.size() != 1U)
+			return (FT_ERR_INVALID_STATE);
+		if (client.reset_budget() != FT_ERR_SUCCESS
+			|| client.drain_received_messages(2U, processed) != FT_ERR_SUCCESS
+			|| processed != 1U || store.size() != 2U)
+			return (FT_ERR_INVALID_STATE);
+		ProtocolChunkLightDeltaMessage light;
+		light.session_id = second_snapshot.session_id;
+		light.world_id = second_snapshot.world_id;
+		light.chunk_x = second_snapshot.chunk_x;
+		light.chunk_z = second_snapshot.chunk_z;
+		light.base_light_revision = second_snapshot.light_revision;
+		light.final_light_revision = second_snapshot.light_revision + 1U;
+		light.source_block_revision = second_snapshot.block_revision;
+		light.generation_epoch = second_snapshot.generation_epoch;
+		/* One packed-light sample at linear index zero. */
+		light.light_payload = {1U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0x4BU};
+		if (queue_chunk_message(client, ProtocolMessageHeader::Type::CHUNK_LIGHT_DELTA,
+				light, 3U) != FT_ERR_SUCCESS || client.reset_budget() != FT_ERR_SUCCESS
+			|| client.drain_received_messages(1U, processed) != FT_ERR_SUCCESS
+			|| processed != 1U || delivery.light_applied != 1U)
+			return (FT_ERR_INVALID_STATE);
+		ProtocolChunkBlockDeltaMessage deletion;
+		deletion.delta.protocol_version = GAME_WORLD_DELTA_PROTOCOL_VERSION;
+		deletion.delta.session_id = first_snapshot.session_id;
+		deletion.delta.world_id = first_snapshot.world_id;
+		deletion.delta.request_id = 1U;
+		deletion.delta.chunk_x = first_snapshot.chunk_x;
+		deletion.delta.chunk_z = first_snapshot.chunk_z;
+		deletion.delta.previous_revision = first_snapshot.block_revision;
+		deletion.delta.revision = first_snapshot.block_revision + 1U;
+		deletion.delta.current_block_id = GAME_VOXEL_AIR_BLOCK;
+		/* The fixture's stone is a player override of generated air. */
+		deletion.delta.player_modified = FT_FALSE;
+		error = queue_chunk_message(client,
+			ProtocolMessageHeader::Type::CHUNK_BLOCK_DELTA, deletion, 4U);
+		deletion.delta.request_id += 1U;
+		deletion.delta.chunk_x = second_snapshot.chunk_x;
+		if (error == FT_ERR_SUCCESS)
+			error = queue_chunk_message(client,
+				ProtocolMessageHeader::Type::CHUNK_BLOCK_DELTA, deletion, 5U);
+		if (error != FT_ERR_SUCCESS)
+			return (error);
+		for (uint32_t frame = 0U; frame < 2U; ++frame)
+		{
+			error = client.reset_budget();
+			if (error == FT_ERR_SUCCESS)
+				error = client.drain_received_messages(2U, processed);
+			if (error != FT_ERR_SUCCESS)
+				return (error);
+			if (processed != 1U)
+				return (FT_ERR_INVALID_STATE);
+		}
+		/* Retransmitted light and deletion messages ahead of a new edit must
+		 * leave the replica and the sole apply slot unchanged. */
+		ProtocolChunkBlockDeltaMessage placement = deletion;
+		placement.delta.request_id += 1U;
+		placement.delta.previous_revision = deletion.delta.revision;
+		placement.delta.revision += 1U;
+		placement.delta.current_block_id = 7U;
+		placement.delta.player_modified = FT_TRUE;
+		error = queue_chunk_message(client,
+			ProtocolMessageHeader::Type::CHUNK_LIGHT_DELTA, light, 6U);
+		if (error == FT_ERR_SUCCESS)
+			error = queue_chunk_message(client,
+				ProtocolMessageHeader::Type::CHUNK_BLOCK_DELTA, deletion, 7U);
+		if (error == FT_ERR_SUCCESS)
+			error = queue_chunk_message(client,
+				ProtocolMessageHeader::Type::CHUNK_BLOCK_DELTA, placement, 8U);
+		if (error == FT_ERR_SUCCESS)
+			error = client.reset_budget();
+		if (error == FT_ERR_SUCCESS)
+			error = client.drain_received_messages(3U, processed);
+		if (error != FT_ERR_SUCCESS || processed != 3U || delivery.applied != 3U
+			|| delivery.light_applied != 1U)
+			return (FT_ERR_INVALID_STATE);
+
+		ProtocolChunkBlockDeltaMessage gap = placement;
+		gap.delta.request_id += 1U;
+		gap.delta.previous_revision += 2U;
+		gap.delta.revision += 2U;
+		error = queue_chunk_message(client,
+			ProtocolMessageHeader::Type::CHUNK_BLOCK_DELTA, deletion, 9U);
+		if (error == FT_ERR_SUCCESS)
+			error = queue_chunk_message(client,
+				ProtocolMessageHeader::Type::CHUNK_BLOCK_DELTA, gap, 10U);
+		if (error != FT_ERR_SUCCESS
+			|| client.drain_received_messages(2U, processed) != FT_ERR_INVALID_STATE
+			|| processed != 2U || delivery.applied != 3U)
+			return (FT_ERR_INVALID_STATE);
+		return (FT_ERR_SUCCESS);
+	}
+}
 
 WorldReplicationValidator::WorldReplicationValidator()
 {
@@ -176,6 +374,8 @@ int WorldReplicationValidator::validate() const
 		error_code = snapshot.serialize(snapshot_wire);
 	if (error_code == FT_ERR_SUCCESS)
 		error_code = decoded_snapshot.deserialize(snapshot_wire);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = validate_chunk_deletion_delivery(decoded_snapshot);
 	if (error_code == FT_ERR_SUCCESS
 		&& (decoded_snapshot.block_revision != snapshot.block_revision
 			|| decoded_snapshot.light_revision != snapshot.light_revision

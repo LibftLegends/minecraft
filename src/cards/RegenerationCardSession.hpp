@@ -260,6 +260,8 @@ class RegenerationCardSession
 		uint32_t card_definition_id) noexcept;
 	static uint32_t card_definition_for_item(
 		int32_t item_definition_id) noexcept;
+	static bool is_supported_card_definition(
+		uint32_t card_definition_id) noexcept;
 	/* Returns an imported card only when removing it leaves the owned session
 	 * deck at or above its 20-card minimum. Simulation-owner-thread only. */
 	int32_t export_card_to_inventory(game_inventory &inventory,
@@ -376,8 +378,6 @@ class RegenerationCardSession
 		const card_game_effect_context &context,
 		card_game_operation_buffer &operations, void *user_data) noexcept;
 	static uint32_t card_definition_id_for_event(uint32_t event_type) noexcept;
-	static bool is_supported_card_definition(
-		uint32_t card_definition_id) noexcept;
 	static ft_bool choice_is_valid(uint32_t card_definition_id,
 		const RegenerationCardChoice &choice) noexcept;
 	static int32_t decode_policy_intent(

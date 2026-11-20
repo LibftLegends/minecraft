@@ -503,7 +503,8 @@ int32_t WorldItemCraftTransaction::execute(const char *snapshot_path,
 	return (WorldItemCraftTransaction::execute(snapshot_path, character,
 		world_items, recipe_catalog, journal, request_id, recipe_id, batch_count,
 		expected_inventory_revision, expected_catalog_revision,
-		expected_recipe_book_revision, 0U, 0U, nullptr, nullptr, station_id,
+		expected_recipe_book_revision, 0U, 0U, nullptr, nullptr, nullptr,
+		nullptr, station_id,
 		station_x, station_y, station_z, expected_station_revision, result_out,
 		snapshot_writer));
 }

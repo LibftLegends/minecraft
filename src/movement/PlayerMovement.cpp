@@ -62,7 +62,7 @@ static bool player_movement_crosses_revision_barrier(const Camera &camera,
 		}
 		return (false);
 	};
-	if (!world.revision_barriers_active() || delta == 0.0)
+	if (!world.revision_barriers_active() || std::fpclassify(delta) == FP_ZERO)
 		return (false);
 	if (!std::isfinite(delta) || !std::isfinite(camera.x)
 		|| !std::isfinite(camera.z))

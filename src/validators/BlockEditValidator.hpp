@@ -10,6 +10,8 @@
 class BlockEditValidator : public IValidator
 {
   private:
+	static int32_t validate_deferred_mining_checkpoint();
+	static int32_t validate_mining_worker_shutdown();
 	static size_t mesh_index_count_for_block(const World &world,
 		int32_t block_x, int32_t block_z);
 	static uint64_t mesh_revision_for_block(const World &world,

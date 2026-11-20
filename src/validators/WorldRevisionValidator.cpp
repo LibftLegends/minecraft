@@ -967,12 +967,22 @@ struct WorldRevisionServerAuthorizationFixture
 };
 
 static int32_t world_revision_validator_provide_occupancy(
-	std::vector<World::RevisionChunkCoordinate> &occupied_chunks_out,
+	WorldRevisionOccupancySample &sample_out,
 	void *user_data)
 {
 	if (user_data == nullptr)
 		return (FT_ERR_INVALID_POINTER);
-	occupied_chunks_out.clear();
+	sample_out = {};
+	sample_out.sampled_epoch_ms = 1000U;
+	return (FT_ERR_SUCCESS);
+}
+
+static int32_t world_revision_validator_provide_epoch(
+	uint64_t *epoch_ms_out, void *user_data)
+{
+	if (user_data == nullptr || epoch_ms_out == nullptr)
+		return (FT_ERR_INVALID_POINTER);
+	*epoch_ms_out = 1000U;
 	return (FT_ERR_SUCCESS);
 }
 
@@ -2010,6 +2020,9 @@ int32_t WorldRevisionValidator::test_server_draft_authorization(
 		error_code = server.set_occupancy_provider(
 			&world_revision_validator_provide_occupancy, &fixture);
 	if (error_code == FT_ERR_SUCCESS)
+		error_code = server.set_epoch_provider(
+			&world_revision_validator_provide_epoch, &fixture);
+	if (error_code == FT_ERR_SUCCESS)
 		error_code = server.set_start_committer(
 			&world_revision_validator_start_commit, &fixture);
 	if (error_code == FT_ERR_SUCCESS)
@@ -2411,6 +2424,9 @@ int32_t WorldRevisionValidator::test_server_draft_authorization(
 			!= FT_ERR_SUCCESS
 			|| unconfigured_server.set_occupancy_provider(
 				&world_revision_validator_provide_occupancy, &fixture)
+			!= FT_ERR_SUCCESS
+			|| unconfigured_server.set_epoch_provider(
+				&world_revision_validator_provide_epoch, &fixture)
 			!= FT_ERR_SUCCESS
 			|| unconfigured_server.initialize() != FT_ERR_SUCCESS
 			|| WorldRevisionServer::handle_message(10, instability_message,

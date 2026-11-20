@@ -9,18 +9,21 @@ class BlockEditPerformanceValidator : public IValidator
 {
   private:
 	static uint64_t count_dirty_remeshes(const World &world) noexcept;
+	static int32_t wait_for_stream_to_settle(World &world) noexcept;
 	static uint64_t counter_delta(uint64_t before, uint64_t after) noexcept;
 	static int32_t capture_frame(World &world, uint64_t frame_index,
-		const World::StreamDiagnostics &before,
+		World::StreamDiagnostics &previous_sample,
 		std::vector<BlockEditWorkloadFrame> &frames) noexcept;
 	static int32_t wait_for_revision(World &world, int32_t world_x,
-		int32_t world_z, uint64_t previous_revision, uint64_t frame_index,
+		int32_t world_z, uint64_t previous_revision,
+		World::StreamDiagnostics &previous_sample,
 		std::vector<BlockEditWorkloadFrame> &frames,
-		uint64_t &latency_us) noexcept;
+		bool require_current_light = false) noexcept;
 	static int32_t prepare_target(World &world, int32_t world_x,
 		int32_t world_z, int32_t &world_y) noexcept;
 	static int32_t restore_block(World &world, int32_t world_x,
-		int32_t world_y, int32_t world_z, uint64_t &frame_index,
+		int32_t world_y, int32_t world_z,
+		World::StreamDiagnostics &previous_sample,
 		std::vector<BlockEditWorkloadFrame> &frames) noexcept;
 	static int32_t run_workload(World &world, int32_t world_y,
 		uint64_t requested_edits,

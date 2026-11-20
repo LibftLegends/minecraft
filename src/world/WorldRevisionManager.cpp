@@ -2546,9 +2546,9 @@ int32_t WorldRevisionManager::deserialize_metadata(const uint8_t *bytes,
 							&& staged_completed_revision_id == 0U)))
 					valid_extension = false;
 			}
-		if (valid_extension && version < 6U
-			&& (offset > byte_count || byte_count - offset != 12U))
-			valid_extension = false;
+			if (valid_extension && version < 6U
+				&& (offset > byte_count || byte_count - offset != 12U))
+				valid_extension = false;
 			const std::size_t checksum_offset = offset;
 			if (!valid_extension
 				|| !world_revision_lifecycle_read_u64(bytes, byte_count,

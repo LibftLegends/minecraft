@@ -1,8 +1,9 @@
 #include "../../src/world/World.hpp"
 #include "../../src/coordinates/WorldCoordinates.hpp"
 #include "../../src/diagnostics/RuntimeAnalytics.hpp"
-#include "../../Libft/Modules/Buffer/byte_buffer.hpp"
+#include "../../Libft/Modules/Basic/limits.hpp"
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -12,62 +13,6 @@
 
 namespace
 {
-	class WorldVoxelChunkRollbackSnapshot
-	{
-	  public:
-		WorldVoxelChunkRollbackSnapshot() noexcept : initialized_(false) {}
-		~WorldVoxelChunkRollbackSnapshot()
-		{
-			if (initialized_)
-				(void)chunk_.destroy();
-		}
-		int32_t capture(const game_voxel_chunk &source) noexcept
-		{
-			ft_byte_buffer payload;
-			int32_t result = payload.initialize();
-			const bool payload_initialized = result == FT_ERR_SUCCESS;
-			if (result == FT_ERR_SUCCESS)
-				result = source.serialize(payload);
-			if (result == FT_ERR_SUCCESS)
-				result = payload.reset_read_position();
-			if (result == FT_ERR_SUCCESS)
-			{
-				result = chunk_.initialize();
-				initialized_ = result == FT_ERR_SUCCESS;
-			}
-			if (result == FT_ERR_SUCCESS)
-				result = chunk_.deserialize(payload);
-			if (result == FT_ERR_SUCCESS && payload.remaining() != 0U)
-				result = FT_ERR_INVALID_ARGUMENT;
-			if (payload_initialized)
-			{
-				const int32_t destroy_result = payload.destroy();
-				if (result == FT_ERR_SUCCESS)
-					result = destroy_result;
-			}
-			if (result != FT_ERR_SUCCESS && initialized_)
-			{
-				(void)chunk_.destroy();
-				initialized_ = false;
-			}
-			return (result);
-		}
-		int32_t restore(game_voxel_chunk &target) noexcept
-		{
-			if (!initialized_)
-				return (FT_ERR_INVALID_STATE);
-			int32_t result = target.destroy();
-			if (result == FT_ERR_SUCCESS)
-				result = target.move(chunk_);
-			if (result == FT_ERR_SUCCESS)
-				initialized_ = false;
-			return (result);
-		}
-	  private:
-		game_voxel_chunk chunk_;
-		bool initialized_;
-	};
-
 	template <typename T>
 	static bool fluid_override_less(const T &left, const T &right)
 	{
@@ -95,6 +40,46 @@ namespace
 	{
 		return (left.world_x == right.world_x && left.world_y == right.world_y
 			&& left.world_z == right.world_z);
+	}
+
+	template <typename T>
+	static int32_t prepare_fluid_override(std::vector<T> &overrides,
+		const T &edit, std::size_t &index, bool &existing)
+	{
+		const std::size_t max_overrides = 16384U;
+		const auto position = std::lower_bound(overrides.begin(),
+			overrides.end(), edit, fluid_override_less<T>);
+		index = static_cast<std::size_t>(position - overrides.begin());
+		existing = position != overrides.end()
+			&& fluid_override_same_cell(*position, edit);
+		if (existing)
+			return (FT_ERR_SUCCESS);
+		if (overrides.size() >= max_overrides)
+			return (FT_ERR_FULL);
+		if (overrides.size() == overrides.capacity())
+		{
+			try
+			{
+				overrides.reserve(std::min(max_overrides,
+					std::max<std::size_t>(1U, overrides.size() * 2U)));
+			}
+			catch (...)
+			{
+				return (FT_ERR_NO_MEMORY);
+			}
+		}
+		return (FT_ERR_SUCCESS);
+	}
+
+	template <typename T>
+	static void commit_fluid_override(std::vector<T> &overrides,
+		const T &edit, std::size_t index, bool existing) noexcept
+	{
+		if (existing)
+			overrides[index] = edit;
+		else
+			overrides.insert(overrides.begin() + static_cast<std::ptrdiff_t>(index),
+				edit);
 	}
 
 	static void fluid_state_append_u32(std::vector<uint8_t> &bytes,
@@ -515,41 +500,19 @@ int32_t World::delete_block_at(int32_t world_x, int32_t world_y,
 	int32_t world_z)
 {
 	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
-	std::vector<FluidCellOverride> staged;
-	int32_t result;
 	if (world_y < 0 || world_y >= GAME_VOXEL_CHUNK_HEIGHT)
 		return (FT_ERR_INVALID_ARGUMENT);
-	try
-	{
-		staged = this->fluid_cell_overrides_;
-		std::size_t index = 0U;
-		for (; index < staged.size(); ++index)
-			if (staged[index].world_x == world_x
-				&& staged[index].world_y == world_y
-				&& staged[index].world_z == world_z)
-				break ;
-		if (index == staged.size())
-		{
-			if (staged.size() >= 16384U)
-				return (FT_ERR_FULL);
-			staged.push_back({world_x, world_y, world_z, GAME_VOXEL_AIR_BLOCK});
-		}
-		else
-			staged[index].block_id = GAME_VOXEL_AIR_BLOCK;
-		std::sort(staged.begin(), staged.end(),
-			[](const FluidCellOverride &left, const FluidCellOverride &right)
-			{
-				return (fluid_override_less(left, right));
-			});
-	}
-	catch (...)
-	{
-		return (FT_ERR_NO_MEMORY);
-	}
+	const FluidCellOverride edit = {world_x, world_y, world_z, GAME_VOXEL_AIR_BLOCK};
+	std::size_t index;
+	bool existing;
+	int32_t result = prepare_fluid_override(this->fluid_cell_overrides_, edit,
+		index, existing);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
 	result = WorldBlockEditor::delete_block_at(*this, world_x, world_y,
 		world_z);
 	if (result == FT_ERR_SUCCESS)
-		this->fluid_cell_overrides_.swap(staged);
+		commit_fluid_override(this->fluid_cell_overrides_, edit, index, existing);
 	return (result);
 }
 
@@ -557,41 +520,19 @@ int32_t World::place_block_at(int32_t world_x, int32_t world_y, int32_t world_z,
 	uint32_t block_id)
 {
 	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
-	std::vector<FluidCellOverride> staged;
-	int32_t result;
 	if (world_y < 0 || world_y >= GAME_VOXEL_CHUNK_HEIGHT)
 		return (FT_ERR_INVALID_ARGUMENT);
-	try
-	{
-		staged = this->fluid_cell_overrides_;
-		std::size_t index = 0U;
-		for (; index < staged.size(); ++index)
-			if (staged[index].world_x == world_x
-				&& staged[index].world_y == world_y
-				&& staged[index].world_z == world_z)
-				break ;
-		if (index == staged.size())
-		{
-			if (staged.size() >= 16384U)
-				return (FT_ERR_FULL);
-			staged.push_back({world_x, world_y, world_z, block_id});
-		}
-		else
-			staged[index].block_id = block_id;
-		std::sort(staged.begin(), staged.end(),
-			[](const FluidCellOverride &left, const FluidCellOverride &right)
-			{
-				return (fluid_override_less(left, right));
-			});
-	}
-	catch (...)
-	{
-		return (FT_ERR_NO_MEMORY);
-	}
+	const FluidCellOverride edit = {world_x, world_y, world_z, block_id};
+	std::size_t index;
+	bool existing;
+	int32_t result = prepare_fluid_override(this->fluid_cell_overrides_, edit,
+		index, existing);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
 	result = WorldBlockEditor::place_block_at(*this, world_x, world_y,
 		world_z, block_id);
 	if (result == FT_ERR_SUCCESS)
-		this->fluid_cell_overrides_.swap(staged);
+		commit_fluid_override(this->fluid_cell_overrides_, edit, index, existing);
 	return (result);
 }
 
@@ -610,53 +551,68 @@ int32_t World::replace_fluid_source_at(int32_t world_x, int32_t world_y,
 
 int32_t World::replace_block_state_at(int32_t world_x, int32_t world_y,
 	int32_t world_z, uint32_t expected_block_id,
-	uint32_t replacement_block_id, uint64_t expected_voxel_revision)
+	uint32_t replacement_block_id, uint64_t expected_voxel_revision,
+	WorldTerrainChunkStore::PreparedEdit *prepared)
 {
 	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
-	std::vector<FluidCellOverride> staged;
-	std::size_t existing_index = 0U;
-	bool found = false;
-	int32_t result;
-
 	if (world_y < 0 || world_y >= GAME_VOXEL_CHUNK_HEIGHT)
 		return (FT_ERR_INVALID_ARGUMENT);
-	try
-	{
-		staged = this->fluid_cell_overrides_;
-		while (existing_index < staged.size())
-		{
-			if (staged[existing_index].world_x == world_x
-				&& staged[existing_index].world_y == world_y
-				&& staged[existing_index].world_z == world_z)
-			{
-				staged[existing_index].block_id = replacement_block_id;
-				found = true;
-				break;
-			}
-			++existing_index;
-		}
-		if (!found)
-		{
-			if (staged.size() >= 16384U)
-				return (FT_ERR_FULL);
-			staged.push_back({world_x, world_y, world_z,
-				replacement_block_id});
-		}
-		std::sort(staged.begin(), staged.end(),
-			[](const FluidCellOverride &left, const FluidCellOverride &right)
-			{
-				return (fluid_override_less(left, right));
-			});
-	}
-	catch (...)
-	{
-		return (FT_ERR_NO_MEMORY);
-	}
+	const FluidCellOverride edit = {world_x, world_y, world_z, replacement_block_id};
+	std::size_t index;
+	bool existing;
+	int32_t result = prepare_fluid_override(this->fluid_cell_overrides_, edit,
+		index, existing);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
 	result = WorldBlockEditor::replace_block_state(*this, world_x, world_y,
-		world_z, expected_block_id, replacement_block_id,
-		expected_voxel_revision);
+		world_z, expected_block_id, replacement_block_id, expected_voxel_revision,
+		prepared);
 	if (result == FT_ERR_SUCCESS)
-		this->fluid_cell_overrides_.swap(staged);
+		commit_fluid_override(this->fluid_cell_overrides_, edit, index, existing);
+	return (result);
+}
+
+int32_t World::capture_block_state_write(int32_t world_x, int32_t world_y,
+	int32_t world_z, uint32_t expected_block_id, uint32_t replacement_block_id,
+	uint64_t expected_voxel_revision,
+	std::unique_ptr<WorldTerrainChunkStore::PreparedEdit> &out) const noexcept
+{
+	out.reset();
+	if (world_y < 0 || world_y >= GAME_VOXEL_CHUNK_HEIGHT)
+		return (FT_ERR_INVALID_ARGUMENT);
+	std::shared_lock<std::shared_mutex> lock(this->world_data_mutex_);
+	if (!this->terrain_chunk_store_.is_initialized())
+		return (FT_ERR_SUCCESS);
+	const int32_t chunk_x = WorldCoordinates::floor_divide(world_x, GAME_VOXEL_CHUNK_WIDTH);
+	const int32_t chunk_z = WorldCoordinates::floor_divide(world_z, GAME_VOXEL_CHUNK_DEPTH);
+	const WorldChunk *chunk = this->find_chunk(chunk_x, chunk_z);
+	if (chunk == nullptr || !chunk->initialized || chunk->read_state == nullptr)
+		return (FT_ERR_NOT_FOUND);
+	if (chunk->voxel_revision != expected_voxel_revision)
+		return (FT_ERR_INVALID_STATE);
+	auto edit = std::unique_ptr<WorldTerrainChunkStore::PreparedEdit>(
+		new (std::nothrow) WorldTerrainChunkStore::PreparedEdit());
+	if (edit == nullptr)
+		return (FT_ERR_NO_MEMORY);
+	edit->chunk_x = chunk_x;
+	edit->chunk_z = chunk_z;
+	edit->world_y = world_y;
+	edit->local_x = world_x - chunk->world_x;
+	edit->local_z = world_z - chunk->world_z;
+	edit->replacement = replacement_block_id;
+	edit->base = chunk->read_state;
+	edit->terrain_revision = chunk->chunk.get_revision();
+	if (edit->base->block_at(edit->local_x, world_y, edit->local_z) != expected_block_id)
+		return (FT_ERR_INVALID_STATE);
+	int32_t result = this->terrain_chunk_store_.capture_stream_path(chunk_x,
+		chunk_z, edit->destination);
+	if (result == FT_ERR_SUCCESS)
+		result = edit->voxels.initialize(chunk->chunk);
+	if (result == FT_ERR_SUCCESS)
+		result = edit->voxels.write_block(edit->local_x, world_y, edit->local_z,
+			replacement_block_id);
+	if (result == FT_ERR_SUCCESS && !edit->destination.empty())
+		out = std::move(edit);
 	return (result);
 }
 
@@ -1005,24 +961,33 @@ int32_t World::apply_fluid_state_to_chunk(WorldChunk &chunk,
 int32_t World::apply_authoritative_block_change(
 	const game_block_change_request &request, game_block_delta *delta_out)
 {
+#if defined(LIBFT_ENABLE_ANALYTICS)
+	using Clock = std::chrono::steady_clock;
+	const auto started = Clock::now();
+	const auto elapsed_us = [](Clock::time_point from, Clock::time_point to)
+	{
+		return (static_cast<uint64_t>(std::chrono::duration_cast<
+			std::chrono::microseconds>(to - from).count()));
+	};
+#endif
 	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
+#if defined(LIBFT_ENABLE_ANALYTICS)
+	const auto lock_acquired = Clock::now();
+	uint64_t rollback_us = 0U;
+	uint64_t persistence_us = 0U;
+#endif
 	WorldChunk *world_chunk;
 	uint64_t previous_revision;
 	uint64_t current_revision;
-	uint64_t previous_world_voxel_revision;
-	uint64_t previous_geometry_revision;
-	uint16_t previous_content_version;
-	uint16_t previous_light_input_version;
 	uint32_t existing_block_id;
 	uint8_t existing_light;
-	uint8_t previous_boundary_source_light_max[4];
-	bool previous_boundary_target_has_transparent[4];
 	ft_bool incremental_additive_light;
 	ft_bool incremental_removal_light;
 	bool terrain_persistence_enabled;
 	game_block_edit_op edit;
 	WorldEditHistory::Record record;
-	WorldVoxelChunkRollbackSnapshot terrain_rollback;
+	game_voxel_chunk terrain_rollback;
+	game_block_delta accepted_delta;
 	int32_t error_code;
 
 	if (delta_out == nullptr || request.local_x >= GAME_VOXEL_CHUNK_WIDTH
@@ -1045,82 +1010,58 @@ int32_t World::apply_authoritative_block_change(
 	existing_light = world_chunk->light.get(request.local_x, request.local_y,
 		request.local_z);
 	previous_revision = world_chunk->chunk.get_revision();
-	previous_world_voxel_revision = world_chunk->voxel_revision;
-	previous_geometry_revision = this->geometry_revision;
-	previous_content_version = world_chunk->content_version;
-	previous_light_input_version = world_chunk->light_input_version;
-	std::shared_ptr<const WorldChunkReadState> previous_read_state =
-		world_chunk->read_state;
-	std::memcpy(previous_boundary_source_light_max,
-		world_chunk->boundary_source_light_max,
-		sizeof(previous_boundary_source_light_max));
-	std::memcpy(previous_boundary_target_has_transparent,
-		world_chunk->boundary_target_has_transparent,
-		sizeof(previous_boundary_target_has_transparent));
+	std::shared_ptr<WorldChunkReadState> prepared_read_state;
+	error_code = world_chunk->prepare_read_state_after_block_edit(
+		request.local_x, request.local_y, request.local_z,
+		request.requested_block_id, prepared_read_state);
+	if (error_code != FT_ERR_SUCCESS)
+		return (error_code);
 	terrain_persistence_enabled = this->terrain_chunk_store().is_initialized();
 	if (terrain_persistence_enabled)
 	{
-		error_code = terrain_rollback.capture(world_chunk->chunk);
+#if defined(LIBFT_ENABLE_ANALYTICS)
+		const auto rollback_started = Clock::now();
+#endif
+		error_code = terrain_rollback.initialize(world_chunk->chunk);
+#if defined(LIBFT_ENABLE_ANALYTICS)
+		rollback_us = elapsed_us(rollback_started, Clock::now());
+#endif
 		if (error_code != FT_ERR_SUCCESS)
 			return (error_code);
 	}
 	error_code = world_chunk->chunk.apply_authoritative_block_change(request,
-		delta_out);
+		&accepted_delta);
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
 	current_revision = world_chunk->chunk.get_revision();
 	if (current_revision == previous_revision)
+	{
+		*delta_out = accepted_delta;
 		return (FT_ERR_SUCCESS);
+	}
+	if (terrain_persistence_enabled)
+	{
+#if defined(LIBFT_ENABLE_ANALYTICS)
+		const auto save_started = Clock::now();
+#endif
+		error_code = this->terrain_chunk_store().save_chunk(request.chunk_x,
+			request.chunk_z, world_chunk->chunk);
+#if defined(LIBFT_ENABLE_ANALYTICS)
+		persistence_us = elapsed_us(save_started, Clock::now());
+#endif
+		if (error_code != FT_ERR_SUCCESS)
+		{
+			if (world_chunk->chunk.move(terrain_rollback) != FT_ERR_SUCCESS)
+				return (FT_ERR_INVALID_STATE);
+			return (error_code);
+		}
+	}
+	*delta_out = accepted_delta;
 	world_chunk->voxel_revision = current_revision;
 	world_chunk->content_version = world_light_version::next(
 		world_chunk->content_version);
 	world_chunk->mark_light_input_changed();
-	error_code = world_chunk->publish_read_state_after_block_edit(
-		static_cast<int32_t>(request.local_x),
-		static_cast<int32_t>(request.local_y),
-		static_cast<int32_t>(request.local_z), request.requested_block_id);
-	if (error_code != FT_ERR_SUCCESS)
-	{
-		if (terrain_persistence_enabled)
-		{
-			if (terrain_rollback.restore(world_chunk->chunk) != FT_ERR_SUCCESS)
-				return (FT_ERR_INVALID_STATE);
-			world_chunk->voxel_revision = previous_world_voxel_revision;
-			world_chunk->content_version = previous_content_version;
-			world_chunk->light_input_version = previous_light_input_version;
-			world_chunk->read_state = previous_read_state;
-			std::memcpy(world_chunk->boundary_source_light_max,
-				previous_boundary_source_light_max,
-				sizeof(previous_boundary_source_light_max));
-			std::memcpy(world_chunk->boundary_target_has_transparent,
-				previous_boundary_target_has_transparent,
-				sizeof(previous_boundary_target_has_transparent));
-		}
-		return (error_code);
-	}
-	if (terrain_persistence_enabled)
-	{
-		error_code = this->terrain_chunk_store().save_chunk(request.chunk_x,
-			request.chunk_z, world_chunk->chunk);
-		if (error_code != FT_ERR_SUCCESS)
-		{
-			if (terrain_rollback.restore(world_chunk->chunk) != FT_ERR_SUCCESS)
-				return (FT_ERR_INVALID_STATE);
-			world_chunk->voxel_revision = previous_world_voxel_revision;
-			world_chunk->content_version = previous_content_version;
-			world_chunk->light_input_version = previous_light_input_version;
-			world_chunk->read_state = previous_read_state;
-			std::memcpy(world_chunk->boundary_source_light_max,
-				previous_boundary_source_light_max,
-				sizeof(previous_boundary_source_light_max));
-			std::memcpy(world_chunk->boundary_target_has_transparent,
-				previous_boundary_target_has_transparent,
-				sizeof(previous_boundary_target_has_transparent));
-			this->geometry_revision = previous_geometry_revision;
-			return (error_code);
-		}
-	}
-	this->mark_geometry_changed();
+	world_chunk->commit_prepared_read_state(prepared_read_state);
 	this->chunk_streamer.mark_remesh_dirty(*world_chunk);
 	(void)this->invalidate_loom_station_if_block_changed(
 		request.chunk_x * GAME_VOXEL_CHUNK_WIDTH
@@ -1183,6 +1124,18 @@ int32_t World::apply_authoritative_block_change(
 		&& world_chunk->pending_mesh_request_id == 0U)
 		this->chunk_streamer.prioritize_chunk_remesh(request.chunk_x,
 			request.chunk_z);
+#if defined(LIBFT_ENABLE_ANALYTICS)
+	const uint64_t total_us = elapsed_us(started, Clock::now());
+	if (total_us >= 2000U)
+		std::fprintf(stderr,
+			"[Analytics][World] authoritative block edit chunk=(%d,%d) block=%u"
+			" total_us=" FT_UINT64_DECIMAL_FORMAT
+			" lock_wait_us=" FT_UINT64_DECIMAL_FORMAT
+			" rollback_snapshot_us=" FT_UINT64_DECIMAL_FORMAT
+			" save_us=" FT_UINT64_DECIMAL_FORMAT "\n",
+			request.chunk_x, request.chunk_z, request.requested_block_id,
+			total_us, elapsed_us(started, lock_acquired), rollback_us, persistence_us);
+#endif
 	return (FT_ERR_SUCCESS);
 }
 

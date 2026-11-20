@@ -27,7 +27,8 @@ class WorldChunkSnapshotCapture
 		const std::shared_ptr<const WorldChunkReadState> &northeast,
 		const std::shared_ptr<const WorldChunkReadState> &southwest,
 		const std::shared_ptr<const WorldChunkReadState> &southeast,
-		WorldGenerationPipeline::WorldChunkSnapshot &snapshot) noexcept;
+		WorldGenerationPipeline::WorldChunkSnapshot &snapshot,
+		bool include_full_lighting_halo = true) noexcept;
 
   private:
 	static int32_t capture_blocks(const WorldChunk &target,

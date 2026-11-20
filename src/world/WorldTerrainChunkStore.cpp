@@ -68,6 +68,9 @@ namespace
 			result = FT_ERR_OUT_OF_RANGE;
 		if (result == FT_ERR_SUCCESS)
 			result = file_read_all(path, contents);
+		if (result == FT_ERR_SUCCESS
+			&& contents.size() > WORLD_TERRAIN_CHUNK_MAX_BYTES)
+			result = FT_ERR_OUT_OF_RANGE;
 		if (result == FT_ERR_SUCCESS)
 		{
 			try
@@ -161,7 +164,7 @@ int32_t WorldTerrainChunkStore::initialize(
 }
 
 int32_t WorldTerrainChunkStore::chunk_path(int32_t chunk_x, int32_t chunk_z,
-	std::string &path_out) const noexcept
+	std::string &path_out, bool validate_resolution) const noexcept
 {
 	char filename[64];
 	if (!this->initialized_)
@@ -180,21 +183,17 @@ int32_t WorldTerrainChunkStore::chunk_path(int32_t chunk_x, int32_t chunk_z,
 	{
 		return (FT_ERR_NO_MEMORY);
 	}
+	if (!validate_resolution)
+		return (FT_ERR_SUCCESS);
 	return (file_validate_path_resolution_inside_root("saves/terrain",
 		path_out.c_str()));
 }
 
-int32_t WorldTerrainChunkStore::save_chunk(int32_t chunk_x, int32_t chunk_z,
-	const game_voxel_chunk &chunk) const noexcept
+static int32_t encode_terrain_chunk(int32_t chunk_x, int32_t chunk_z,
+	const game_voxel_chunk &chunk, std::vector<uint8_t> &record) noexcept
 {
-	std::lock_guard<std::mutex> lock(this->mutex_);
 	ft_byte_buffer payload;
-	std::vector<uint8_t> record;
-	std::string path;
-	int32_t result = this->chunk_path(chunk_x, chunk_z, path);
-	if (result != FT_ERR_SUCCESS)
-		return (result);
-	result = payload.initialize();
+	int32_t result = payload.initialize();
 	const bool payload_initialized = result == FT_ERR_SUCCESS;
 	if (result == FT_ERR_SUCCESS)
 		result = chunk.serialize(payload);
@@ -226,12 +225,108 @@ int32_t WorldTerrainChunkStore::save_chunk(int32_t chunk_x, int32_t chunk_z,
 		(void)payload.destroy();
 		return (FT_ERR_NO_MEMORY);
 	}
-	const int32_t destroy_result = payload.destroy();
-	if (destroy_result != FT_ERR_SUCCESS)
-		return (destroy_result);
+	return (payload.destroy());
+}
+
+int32_t WorldTerrainChunkStore::save_chunk(int32_t chunk_x, int32_t chunk_z,
+	const game_voxel_chunk &chunk) const noexcept
+{
+	std::lock_guard<std::mutex> lock(this->mutex_);
+	std::string path;
+	std::vector<uint8_t> record;
+	int32_t result = this->chunk_path(chunk_x, chunk_z, path);
+	if (result == FT_ERR_SUCCESS)
+		result = encode_terrain_chunk(chunk_x, chunk_z, chunk, record);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
 	return (file_write_all_atomic(path.c_str(),
 		reinterpret_cast<const char *>(record.data()),
-		static_cast<ft_size_t>(record.size())));
+		FT_NATIVE_SIZE_TO_FT_SIZE_CAST(record.size())));
+}
+
+WorldTerrainChunkStore::StagedChunk::~StagedChunk() noexcept
+{
+	if (!this->path_.empty())
+		(void)file_delete(this->path_.c_str());
+}
+
+int32_t WorldTerrainChunkStore::StagedChunk::prepare(
+	const std::string &destination, int32_t chunk_x, int32_t chunk_z,
+	const game_voxel_chunk &chunk) noexcept
+{
+	if (destination.empty() || !this->path_.empty())
+		return (FT_ERR_INVALID_ARGUMENT);
+	std::vector<uint8_t> record;
+	int32_t result = encode_terrain_chunk(chunk_x, chunk_z, chunk, record);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	ft_string temp_path;
+	result = temp_path.initialize();
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	ft_string *directory = file_path_dirname_string(destination.c_str());
+	if (directory == nullptr)
+		return (FT_ERR_NO_MEMORY);
+	int32_t descriptor = -1;
+	/* Keep temporary files out of the canonical chunk list used by world
+	 * backup/export. The subdirectory is on the same filesystem. */
+	result = directory->append("/.stream");
+	if (result == FT_ERR_SUCCESS)
+		result = file_create_directories(directory->c_str(), 0700);
+	if (result == FT_ERR_SUCCESS)
+		result = file_validate_path_resolution_inside_root("saves/terrain",
+			directory->c_str());
+	if (result == FT_ERR_SUCCESS)
+		result = file_secure_temp_file(directory->c_str(), "stream",
+			&temp_path, &descriptor);
+	delete directory;
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	result = file_close_descriptor(descriptor);
+	if (result == FT_ERR_SUCCESS)
+		result = file_write_all_atomic(temp_path.c_str(),
+			reinterpret_cast<const char *>(record.data()),
+			FT_NATIVE_SIZE_TO_FT_SIZE_CAST(record.size()));
+	try
+	{
+		if (result == FT_ERR_SUCCESS)
+		{
+			this->destination_.assign(destination);
+			this->path_.assign(temp_path.c_str());
+		}
+	}
+	catch (const std::bad_alloc &)
+	{
+		result = FT_ERR_NO_MEMORY;
+	}
+	if (result != FT_ERR_SUCCESS)
+	{
+		(void)file_delete(temp_path.c_str());
+	}
+	return (result);
+}
+
+int32_t WorldTerrainChunkStore::commit_staged_chunk(int32_t chunk_x,
+	int32_t chunk_z, StagedChunk &staged, bool replace_existing) const noexcept
+{
+	if (staged.path_.empty())
+		return (FT_ERR_INVALID_STATE);
+	std::lock_guard<std::mutex> lock(this->mutex_);
+	std::string destination;
+	int32_t result = this->chunk_path(chunk_x, chunk_z, destination);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	if (destination != staged.destination_)
+		return (FT_ERR_INVALID_ARGUMENT);
+	/* Stream results only create new payloads. An edit publisher can replace
+	 * a regular payload after checking the live voxel version under its lock. */
+	const file_type type = file_get_type(destination.c_str());
+	if (type != FILE_TYPE_MISSING && (!replace_existing || type != FILE_TYPE_REGULAR))
+		return (FT_ERR_ALREADY_EXISTS);
+	result = file_move(staged.path_.c_str(), destination.c_str());
+	if (result == FT_ERR_SUCCESS)
+		staged.path_.clear();
+	return (result);
 }
 
 int32_t WorldTerrainChunkStore::load_chunk(int32_t chunk_x, int32_t chunk_z,
@@ -239,10 +334,30 @@ int32_t WorldTerrainChunkStore::load_chunk(int32_t chunk_x, int32_t chunk_z,
 {
 	std::lock_guard<std::mutex> lock(this->mutex_);
 	std::string path;
-	std::vector<uint8_t> record;
+	const int32_t result = this->chunk_path(chunk_x, chunk_z, path, false);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	return (load_stream_chunk(path, chunk_x, chunk_z, chunk));
+}
+
+int32_t WorldTerrainChunkStore::capture_stream_path(int32_t chunk_x,
+	int32_t chunk_z, std::string &path_out) const noexcept
+{
+	std::lock_guard<std::mutex> lock(this->mutex_);
+	path_out.clear();
 	if (!this->initialized_)
-		return (FT_ERR_NOT_INITIALISED);
-	int32_t result = this->chunk_path(chunk_x, chunk_z, path);
+		return (FT_ERR_SUCCESS);
+	return (this->chunk_path(chunk_x, chunk_z, path_out, false));
+}
+
+int32_t WorldTerrainChunkStore::load_stream_chunk(const std::string &path,
+	int32_t chunk_x, int32_t chunk_z, game_voxel_chunk &chunk) noexcept
+{
+	std::vector<uint8_t> record;
+	if (path.empty())
+		return (FT_ERR_NOT_FOUND);
+	int32_t result = file_validate_path_resolution_inside_root("saves/terrain",
+		path.c_str());
 	if (result != FT_ERR_SUCCESS)
 		return (result);
 	const file_type type = file_get_type(path.c_str());

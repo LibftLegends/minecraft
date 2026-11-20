@@ -4,8 +4,13 @@
 #include "../../src/inventory/MinecraftLootCatalog.hpp"
 #include "../../src/entities/WorldItemStore.hpp"
 #include "../../src/transactions/WorldFarmlandTransaction.hpp"
+#include "../../src/transactions/WorldItemPickupTransaction.hpp"
 #include "../../src/camera/Camera.hpp"
 #include "../../src/app/GameSession.hpp"
+#include "../../src/app/GameSessionPersistence.hpp"
+#include "../../src/world/WorldChunkGenerationWorker.hpp"
+#include "../../Libft/Modules/Basic/limits.hpp"
+#include "../../Libft/Modules/File/file_utils.hpp"
 #include <algorithm>
 #include <chrono>
 #include <memory>
@@ -15,6 +20,373 @@
 
 namespace
 {
+	static int32_t validate_ground_item_snapshot_refresh()
+	{
+		MinecraftItemCatalog catalog;
+		WorldItemStore items;
+		WorldItemStore restored;
+		game_inventory inventory;
+		const int32_t item_id = MinecraftItemCatalog::BLOCK_ITEM_ID_BASE
+			+ static_cast<int32_t>(VOXEL_GENERATOR_STONE_BLOCK);
+		uint64_t entities[2] = {};
+		int32_t result = catalog.initialize();
+		if (result == FT_ERR_SUCCESS)
+			result = items.initialize();
+		if (result == FT_ERR_SUCCESS)
+			result = restored.initialize();
+		if (result == FT_ERR_SUCCESS)
+			result = inventory.initialize(8U, 1000);
+		for (int32_t index = 0; index < 2 && result == FT_ERR_SUCCESS; ++index)
+		{
+			ft_sharedptr<game_item> stack;
+			result = catalog.create_item(item_id, 3 + index, &stack);
+			if (result == FT_ERR_SUCCESS)
+				result = items.spawn(stack, 0.5 * index, 1.0, 0.0,
+					1U, 0U, 0U, &entities[index]);
+		}
+		std::vector<WorldItemSnapshot> nearby;
+		if (result == FT_ERR_SUCCESS)
+			result = items.query_renderable(0.0, 1.0, 0.0, 2.0, &nearby);
+		if (result != FT_ERR_SUCCESS || nearby.size() != 2U
+			|| nearby[0].quantity != 3 || nearby[1].quantity != 4)
+			return (ApplicationError::fail("block-edit ground item snapshot baseline", 1));
+		int32_t merged = 0;
+		result = items.merge_stacks(entities[0], nearby[0].entity_revision,
+			entities[1], nearby[1].entity_revision, &merged);
+		if (result == FT_ERR_SUCCESS)
+			result = items.query_renderable(0.0, 1.0, 0.0, 2.0, &nearby);
+		if (result != FT_ERR_SUCCESS || merged != 3 || nearby.size() != 1U
+			|| nearby[0].quantity != 7)
+			return (ApplicationError::fail("block-edit ground item merged snapshot", 1));
+		uint64_t inventory_revision = 0U;
+		result = inventory.get_revision(&inventory_revision);
+		WorldItemPickupResult pickup = {};
+		if (result == FT_ERR_SUCCESS)
+			result = items.pickup(entities[1], nearby[0].entity_revision, 1U,
+				1U, inventory_revision, 2, 0.0, 1.0, 0.0, 1U, inventory, &pickup);
+		std::vector<uint8_t> bytes;
+		if (result == FT_ERR_SUCCESS)
+			result = items.serialize(bytes);
+		if (result == FT_ERR_SUCCESS)
+			result = restored.deserialize(bytes.data(), bytes.size());
+		if (result == FT_ERR_SUCCESS)
+			result = restored.query_renderable(0.0, 1.0, 0.0, 2.0, &nearby);
+		if (result != FT_ERR_SUCCESS || nearby.size() != 1U
+			|| nearby[0].quantity != 5 || pickup.transferred_quantity != 2)
+			return (ApplicationError::fail("block-edit saved ground item snapshot", 1));
+		std::printf("block-edit: shared ground item snapshots refreshed after merge and pickup\n");
+		return (FT_ERR_SUCCESS);
+	}
+
+	static int32_t validate_deferred_mining_action(World &world, int32_t x,
+		int32_t y, int32_t z) noexcept
+	{
+		MinecraftItemCatalog catalog;
+		WorldItemStore items;
+		GameTransactionJournal journal;
+		struct Checkpoints
+		{
+			uint32_t sync = 0U;
+			uint32_t deferred = 0U;
+			bool reject = false;
+		} checkpoints;
+		const GameSessionSnapshotWriter writer = {
+			[](void *context) noexcept -> int32_t
+			{
+				++static_cast<Checkpoints *>(context)->sync;
+				return (FT_ERR_SUCCESS);
+			}, &checkpoints,
+			[](void *context) noexcept -> int32_t
+			{
+				auto &state = *static_cast<Checkpoints *>(context);
+				++state.deferred;
+				return (state.reject ? FT_ERR_IO : FT_ERR_SUCCESS);
+			}};
+		constexpr uint32_t stone = VOXEL_GENERATOR_STONE_BLOCK;
+		int32_t result = catalog.initialize();
+		if (result == FT_ERR_SUCCESS)
+			result = items.initialize();
+		if (result == FT_ERR_SUCCESS)
+			result = journal.initialize();
+		MinecraftBlockItemRule rule = {};
+		if (result == FT_ERR_SUCCESS)
+			result = catalog.resolve_block_item_rule(stone, &rule);
+		const WorldMiningDrop drop = {rule.item_id, 1};
+		const int32_t chunk_x = WorldCoordinates::floor_divide(x, GAME_VOXEL_CHUNK_WIDTH);
+		const int32_t chunk_z = WorldCoordinates::floor_divide(z, GAME_VOXEL_CHUNK_DEPTH);
+		for (uint64_t id = 1U; id <= 3U && result == FT_ERR_SUCCESS; ++id)
+		{
+			uint32_t current = 0U;
+			uint64_t pending = 0U;
+			GameTransactionJournal::Record record = {};
+			result = world.place_block_at(x, y, z, stone);
+			const WorldChunk *chunk = world.find_chunk(chunk_x, chunk_z);
+			if (result != FT_ERR_SUCCESS || chunk == nullptr)
+				return (ApplicationError::fail("block-edit mining prepare fixture", 1));
+			checkpoints.reject = id == 3U;
+			result = WorldBlockMiningTransaction::execute("mining-fixture", world,
+				catalog, items, journal, id, 1U, 1U, x, y, z, stone, GAME_VOXEL_AIR_BLOCK,
+				chunk->voxel_revision, &drop, 1U, &writer, nullptr, -1, 0, 0U, 0U,
+				nullptr, &pending);
+			if (checkpoints.reject)
+			{
+				if (result != FT_ERR_IO || pending != 0U
+					|| journal.find(WorldBlockMiningTransaction::journal_scope(), id, &record)
+						!= FT_ERR_NOT_FOUND
+					|| !world.block_id_at(x, y, z, &current) || current != stone)
+					return (ApplicationError::fail("block-edit mining prepare failure", 1));
+				result = world.delete_block_at(x, y, z);
+				break ;
+			}
+			if (result != FT_ERR_SUCCESS || pending != id
+				|| !world.block_id_at(x, y, z, &current) || current != stone
+				|| journal.find(WorldBlockMiningTransaction::journal_scope(), id, &record)
+					!= FT_ERR_SUCCESS || record.state != GameTransactionJournal::PREPARED
+				|| checkpoints.deferred != id * 2U - 1U || checkpoints.sync != 0U)
+				return (ApplicationError::fail("block-edit prepare leaves voxel unchanged", 1));
+			if (id == 2U && world.delete_block_at(x, y, z) != FT_ERR_SUCCESS)
+				return (ApplicationError::fail("block-edit mining conflict fixture", 1));
+			result = WorldBlockMiningTransaction::complete_prepared("mining-fixture",
+				world, catalog, items, journal, pending, &writer, nullptr, nullptr);
+			if (result != FT_ERR_SUCCESS || !world.block_id_at(x, y, z, &current)
+				|| current != GAME_VOXEL_AIR_BLOCK || checkpoints.deferred != id * 2U
+				|| journal.find(WorldBlockMiningTransaction::journal_scope(), id, &record)
+					!= FT_ERR_SUCCESS || record.state != (id == 1U
+						? GameTransactionJournal::COMMITTED : GameTransactionJournal::ABORTED))
+				return (ApplicationError::fail("block-edit mining completion or conflict", 1));
+			std::vector<WorldItemSnapshot> nearby;
+			result = items.query_nearby(x + 0.5, y + 0.5, z + 0.5, 1.0, 1U, 1U, &nearby);
+			if (result != FT_ERR_SUCCESS || nearby.size() != 1U || nearby[0].quantity != 1)
+				return (ApplicationError::fail("block-edit mining duplicate drop", 1));
+		}
+		if (result == FT_ERR_SUCCESS)
+			std::printf("block-edit: mining prepare gated mutation and rejected a changed target\n");
+		return (result);
+	}
+
+	static int32_t validate_boundary_read_state()
+	{
+		constexpr int32_t east = GAME_VOXEL_CHUNK_WIDTH - 1;
+		constexpr int32_t south = GAME_VOXEL_CHUNK_DEPTH - 1;
+		constexpr uint32_t stone = VOXEL_GENERATOR_STONE_BLOCK;
+		WorldChunk chunk;
+		if (chunk.chunk.initialize() != FT_ERR_SUCCESS
+			|| chunk.light.initialize() != FT_ERR_SUCCESS
+			|| chunk_mesh_initialize(chunk.mesh) != FT_ERR_SUCCESS)
+			return (ApplicationError::fail("block-edit boundary snapshot fixture", 1));
+		chunk.initialized = true;
+		for (int32_t y = 0; y < GAME_VOXEL_CHUNK_HEIGHT; ++y)
+			for (int32_t z = 0; z < GAME_VOXEL_CHUNK_DEPTH; ++z)
+				if (chunk.chunk.write_generated_block(0, y, z, stone) != FT_ERR_SUCCESS)
+					return (ApplicationError::fail("block-edit sealed west boundary", 1));
+		if (chunk.light.set(east, 15, 8, voxel_light_pack(9U, 2U)) != FT_ERR_SUCCESS
+			|| chunk.light.set(0, 128, 8, voxel_light_pack(1U, 5U)) != FT_ERR_SUCCESS
+			|| chunk.light.set(8, 250, south, voxel_light_pack(4U, 11U)) != FT_ERR_SUCCESS
+			|| chunk.light.set(8, 32, 0, voxel_light_pack(13U, 1U)) != FT_ERR_SUCCESS
+			|| chunk.light.set(8, 32, 8, voxel_light_pack(15U, 15U)) != FT_ERR_SUCCESS
+			|| chunk.publish_read_state() != FT_ERR_SUCCESS)
+			return (ApplicationError::fail("block-edit boundary snapshot publish", 1));
+		const uint8_t expected[] = {9U, 5U, 11U, 13U};
+		for (uint8_t face = 0U; face < 4U; ++face)
+			if (chunk.get_boundary_source_light_max(face) != expected[face]
+				|| chunk.boundary_has_transparent_target(face) != (face != 0U))
+				return (ApplicationError::fail("block-edit boundary snapshot summaries", 1));
+		const auto old_state = chunk.read_state;
+		std::shared_ptr<WorldChunkReadState> edited_state;
+		if (chunk.prepare_read_state_after_block_edit(0, 128, 8,
+				GAME_VOXEL_AIR_BLOCK, edited_state) != FT_ERR_SUCCESS
+			|| chunk.chunk.write_block(0, 128, 8, GAME_VOXEL_AIR_BLOCK) != FT_ERR_SUCCESS)
+			return (ApplicationError::fail("block-edit boundary snapshot edit", 1));
+		chunk.mark_content_changed();
+		chunk.commit_prepared_read_state(edited_state);
+		if (!chunk.boundary_has_transparent_target(0U)
+			|| old_state->block_at(0, 128, 8) != stone
+			|| chunk.read_state->block_at(0, 128, 8) != GAME_VOXEL_AIR_BLOCK)
+			return (ApplicationError::fail("block-edit boundary snapshot update", 1));
+		const auto edited_blocks = chunk.read_state->block_sections;
+		const auto offset = WorldChunkReadState::light_offset(east, 15, 8);
+		auto patched_light = std::make_shared<std::vector<uint8_t>>(*old_state->light);
+		(*patched_light)[offset] = voxel_light_pack(0U, 4U);
+		std::shared_ptr<WorldChunkReadState> patched_state;
+		if (chunk.prepare_read_state_after_light_patch(patched_light, patched_state)
+				!= FT_ERR_SUCCESS || chunk.light.set(east, 15, 8, (*patched_light)[offset])
+				!= FT_ERR_SUCCESS)
+			return (ApplicationError::fail("block-edit prepare light snapshot patch", 1));
+		chunk.light_version = chunk.content_version;
+		chunk.computed_light_input_version = chunk.light_input_version;
+		chunk.commit_prepared_read_state(patched_state, 1U << 1U);
+		if (chunk.read_state->light != patched_light || (*old_state->light)[offset]
+				!= voxel_light_pack(9U, 2U)
+			|| chunk.read_state->block_sections != edited_blocks
+			|| chunk.get_boundary_source_light_max(0U) != 4U
+			|| chunk.get_boundary_source_light_max(1U) != expected[1]
+			|| chunk.read_state->light_version != chunk.content_version
+			|| !chunk.boundary_has_transparent_target(0U))
+			return (ApplicationError::fail("block-edit publish light snapshot patch", 1));
+		std::printf("block-edit: boundary snapshot summaries passed\n");
+		return (FT_ERR_SUCCESS);
+	}
+
+	static void initialize_sealed_light_snapshot(
+		WorldGenerationPipeline::WorldChunkSnapshot &snapshot)
+	{
+		const std::size_t cell_count = GAME_VOXEL_CHUNK_WIDTH
+			* GAME_VOXEL_CHUNK_HEIGHT * GAME_VOXEL_CHUNK_DEPTH;
+		snapshot.blocks.assign(cell_count, VOXEL_GENERATOR_STONE_BLOCK);
+		snapshot.existing_light.assign(cell_count, 0U);
+		snapshot.existing_light_valid = FT_TRUE;
+		snapshot.west_border_valid = FT_TRUE;
+		snapshot.east_border_valid = FT_TRUE;
+		snapshot.north_border_valid = FT_TRUE;
+		snapshot.south_border_valid = FT_TRUE;
+		snapshot.west_border.assign(GAME_VOXEL_CHUNK_HEIGHT * GAME_VOXEL_CHUNK_DEPTH,
+			VOXEL_GENERATOR_STONE_BLOCK);
+		snapshot.east_border = snapshot.west_border;
+		snapshot.north_border.assign(GAME_VOXEL_CHUNK_HEIGHT * GAME_VOXEL_CHUNK_WIDTH,
+			VOXEL_GENERATOR_STONE_BLOCK);
+		snapshot.south_border = snapshot.north_border;
+	}
+
+	static int32_t validate_independent_emitter_removal(uint32_t node_target,
+		bool expect_preview)
+	{
+		constexpr int32_t removed_x = 1;
+		constexpr int32_t surviving_x = 13;
+		constexpr int32_t y = 32;
+		constexpr int32_t z = 8;
+		const uint32_t emitter = VOXEL_GENERATOR_SHIMMER_STONE_BLOCK;
+		const int32_t emission = voxel_block_emitted_light_level(emitter);
+		const std::size_t row = (z * GAME_VOXEL_CHUNK_HEIGHT + y)
+			* GAME_VOXEL_CHUNK_WIDTH;
+		WorldGenerationPipeline::Request request = {};
+		request.snapshot = std::make_unique<WorldGenerationPipeline::WorldChunkSnapshot>();
+		auto &snapshot = *request.snapshot;
+		initialize_sealed_light_snapshot(snapshot);
+		for (int32_t x = 0; x < GAME_VOXEL_CHUNK_WIDTH; ++x)
+		{
+			snapshot.blocks[row + x] = GAME_VOXEL_AIR_BLOCK;
+			const int32_t distance = std::min(std::abs(x - removed_x),
+				std::abs(x - surviving_x));
+			snapshot.existing_light[row + x] = voxel_light_pack(0U,
+				static_cast<uint8_t>(std::max(0, emission - distance)));
+		}
+		snapshot.blocks[row + surviving_x] = emitter;
+		request.operation = WorldGenerationPipeline::WorldGenerationOperation::REMESH;
+		request.incremental_removal_light = FT_TRUE;
+		request.remesh_interactive = FT_TRUE;
+		request.incremental_light_seeds.push_back({FT_FALSE, FT_TRUE, FT_FALSE,
+			removed_x, y, z, emitter, GAME_VOXEL_AIR_BLOCK, 0U});
+		request.light_update_config = {1U, node_target, node_target * 2U, 100000U};
+		std::unique_ptr<WorldGenerationPipeline::Result> result;
+		bool preview_seen = false;
+		for (uint32_t step = 0U; step < 128U && result == nullptr; ++step)
+		{
+			const uint64_t before = request.incremental_processed_cells;
+			result = WorldChunkGenerationWorker::process_remesh(request);
+			if (request.incremental_processed_cells - before
+				> request.light_update_config.target_nodes_per_frame)
+				return (ApplicationError::fail("block-edit emitter slice budget", 1));
+			if (result != nullptr
+				&& (result->stage_mask & WorldGenerationPipeline::Result::STAGE_GEOMETRY_ONLY) != 0U)
+			{
+				if (preview_seen || result->error_code != FT_ERR_SUCCESS
+					|| result->mesh == nullptr || request.remesh_in_progress == FT_FALSE)
+					return (ApplicationError::fail("block-edit emitter preview", 1));
+				preview_seen = true;
+				result.reset();
+			}
+		}
+		if (result == nullptr || result->error_code != FT_ERR_SUCCESS
+			|| result->incremental_light_deltas_complete == FT_FALSE
+			|| result->incremental_light_samples == nullptr)
+			return (ApplicationError::fail("block-edit emitter frontier solve",
+				result == nullptr ? FT_ERR_TIMEOUT : result->error_code));
+		const auto &samples = *result->incremental_light_samples;
+		for (const auto &delta : result->incremental_light_deltas)
+		{
+			if (delta.local_y() != y || delta.local_z() != z)
+				return (ApplicationError::fail("block-edit emitter frontier escaped", 1));
+			if (samples[row + delta.local_x()] != delta.packed_light())
+				return (ApplicationError::fail("block-edit emitter patch sample", 1));
+		}
+		for (int32_t x = 0; x < GAME_VOXEL_CHUNK_WIDTH; ++x)
+		{
+			const uint8_t expected = voxel_light_pack(0U,
+				static_cast<uint8_t>(std::max(0, emission - std::abs(x - surviving_x))));
+			if (samples[row + x] != expected)
+			{
+				std::fprintf(stderr, "block-edit: surviving emitter mismatch x=%d "
+					"expected=%u actual=%u nodes=" FT_UINT64_DECIMAL_FORMAT "\n",
+					x, static_cast<unsigned int>(expected),
+					static_cast<unsigned int>(samples[row + x]),
+					result->light_scanned_cells);
+				return (ApplicationError::fail("block-edit surviving emitter light", 1));
+			}
+		}
+		if (result->light_scanned_cells > 32U)
+			return (ApplicationError::fail("block-edit removal visited the independent field", 1));
+		if (preview_seen != expect_preview)
+			return (ApplicationError::fail("block-edit emitter preview selection", 1));
+		std::printf("block-edit: independent emitter frontier passed nodes="
+			FT_UINT64_DECIMAL_FORMAT " preview=%d\n", result->light_scanned_cells,
+			preview_seen ? 1 : 0);
+		return (FT_ERR_SUCCESS);
+	}
+
+	static int32_t validate_emissive_roof_removal()
+	{
+		constexpr int32_t x = 8;
+		constexpr int32_t z = 8;
+		constexpr int32_t bottom = GAME_VOXEL_CHUNK_HEIGHT - 8;
+		constexpr int32_t roof = GAME_VOXEL_CHUNK_HEIGHT - 4;
+		const uint32_t emitter = VOXEL_GENERATOR_SHIMMER_STONE_BLOCK;
+		const int32_t emission = voxel_block_emitted_light_level(emitter);
+		WorldGenerationPipeline::Request request = {};
+		request.snapshot = std::make_unique<WorldGenerationPipeline::WorldChunkSnapshot>();
+		auto &snapshot = *request.snapshot;
+		initialize_sealed_light_snapshot(snapshot);
+		const auto index_at_height = [](int32_t y) noexcept
+		{
+			return (static_cast<std::size_t>((z * GAME_VOXEL_CHUNK_HEIGHT + y)
+				* GAME_VOXEL_CHUNK_WIDTH + x));
+		};
+		for (int32_t y = bottom; y < GAME_VOXEL_CHUNK_HEIGHT; ++y)
+		{
+			snapshot.blocks[index_at_height(y)] = GAME_VOXEL_AIR_BLOCK;
+			const int32_t block = std::max(0, emission - std::abs(y - roof));
+			snapshot.existing_light[index_at_height(y)] = voxel_light_pack(
+				y > roof ? 15U : 0U, static_cast<uint8_t>(block));
+		}
+		request.operation = WorldGenerationPipeline::WorldGenerationOperation::REMESH;
+		request.incremental_removal_light = FT_TRUE;
+		request.incremental_light_seeds.push_back({FT_FALSE, FT_TRUE, FT_FALSE,
+			x, roof, z, emitter, GAME_VOXEL_AIR_BLOCK, 0U});
+		request.light_update_config = {1U, 4U, 8U, 100000U};
+		std::unique_ptr<WorldGenerationPipeline::Result> result;
+		for (uint32_t step = 0U; step < 128U && result == nullptr; ++step)
+			result = WorldChunkGenerationWorker::process_remesh(request);
+		if (result == nullptr || result->error_code != FT_ERR_SUCCESS
+			|| result->incremental_light_deltas_complete == FT_FALSE
+			|| result->incremental_light_samples == nullptr)
+			return (ApplicationError::fail("block-edit emissive roof solve",
+				result == nullptr ? FT_ERR_TIMEOUT : result->error_code));
+		const auto &samples = *result->incremental_light_samples;
+		for (const auto &delta : result->incremental_light_deltas)
+		{
+			if (delta.local_x() != x || delta.local_z() != z || delta.local_y() < bottom)
+				return (ApplicationError::fail("block-edit emissive roof escaped shaft", 1));
+			if (samples[index_at_height(delta.local_y())] != delta.packed_light())
+				return (ApplicationError::fail("block-edit roof patch sample", 1));
+		}
+		for (int32_t y = bottom; y < GAME_VOXEL_CHUNK_HEIGHT; ++y)
+		{
+			if (samples[index_at_height(y)] != voxel_light_pack(15U, 0U))
+				return (ApplicationError::fail("block-edit direct sky below emissive roof", 1));
+		}
+		std::printf("block-edit: emissive roof removal restored full skylight down the shaft\n");
+		return (FT_ERR_SUCCESS);
+	}
+
 	static std::size_t nonzero_light_cells(const WorldChunk &chunk) noexcept
 	{
 		std::size_t count = 0U;
@@ -38,17 +410,29 @@ namespace
 		return (count);
 	}
 
-	static bool mesh_has_boundary_face(const WorldChunk &chunk,
-		uint8_t face, uint16_t boundary_x) noexcept
+	static bool mesh_has_lit_west_boundary_face(const WorldChunk &chunk,
+		int32_t y, int32_t z, uint8_t packed_light) noexcept
 	{
-		std::size_t index = 0U;
-
-		while (index < chunk.mesh.vertices.size())
+		for (std::size_t index = 0U; index + 3U < chunk.mesh.vertices.size();
+			index += 4U)
 		{
 			const chunk_mesh_vertex &vertex = chunk.mesh.vertices[index];
-			if (vertex.face == face && vertex.coordinate_x == boundary_x)
-				return (true);
-			index += 1U;
+			if (vertex.face != CHUNK_MESH_FACE_WEST || vertex.coordinate_x != 0U)
+				continue ;
+			int32_t min_y = vertex.coordinate_y;
+			int32_t min_z = vertex.coordinate_z;
+			int32_t max_y = min_y;
+			int32_t max_z = min_z;
+			for (std::size_t corner = index + 1U; corner < index + 4U; ++corner)
+			{
+				const chunk_mesh_vertex &point = chunk.mesh.vertices[corner];
+				min_y = std::min<int32_t>(min_y, point.coordinate_y);
+				min_z = std::min<int32_t>(min_z, point.coordinate_z);
+				max_y = std::max<int32_t>(max_y, point.coordinate_y);
+				max_z = std::max<int32_t>(max_z, point.coordinate_z);
+			}
+			if (y >= min_y && y < max_y && z >= min_z && z < max_z)
+				return (vertex.packed_light == packed_light);
 		}
 		return (false);
 	}
@@ -1097,11 +1481,16 @@ int BlockEditValidator::verify_delete_block(World &world, int32_t x, int32_t y,
 	int32_t		error_code;
 	WorldChunk	*chunk;
 	uint64_t previous_revision;
+	const uint64_t geometry_publications_before =
+		world.stream_diagnostics().remesh_geometry_only_count;
+	const uint64_t visible_revision_before = world.geometry_revision;
 
 	previous_revision = BlockEditValidator::mesh_revision_for_block(world, x, z);
 	error_code = world.delete_block_at(x, y, z);
 	if (error_code != FT_ERR_SUCCESS)
 		return (ApplicationError::fail("block-edit delete", error_code));
+	if (world.geometry_revision != visible_revision_before)
+		return (ApplicationError::fail("block-edit unpublished delete visibility", 1));
 	if (world.block_id_at(x, y, z, &block_id) == false
 		|| block_id != GAME_VOXEL_AIR_BLOCK)
 	{
@@ -1123,6 +1512,16 @@ int BlockEditValidator::verify_delete_block(World &world, int32_t x, int32_t y,
 		previous_revision);
 	if (error_code != FT_ERR_SUCCESS)
 		return (ApplicationError::fail("block-edit delete remesh", error_code));
+	if (world.geometry_revision == visible_revision_before)
+		return (ApplicationError::fail("block-edit published delete visibility", 1));
+	if (chunk->last_mesh_publication_voxel_revision != chunk->voxel_revision
+		|| (!chunk->light_is_current()
+			&& world.stream_diagnostics().remesh_geometry_only_count
+				<= geometry_publications_before))
+	{
+		std::fprintf(stderr, "block-edit: deletion has neither a lit mesh nor a preview\n");
+		return (1);
+	}
 	error_code = BlockEditValidator::wait_for_region_convergence(world, x, z,
 		previous_revision);
 	if (error_code != FT_ERR_SUCCESS)
@@ -1238,6 +1637,12 @@ int BlockEditValidator::validate_rapid_edit_supersession(World &world,
 	uint32_t block_id;
 	WorldChunk *chunk;
 
+	chunk = world.find_chunk_mutable(WorldCoordinates::floor_divide(x,
+		GAME_VOXEL_CHUNK_WIDTH), WorldCoordinates::floor_divide(z,
+		GAME_VOXEL_CHUNK_DEPTH));
+	if (chunk == nullptr || chunk->read_state == nullptr)
+		return (FT_ERR_NOT_FOUND);
+	const auto light_samples = chunk->read_state->light;
 	previous_revision = BlockEditValidator::mesh_revision_for_block(world,
 		x, z);
 	iteration = 0;
@@ -1270,6 +1675,10 @@ int BlockEditValidator::validate_rapid_edit_supersession(World &world,
 		|| chunk->pending_mesh_request_id != 0U || chunk->mesh_dirty)
 		return (ApplicationError::fail(
 			"block-edit rapid supersession final light", 1));
+	if (chunk->last_light_remesh_incremental == FT_FALSE
+		|| chunk->read_state == nullptr || chunk->read_state->light != light_samples)
+		return (ApplicationError::fail(
+			"block-edit rapid supersession rebuilt the published light", 1));
 	std::printf("block-edit: rapid supersession ok burst=%d\n", BURST_COUNT);
 	return (FT_ERR_SUCCESS);
 }
@@ -1312,6 +1721,9 @@ int BlockEditValidator::validate_interior_emissive_edit(World &world) noexcept
 		return (ApplicationError::fail("block-edit emissive interior", 1));
 	baseline_light = chunk->light.get(x - chunk_x * GAME_VOXEL_CHUNK_WIDTH,
 		y, z - chunk_z * GAME_VOXEL_CHUNK_DEPTH);
+	const auto light_index = WorldChunkReadState::light_offset(
+		x - chunk_x * GAME_VOXEL_CHUNK_WIDTH, y, z - chunk_z * GAME_VOXEL_CHUNK_DEPTH);
+	const auto baseline_samples = chunk->read_state->light;
 	previous_revision = BlockEditValidator::mesh_revision_for_block(world, x, z);
 	error_code = world.place_block_at(x, y, z,
 		VOXEL_GENERATOR_SHIMMER_STONE_BLOCK);
@@ -1332,7 +1744,9 @@ int BlockEditValidator::validate_interior_emissive_edit(World &world) noexcept
 			error_code));
 	source_light = chunk->light.get(x - chunk_x * GAME_VOXEL_CHUNK_WIDTH,
 		y, z - chunk_z * GAME_VOXEL_CHUNK_DEPTH);
-	if (source_light <= baseline_light || chunk->light_is_current() == false)
+	if (source_light <= baseline_light || chunk->light_is_current() == false
+		|| (*baseline_samples)[light_index] != baseline_light
+		|| (*chunk->read_state->light)[light_index] != source_light)
 		return (ApplicationError::fail("block-edit emissive source light", 1));
 	previous_revision = BlockEditValidator::mesh_revision_for_block(world, x, z);
 	error_code = world.delete_block_at(x, y, z);
@@ -1370,6 +1784,60 @@ int BlockEditValidator::validate_interior_emissive_edit(World &world) noexcept
 	std::printf("block-edit: interior emissive source=%u restored=%u\n",
 		static_cast<unsigned int>(source_light),
 		static_cast<unsigned int>(restored_light));
+
+	/* The edited voxel is one cell inside the chunk. The old scheduler
+	 * only notified the neighbor when the edited voxel itself was on a face. */
+	const int32_t edge_x = GAME_VOXEL_CHUNK_WIDTH - 2;
+	const int32_t test_y = GAME_VOXEL_CHUNK_HEIGHT - 24;
+	const int32_t east_x = GAME_VOXEL_CHUNK_WIDTH;
+	const WorldChunk *east = world.find_chunk(1, chunk_z);
+	if (east == nullptr || !east->initialized)
+		return (ApplicationError::fail("block-edit interior emitter east chunk", 1));
+	error_code = world.place_block_at(east_x, test_y, z + 1,
+		VOXEL_GENERATOR_STONE_BLOCK);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = wait_for_edit_baseline(world, east_x, z);
+	if (error_code != FT_ERR_SUCCESS)
+		return (ApplicationError::fail("block-edit interior emitter receiver", error_code));
+	previous_revision = chunk->mesh_revision;
+	error_code = world.place_block_at(edge_x, test_y, z,
+		VOXEL_GENERATOR_SHIMMER_STONE_BLOCK);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = BlockEditValidator::wait_for_region_convergence(world,
+			edge_x, z, previous_revision);
+	if (error_code != FT_ERR_SUCCESS)
+		return (ApplicationError::fail("block-edit interior emitter cross-chunk place", error_code));
+	const int32_t local_z = z - chunk_z * GAME_VOXEL_CHUNK_DEPTH;
+	const auto expected_level = static_cast<uint8_t>(voxel_block_emitted_light_level(
+		VOXEL_GENERATOR_SHIMMER_STONE_BLOCK) - 2U);
+	const uint8_t lit_face = chunk->light.get(GAME_VOXEL_CHUNK_WIDTH - 1,
+		test_y, local_z + 1);
+	if (!east->light_is_current()
+		|| voxel_light_block(east->light.get(0, test_y, local_z)) != expected_level
+		|| voxel_light_block(lit_face) != expected_level
+		|| !mesh_has_lit_west_boundary_face(*east, test_y, local_z + 1, lit_face))
+		return (ApplicationError::fail("block-edit interior emitter seam lighting", 1));
+	previous_revision = chunk->mesh_revision;
+	error_code = world.delete_block_at(edge_x, test_y, z);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = BlockEditValidator::wait_for_region_convergence(world,
+			edge_x, z, previous_revision);
+	if (error_code != FT_ERR_SUCCESS)
+		return (ApplicationError::fail("block-edit interior emitter cross-chunk remove", error_code));
+	const uint8_t unlit_face = chunk->light.get(GAME_VOXEL_CHUNK_WIDTH - 1,
+		test_y, local_z + 1);
+	if (!chunk->light_is_current() || !east->light_is_current()
+		|| voxel_light_block(chunk->light.get(GAME_VOXEL_CHUNK_WIDTH - 1,
+			test_y, local_z)) != 0U
+		|| voxel_light_block(east->light.get(0, test_y, local_z)) != 0U
+		|| voxel_light_block(unlit_face) != 0U
+		|| !mesh_has_lit_west_boundary_face(*east, test_y, local_z + 1, unlit_face))
+		return (ApplicationError::fail("block-edit interior emitter seam restoration", 1));
+	error_code = world.delete_block_at(east_x, test_y, z + 1);
+	if (error_code != FT_ERR_SUCCESS)
+		return (ApplicationError::fail("block-edit interior emitter receiver cleanup", error_code));
+	std::printf("block-edit: interior emitter updated neighbor light=%u then restored the face\n",
+		static_cast<unsigned int>(expected_level));
 	return (FT_ERR_SUCCESS);
 }
 
@@ -1790,6 +2258,7 @@ int BlockEditValidator::validate_solid_neighbor_geometry(World &world) noexcept
 			error_code));
 	target_before = target_chunk->mesh_revision;
 	neighbour_before = neighbour_chunk->mesh_revision;
+	const uint16_t neighbour_light_input_before = neighbour_chunk->light_input_version;
 	error_code = world.delete_block_at(world_x, y, world_z);
 	if (error_code != FT_ERR_SUCCESS)
 		return (ApplicationError::fail("block-edit solid-neighbor delete",
@@ -1802,11 +2271,21 @@ int BlockEditValidator::validate_solid_neighbor_geometry(World &world) noexcept
 	if (world.block_id_at(neighbour_x, y, world_z, &neighbour_block) == false
 		|| neighbour_block == air_block)
 		return (ApplicationError::fail("block-edit solid-neighbor preserved", 1));
-	if (!mesh_has_boundary_face(*neighbour_chunk, CHUNK_MESH_FACE_WEST, 0U))
+	const int32_t local_z = world_z - chunk_z * GAME_VOXEL_CHUNK_DEPTH;
+	const uint8_t cell_light = target_chunk->light.get(
+		GAME_VOXEL_CHUNK_WIDTH - 1, y, local_z);
+	const uint8_t expected_light = voxel_light_pack(voxel_light_sky(cell_light),
+		std::max(voxel_light_block(cell_light),
+			voxel_block_emitted_light_level(neighbour_block)));
+	if (!target_chunk->light_is_current()
+		|| !neighbour_chunk->light_is_current()
+		|| neighbour_chunk->light_input_version != neighbour_light_input_before
+		|| !mesh_has_lit_west_boundary_face(*neighbour_chunk, y, local_z,
+			expected_light))
 	{
 		std::fprintf(stderr,
-			"block-edit: neighbor west boundary face missing after adjacent "
-			"block deletion chunk=(%d,%d) y=%d mesh=%llu\n",
+			"block-edit: neighbor west boundary faces did not sample the "
+			"published light chunk=(%d,%d) y=%d mesh=%llu\n",
 			neighbour_chunk->chunk_x, neighbour_chunk->chunk_z, y,
 			static_cast<unsigned long long>(neighbour_chunk->mesh_revision));
 		return (ApplicationError::fail(
@@ -1865,6 +2344,11 @@ int BlockEditValidator::validate_rapid_border_supersession(World &world) noexcep
 	if (error_code != FT_ERR_SUCCESS)
 		return (ApplicationError::fail("block-edit rapid border idle",
 			error_code));
+	uint32_t border_block_id = GAME_VOXEL_AIR_BLOCK;
+	error_code = neighbour_chunk->chunk.read_block(0, y,
+		world_z - chunk_z * GAME_VOXEL_CHUNK_DEPTH, &border_block_id);
+	if (error_code != FT_ERR_SUCCESS)
+		return (error_code);
 	previous_revision = target_chunk->mesh_revision;
 	iteration = 0;
 	while (iteration < BURST_COUNT)
@@ -1894,6 +2378,11 @@ int BlockEditValidator::validate_rapid_border_supersession(World &world) noexcep
 		|| neighbour_chunk->pending_mesh_request_id != 0U
 		|| neighbour_chunk->mesh_dirty)
 		return (ApplicationError::fail("block-edit rapid border final state", 1));
+	if (target_chunk->last_light_remesh_incremental == FT_FALSE
+		|| (voxel_block_is_transparent(border_block_id) != FT_FALSE
+			&& neighbour_chunk->last_light_remesh_incremental == FT_FALSE))
+		return (ApplicationError::fail(
+			"block-edit rapid border supersession rebuilt published light", 1));
 	std::printf("block-edit: rapid border supersession ok burst=%d\n",
 		BURST_COUNT);
 	return (FT_ERR_SUCCESS);
@@ -1988,11 +2477,37 @@ noexcept
 	if (BlockEditValidator::wait_for_boundary_idle(world, first_x, world_z)
 		!= FT_ERR_SUCCESS)
 		return (ApplicationError::fail("block-edit simultaneous border idle", 1));
+	const int32_t chunk_z = WorldCoordinates::floor_divide(world_z, GAME_VOXEL_CHUNK_DEPTH);
+	second_chunk = world.find_chunk_mutable(1, chunk_z);
+	if (second_chunk == nullptr || second_chunk->read_state == nullptr)
+		return (ApplicationError::fail("block-edit simultaneous receiver snapshot", 1));
+	const auto previous_receiver = second_chunk->read_state;
 	if (world.place_block_at(first_x, first_y, world_z,
 		VOXEL_GENERATOR_STONE_BLOCK) != FT_ERR_SUCCESS
 		|| world.place_block_at(second_x, second_y, world_z,
 			VOXEL_GENERATOR_STONE_BLOCK) != FT_ERR_SUCCESS)
 		return (ApplicationError::fail("block-edit simultaneous border place", 1));
+	{
+		/* Model a source worker that captured the receiver before its placement.
+		 * That cell is opaque now and cannot receive the reported light change. */
+		constexpr std::size_t east_face = 1U;
+		const uint16_t light_input = second_chunk->light_input_version;
+		const uint64_t pending_request = second_chunk->pending_mesh_request_id;
+		WorldGenerationPipeline::Result result = {};
+		result.chunk_x = 0;
+		result.chunk_z = chunk_z;
+		result.changed_light_faces = 1U << east_face;
+		result.neighbor_relight_faces = 1U << east_face;
+		result.boundary_read_states[east_face] = previous_receiver;
+		auto &changes = result.boundary_light_changes[east_face];
+		changes.cells[0] = {0U, static_cast<uint8_t>(world_z - chunk_z * GAME_VOXEL_CHUNK_DEPTH),
+			static_cast<uint16_t>(second_y), 15U, 0U, false};
+		changes.count = 1U;
+		world.chunk_streamer.invalidate_boundary_receivers(result);
+		if (second_chunk->light_input_version != light_input
+			|| second_chunk->pending_mesh_request_id != pending_request)
+			return (ApplicationError::fail("block-edit obsolete receiver requested full light", 1));
+	}
 	while (std::chrono::steady_clock::now() < deadline)
 	{
 		if (world.update_around(static_cast<double>(first_x),
@@ -2201,16 +2716,21 @@ int BlockEditValidator::validate_authoritative_edit(World &world) noexcept
 	request.expected_block_id = edited_block;
 	request.requested_block_id = air_block;
 	previous_mesh_revision = chunk->mesh_revision;
+	const uint64_t visible_revision_before = world.geometry_revision;
 	error_code = world.apply_authoritative_block_change(request, &delta);
 	if (error_code != FT_ERR_SUCCESS)
 		return (ApplicationError::fail("block-edit authoritative delete", error_code));
 	if (delta.current_block_id != air_block)
 		return (ApplicationError::fail("block-edit authoritative delete delta", 1));
+	if (world.geometry_revision != visible_revision_before)
+		return (ApplicationError::fail("block-edit unpublished server delete visibility", 1));
 	error_code = BlockEditValidator::wait_for_mesh_revision(world, world_x,
 		world_z, previous_mesh_revision);
 	if (error_code != FT_ERR_SUCCESS)
 		return (ApplicationError::fail("block-edit authoritative delete remesh",
 			error_code));
+	if (world.geometry_revision == visible_revision_before)
+		return (ApplicationError::fail("block-edit published server delete visibility", 1));
 	request.request_id = 3U;
 	request.expected_revision = delta.revision - 1U;
 	request.expected_block_id = air_block;
@@ -2252,8 +2772,290 @@ int BlockEditValidator::report_mesh_result(size_t before, size_t after_place,
 	return (0);
 }
 
+int32_t BlockEditValidator::validate_deferred_mining_checkpoint()
+{
+	GameSessionSaveWorker worker;
+	game_character character;
+	WorldItemStore items;
+	ft_string path;
+	ft_string prepared;
+	ft_string committed;
+	int32_t descriptor = -1;
+	int32_t error = character.initialize();
+	if (error == FT_ERR_SUCCESS)
+		error = items.initialize();
+	if (error == FT_ERR_SUCCESS)
+		error = path.initialize();
+	if (error == FT_ERR_SUCCESS)
+		error = prepared.initialize();
+	if (error == FT_ERR_SUCCESS)
+		error = committed.initialize();
+	if (error != FT_ERR_SUCCESS)
+		return (ApplicationError::fail("block-edit mining checkpoint fixture", error));
+	error = file_secure_temp_file(".", "mining-checkpoint", &path, &descriptor);
+	if (error != FT_ERR_SUCCESS)
+		return (ApplicationError::fail("block-edit mining checkpoint file", error));
+	error = file_close_descriptor(descriptor);
+	std::string backup_path = std::string(path.c_str()) + ".bak";
+	if (error == FT_ERR_SUCCESS)
+		error = GameSessionPersistence::save_file(path.c_str(), character, items);
+	if (error == FT_ERR_SUCCESS)
+		error = file_read_all(path.c_str(), prepared);
+	if (error == FT_ERR_SUCCESS)
+	{
+		character.set_x(3);
+		error = GameSessionPersistence::save_file(path.c_str(), character, items);
+	}
+	if (error == FT_ERR_SUCCESS)
+		error = file_read_all(path.c_str(), committed);
+	if (error == FT_ERR_SUCCESS && prepared == committed)
+		error = FT_ERR_INVALID_STATE;
+	if (error == FT_ERR_SUCCESS)
+	{
+		const auto *source = reinterpret_cast<const uint8_t *>(committed.data());
+		std::vector<uint8_t> bytes(source, source + committed.size());
+		error = file_write_all(path.c_str(), prepared.c_str(), prepared.size());
+		if (error == FT_ERR_SUCCESS)
+			error = worker.submit(path.c_str(), bytes);
+		std::vector<uint8_t> next_bytes(source, source + committed.size());
+		if (error == FT_ERR_SUCCESS
+			&& worker.submit(path.c_str(), next_bytes) != FT_ERR_THREAD_BUSY)
+			error = FT_ERR_INVALID_STATE;
+		bool pending = false;
+		const int32_t write_result = worker.collect(false, &pending);
+		if (error == FT_ERR_SUCCESS)
+			error = pending ? worker.collect(true) : write_result;
+		else if (pending)
+			(void)worker.collect(true);
+		if (error == FT_ERR_SUCCESS)
+		{
+			const std::string invalid_path = std::string(path.c_str()) + "/child";
+			error = worker.submit(invalid_path.c_str(), next_bytes);
+			if (error == FT_ERR_SUCCESS && worker.collect(true) == FT_ERR_SUCCESS)
+				error = FT_ERR_INVALID_STATE;
+		}
+	}
+	if (error == FT_ERR_SUCCESS)
+	{
+		ft_string actual;
+		error = actual.initialize();
+		if (error == FT_ERR_SUCCESS)
+			error = file_read_all(path.c_str(), actual);
+		if (error == FT_ERR_SUCCESS && !(actual == committed))
+			error = FT_ERR_INVALID_STATE;
+		if (error == FT_ERR_SUCCESS)
+			error = file_read_all(backup_path.c_str(), actual);
+		if (error == FT_ERR_SUCCESS && !(actual == prepared))
+			error = FT_ERR_INVALID_STATE;
+	}
+	(void)file_delete(path.c_str());
+	(void)file_delete(backup_path.c_str());
+	if (error != FT_ERR_SUCCESS)
+		return (ApplicationError::fail("block-edit mining checkpoint write", error));
+	std::printf("block-edit: deferred mining checkpoint retained the recovery snapshot\n");
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t BlockEditValidator::validate_mining_worker_shutdown()
+{
+	auto session = std::make_unique<GameSession>();
+	auto renderer = std::make_unique<VoxelRenderer>();
+	ApplicationWindow window;
+	const std::string seed = "mining-save-worker-validator-"
+		+ std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+	int32_t error = session->start(seed, window, *renderer);
+	if (error != FT_ERR_SUCCESS)
+		return (ApplicationError::fail("block-edit mining worker session", error));
+	const int32_t x = 4;
+	const int32_t z = 4;
+	const uint32_t stone = VOXEL_GENERATOR_STONE_BLOCK;
+	double surface = 0.0;
+	uint32_t current = 0U;
+	uint64_t id = 0U;
+	if (!session->world_.surface_top_at(x, z, &surface))
+		error = FT_ERR_NOT_FOUND;
+	const int32_t y = static_cast<int32_t>(surface + 1.0);
+	const int32_t other_y = GAME_VOXEL_CHUNK_HEIGHT - 2;
+	if (error == FT_ERR_SUCCESS)
+		error = session->world_.place_block_at(x, y, z, stone);
+	const WorldChunk *chunk = session->world_.find_chunk(0, 0);
+	if (error == FT_ERR_SUCCESS && chunk == nullptr)
+		error = FT_ERR_NOT_FOUND;
+	if (error == FT_ERR_SUCCESS)
+	{
+		std::unique_ptr<WorldTerrainChunkStore::PreparedEdit> edit;
+		error = session->world_.capture_block_state_write(x, y, z, stone,
+			GAME_VOXEL_AIR_BLOCK, chunk->voxel_revision, edit);
+		if (error == FT_ERR_SUCCESS && edit == nullptr)
+			error = FT_ERR_INVALID_STATE;
+		if (error == FT_ERR_SUCCESS)
+			error = edit->file.prepare(edit->destination, 0, 0, edit->voxels);
+		game_voxel_chunk saved;
+		if (error == FT_ERR_SUCCESS)
+			error = session->world_.terrain_chunk_store().load_chunk(0, 0, saved);
+		if (error == FT_ERR_SUCCESS
+			&& (saved.read_block(x, y, z, &current) != FT_ERR_SUCCESS || current != stone))
+			error = FT_ERR_INVALID_STATE;
+		if (error == FT_ERR_SUCCESS)
+			error = session->world_.replace_block_state_at(x, y, z, stone,
+				GAME_VOXEL_AIR_BLOCK, chunk->voxel_revision, edit.get());
+		if (error == FT_ERR_SUCCESS && session->world_.terrain_chunk_store()
+				.commit_staged_chunk(0, 0, edit->file, true) != FT_ERR_INVALID_STATE)
+			error = FT_ERR_INVALID_STATE;
+		if (error == FT_ERR_SUCCESS)
+			error = session->world_.terrain_chunk_store().load_chunk(0, 0, saved);
+		if (error == FT_ERR_SUCCESS && (saved.get_revision() != chunk->chunk.get_revision()
+			|| saved.read_block(x, y, z, &current) != FT_ERR_SUCCESS
+			|| current != GAME_VOXEL_AIR_BLOCK))
+			error = FT_ERR_INVALID_STATE;
+		if (error == FT_ERR_SUCCESS)
+			error = session->world_.place_block_at(x, y, z, stone);
+	}
+	if (error == FT_ERR_SUCCESS)
+		error = session->transaction_journal_.next_request_id(
+			WorldBlockMiningTransaction::journal_scope(), &id);
+	if (error == FT_ERR_SUCCESS)
+	{
+		const GameSessionSnapshotWriter writer = {&GameSession::save_snapshot_callback,
+			session.get(), nullptr, &GameSession::save_mining_checkpoint_callback};
+		error = WorldBlockMiningTransaction::execute(session->world_item_save_path_,
+			session->world_, session->item_catalog_, session->world_items_,
+			session->transaction_journal_, id, 1U, session->world_.current_tick,
+			x, y, z, stone, GAME_VOXEL_AIR_BLOCK, chunk->voxel_revision,
+			nullptr, 0U, &writer, nullptr, -1, 0, 0U, 0U, nullptr,
+			&session->pending_mining_prepare_);
+	}
+	if (error == FT_ERR_SUCCESS && (session->pending_mining_prepare_ != id
+		|| !session->world_.block_id_at(x, y, z, &current) || current != stone))
+		error = FT_ERR_INVALID_STATE;
+	/* Change another voxel on the same chunk after capture. The staged file
+	 * is older now, even though the requested target is still valid. */
+	if (error == FT_ERR_SUCCESS)
+		error = session->world_.place_block_at(x + 1, other_y, z, stone);
+	std::string terrain_path;
+	if (error == FT_ERR_SUCCESS)
+		error = session->world_.terrain_chunk_store().capture_stream_path(0, 0, terrain_path);
+	const int32_t stop_result = session->stop();
+	if (error == FT_ERR_SUCCESS)
+		error = stop_result;
+	if (error == FT_ERR_SUCCESS)
+	{
+		game_voxel_chunk saved;
+		uint32_t neighbor = 0U;
+		error = WorldTerrainChunkStore::load_stream_chunk(terrain_path, 0, 0, saved);
+		if (error == FT_ERR_SUCCESS
+			&& (saved.read_block(x + 1, other_y, z, &neighbor) != FT_ERR_SUCCESS
+				|| neighbor != stone))
+			error = FT_ERR_INVALID_STATE;
+	}
+	if (error == FT_ERR_SUCCESS)
+		error = session->start(seed, window, *renderer);
+	if (error == FT_ERR_SUCCESS)
+	{
+		GameTransactionJournal::Record record = {};
+		uint32_t neighbor = 0U;
+		if (!session->world_.block_id_at(x, y, z, &current)
+			|| current != GAME_VOXEL_AIR_BLOCK
+			|| !session->world_.block_id_at(x + 1, other_y, z, &neighbor)
+			|| neighbor != stone
+			|| session->transaction_journal_.find(WorldBlockMiningTransaction::journal_scope(),
+				id, &record) != FT_ERR_SUCCESS || record.state != GameTransactionJournal::COMMITTED)
+			error = FT_ERR_INVALID_STATE;
+	}
+	if (error == FT_ERR_SUCCESS)
+	{
+		MinecraftBlockItemRule rule = {};
+		error = session->item_catalog_.resolve_block_item_rule(stone, &rule);
+		const int32_t original_quantity = session->player_character_.get_inventory()
+			.count_item(rule.item_id);
+		session->camera_.x = x + 0.5;
+		session->camera_.y = y + 0.5;
+		session->camera_.z = z + 0.5;
+		for (int32_t index = 0; index < 2 && error == FT_ERR_SUCCESS; ++index)
+		{
+			ft_sharedptr<game_item> drop;
+			uint64_t entity_id = 0U;
+			error = session->item_catalog_.create_item(rule.item_id, 1, &drop);
+			if (error == FT_ERR_SUCCESS)
+				error = session->world_items_.spawn(drop, x + 0.5 * index, y + 0.5,
+					z + 0.5, 1U, 1U, 0U, &entity_id);
+		}
+		const uint64_t first_pickup_id = session->pickup_request_id_;
+		if (error == FT_ERR_SUCCESS)
+			error = session->pickup_nearby_ground_items();
+		if (error == FT_ERR_SUCCESS)
+			error = session->pickup_nearby_ground_items();
+		if (error == FT_ERR_SUCCESS && (session->pending_pickup_prepare_ != first_pickup_id
+			|| session->pickup_request_id_ != first_pickup_id + 1U
+			|| session->player_character_.get_inventory().count_item(rule.item_id)
+				!= original_quantity))
+			error = FT_ERR_INVALID_STATE;
+		if (error == FT_ERR_SUCCESS)
+			error = session->advance_save_checkpoint(true);
+		if (error == FT_ERR_SUCCESS && session->player_character_.get_inventory()
+				.count_item(rule.item_id) != original_quantity + 1)
+			error = FT_ERR_INVALID_STATE;
+		if (error == FT_ERR_SUCCESS)
+			error = session->pickup_nearby_ground_items();
+		if (error == FT_ERR_SUCCESS && session->pending_pickup_prepare_ != first_pickup_id + 1U)
+			error = FT_ERR_INVALID_STATE;
+		if (error == FT_ERR_SUCCESS)
+			error = session->stop();
+		if (error == FT_ERR_SUCCESS)
+			error = session->start(seed, window, *renderer);
+		for (uint64_t pickup_id = first_pickup_id; pickup_id < first_pickup_id + 2U
+			&& error == FT_ERR_SUCCESS; ++pickup_id)
+		{
+			GameTransactionJournal::Record pickup_record = {};
+			error = session->transaction_journal_.find(WorldItemPickupTransaction::journal_scope(),
+				pickup_id, &pickup_record);
+			if (error == FT_ERR_SUCCESS && pickup_record.state != GameTransactionJournal::COMMITTED)
+				error = FT_ERR_INVALID_STATE;
+		}
+		if (error == FT_ERR_SUCCESS && session->player_character_.get_inventory()
+				.count_item(rule.item_id) != original_quantity + 2)
+			error = FT_ERR_INVALID_STATE;
+		if (error == FT_ERR_SUCCESS)
+			std::printf("block-edit: one automatic pickup at a time, both durable through restart\n");
+	}
+	if (session->active_)
+	{
+		const int32_t cleanup_error = session->stop();
+		if (error == FT_ERR_SUCCESS)
+			error = cleanup_error;
+	}
+	if (error != FT_ERR_SUCCESS)
+		return (ApplicationError::fail("block-edit mining worker shutdown", error));
+	std::printf("block-edit: shutdown finished pending mining and restart loaded the edit\n");
+	std::printf("block-edit: staged terrain published from current voxels and preserved a newer edit\n");
+	return (FT_ERR_SUCCESS);
+}
+
 int BlockEditValidator::validate() const
 {
+	if (validate_ground_item_snapshot_refresh() != FT_ERR_SUCCESS)
+		return (1);
+	uint32_t pending_presses = 0U;
+	if (!GameSession::take_primary_press(pending_presses, 3U)
+		|| !GameSession::take_primary_press(pending_presses, 0U)
+		|| !GameSession::take_primary_press(pending_presses, 0U)
+		|| GameSession::take_primary_press(pending_presses, 0U))
+		return (ApplicationError::fail("block-edit primary press burst", 1));
+	if (GameSession::take_primary_press(pending_presses, 2U, false)
+		|| pending_presses != 2U
+		|| !GameSession::take_primary_press(pending_presses, 0U)
+		|| !GameSession::take_primary_press(pending_presses, 0U))
+		return (ApplicationError::fail("block-edit pending mining checkpoint input", 1));
+	if (!GameSession::take_primary_press(pending_presses, UINT32_MAX)
+		|| pending_presses != 7U
+		|| !GameSession::take_primary_press(pending_presses, UINT32_MAX)
+		|| pending_presses != 7U)
+		return (ApplicationError::fail("block-edit primary press limit", 1));
+	std::printf("block-edit: primary press burst preserved across frames\n");
+	if (validate_deferred_mining_checkpoint() != FT_ERR_SUCCESS
+		|| validate_mining_worker_shutdown() != FT_ERR_SUCCESS)
+		return (1);
+
 	std::unique_ptr<World> world_storage(new (std::nothrow) World());
 	if (world_storage == nullptr)
 		return (ApplicationError::fail("block-edit world allocation",
@@ -2270,6 +3072,11 @@ int BlockEditValidator::validate() const
 		|| world_light_version::next(0U) != 1U
 		|| world_light_version::matches(0U, 1U))
 		return (ApplicationError::fail("block-edit light version rollover", 1));
+	if (validate_boundary_read_state() != FT_ERR_SUCCESS
+		|| validate_independent_emitter_removal(2U, true) != FT_ERR_SUCCESS
+		|| validate_independent_emitter_removal(128U, false) != FT_ERR_SUCCESS
+		|| validate_emissive_roof_removal() != FT_ERR_SUCCESS)
+		return (1);
 
 	edit_x = 2;
 	edit_z = -6;
@@ -2358,6 +3165,12 @@ int BlockEditValidator::validate() const
 		return (1);
 	}
 	if (BlockEditValidator::validate_authoritative_edit(world)
+		!= FT_ERR_SUCCESS)
+	{
+		world.destroy();
+		return (1);
+	}
+	if (validate_deferred_mining_action(world, edit_x, edit_y, edit_z)
 		!= FT_ERR_SUCCESS)
 	{
 		world.destroy();

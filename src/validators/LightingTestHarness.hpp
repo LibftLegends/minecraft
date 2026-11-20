@@ -23,6 +23,7 @@ struct LightingFrameObservation
 	uint16_t light_input_version;
 	uint16_t computed_light_input_version;
 	uint64_t mesh_revision;
+	uint64_t mesh_voxel_revision;
 	uint64_t pending_mesh_request_id;
 	uint64_t pending_mesh_request_voxel_revision;
 	uint16_t pending_mesh_request_content_version;
@@ -33,6 +34,7 @@ struct LightingFrameObservation
 	bool light_current;
 	bool mesh_dirty;
 	bool remesh_pending;
+	bool interactive_mesh;
 	uint8_t minimum_vertex_light;
 	uint8_t maximum_vertex_light;
 	uint32_t nonzero_light_vertices;
@@ -130,6 +132,9 @@ class LightingObservationHarness
 		int32_t chunk_x, int32_t chunk_z, uint8_t *minimum,
 		uint8_t *maximum, uint32_t *nonzero, uint32_t *faces) noexcept;
 	static bool revision_is_older(uint64_t current, uint64_t previous) noexcept;
+	static bool is_current_geometry_preview(
+		const LightingFrameObservation &previous,
+		const LightingFrameObservation &current) noexcept;
 	static int32_t publication_transition_error(
 		const LightingFrameObservation &previous,
 		const LightingFrameObservation &current) noexcept;

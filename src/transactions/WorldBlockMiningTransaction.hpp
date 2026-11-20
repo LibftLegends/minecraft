@@ -31,8 +31,18 @@ class WorldBlockMiningTransaction
 		game_inventory *inventory = nullptr, int32_t tool_slot = -1,
 		int32_t tool_item_id = 0, uint64_t tool_instance_id = 0U,
 		uint64_t expected_inventory_revision = 0U,
-		game_character *character = nullptr)
+		game_character *character = nullptr, uint64_t *pending_request_id = nullptr)
 		noexcept;
+	/* Only call after the prepare snapshot has been written successfully. */
+	static int32_t complete_prepared(const char *snapshot_path, World &world,
+		MinecraftItemCatalog &catalog, WorldItemStore &items,
+		GameTransactionJournal &journal, uint64_t request_id,
+		const GameSessionSnapshotWriter *snapshot_writer, game_inventory *inventory,
+		game_character *character, bool check_target = true,
+		WorldTerrainChunkStore::PreparedEdit *terrain = nullptr) noexcept;
+	static int32_t capture_prepared_terrain(const World &world,
+		const GameTransactionJournal &journal, uint64_t request_id,
+		std::unique_ptr<WorldTerrainChunkStore::PreparedEdit> &terrain) noexcept;
 	static int32_t recover_pending(const char *snapshot_path, World &world,
 		MinecraftItemCatalog &catalog, WorldItemStore &items,
 		GameTransactionJournal &journal,

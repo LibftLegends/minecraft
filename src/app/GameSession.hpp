@@ -24,11 +24,13 @@
 #include "../../src/transactions/WorldBoatTransferTransaction.hpp"
 #include "../../src/transactions/WorldFarmlandTransaction.hpp"
 #include "GameSessionSnapshotWriter.hpp"
+#include "GameSessionSaveWorker.hpp"
 #include "../../src/policy/RenderDistanceStrategy.hpp"
 #include "../../src/settings/Settings.hpp"
 #include "../../src/cards/RegenerationCardSession.hpp"
 #include "../../src/cards/RegenerationWorldRules.hpp"
 #include "../../Libft/Modules/Game/game_character.hpp"
+#include <array>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -830,6 +832,13 @@ class GameSession
 	/* Serializes session actions, item identity moves, card state, and saves.
 	 * Recursive because finalization/recovery call guarded APIs internally. */
 	mutable std::recursive_mutex item_instance_transaction_mutex_;
+	GameSessionSaveWorker save_worker_;
+	uint64_t pending_mining_prepare_ = 0U;
+	uint64_t pending_pickup_prepare_ = 0U;
+	uint64_t pending_pickup_entity_ = 0U;
+	uint64_t full_pickup_inventory_revision_ = 0U;
+	std::array<uint64_t, 256U> full_pickup_entities_ = {};
+	std::size_t full_pickup_entity_count_ = 0U;
 	RegenerationCardSession regeneration_cards_;
 	RegenerationWorldRules regeneration_world_rules_;
 	RegenerationWorldRulesPolicy regeneration_world_rules_policy_;
@@ -929,6 +938,8 @@ class GameSession
     double performance_frame_ms_;
     uint64_t fps_frame_count_;
     uint32_t selected_block_id_;
+    uint32_t pending_primary_presses_ = 0U;
+    bool pending_secondary_press_ = false;
     bool boost_enabled_;
     bool active_;
     bool revision_preview_visible_;
@@ -964,9 +975,11 @@ class GameSession
 	double player_spawn_x_;
 	double player_spawn_z_;
 
-	Action handle_navigation(ApplicationWindow &window);
+	Action handle_navigation();
 	Action tick_world(double delta_seconds,
-		const RenderDistanceStrategy &strategy);
+		const RenderDistanceStrategy &strategy, bool primary_pressed,
+		bool secondary_pressed, bool checkpoint_pending);
+	void update_camera_movement(double delta_seconds);
 	int32_t advance_nearby_crop_growth() noexcept;
 	void tick_fps_counter(double delta_seconds,
 		const RenderDistanceStrategy &strategy);
@@ -985,9 +998,15 @@ class GameSession
 		const std::vector<WorldSpawnerDeath> &deaths) noexcept;
 	int32_t process_animal_production(
 		const std::vector<WorldAnimalProductionEvent> &events) noexcept;
-	int32_t save_session_snapshot(bool enforce_join_admission = true)
-		noexcept;
+	int32_t save_session_snapshot(bool enforce_join_admission = true,
+		bool defer_write = false,
+		std::unique_ptr<WorldTerrainChunkStore::PreparedEdit> terrain = nullptr) noexcept;
+	int32_t advance_save_checkpoint(bool wait, bool *pending = nullptr,
+		bool *preparing = nullptr) noexcept;
 	static int32_t save_snapshot_callback(void *context) noexcept;
+	static int32_t save_mining_checkpoint_callback(void *context, uint64_t request_id) noexcept;
+	static int32_t save_pickup_checkpoint_callback(void *context) noexcept;
+	static int32_t save_authorized_edit_result_callback(void *context) noexcept;
 	static int32_t revision_start_commit_callback(uint64_t actor_id,
 		uint64_t loom_id, uint64_t request_id,
 		uint64_t expected_selection_revision,
@@ -1029,9 +1048,9 @@ class GameSession
 		const uint8_t *bytes, std::size_t byte_count, void *user_data) noexcept;
 	int32_t pickup_nearby_ground_items() noexcept;
 	void reset_session_state();
-#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	static bool take_primary_press(uint32_t &pending, uint32_t observed,
+		bool can_dispatch = true) noexcept;
 	void report_loading_gaps() const;
-#endif
 };
 
 #endif

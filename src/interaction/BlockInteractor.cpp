@@ -78,7 +78,8 @@ int32_t BlockInteractor::try_delete_target_block(World *world,
 	WorldItemStore &world_items, GameTransactionJournal &journal,
 	const GameSessionSnapshotWriter *snapshot_writer,
 	const char *snapshot_path, uint64_t owner_id, uint64_t server_tick,
-	game_inventory *inventory, game_character *character)
+	game_inventory *inventory, game_character *character,
+	uint64_t *pending_request_id)
 {
 	MinecraftBlockItemRule rule = {};
 	MinecraftLootDrop bonus_drop = {};
@@ -282,7 +283,8 @@ int32_t BlockInteractor::try_delete_target_block(World *world,
 		tool_slot == -2 || (inventory != nullptr && character == nullptr
 			&& required_class != MINECRAFT_MINING_TOOL_NONE)
 			? tool_slot : -1,
-		tool_item_id, tool_instance_id, inventory_revision, character));
+		tool_item_id, tool_instance_id, inventory_revision, character,
+		pending_request_id));
 }
 
 int32_t BlockInteractor::try_pick_target_block(const World *world,

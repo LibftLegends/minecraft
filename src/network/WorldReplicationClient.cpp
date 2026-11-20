@@ -2,7 +2,8 @@
 #include <new>
 
 WorldReplicationClient::WorldReplicationClient()
-	: replication_(), snapshot_callback_(nullptr), block_delta_callback_(nullptr),
+	: chunk_revisions_(), apply_budget_(),
+	snapshot_callback_(nullptr), block_delta_callback_(nullptr),
 	light_delta_callback_(nullptr), edit_result_callback_(nullptr),
 	boat_move_result_callback_(nullptr),
 	entity_update_callback_(nullptr),
@@ -23,7 +24,7 @@ WorldReplicationClient::WorldReplicationClient()
 }
 
 WorldReplicationClient::WorldReplicationClient(
-	const WorldReplicationClient &other) : replication_(),
+	const WorldReplicationClient &other) : chunk_revisions_(), apply_budget_(),
 	snapshot_callback_(nullptr), block_delta_callback_(nullptr),
 	light_delta_callback_(nullptr), edit_result_callback_(nullptr),
 	boat_move_result_callback_(nullptr),
@@ -70,29 +71,13 @@ int32_t WorldReplicationClient::initialize(uint64_t server_instance_id,
 		return (FT_ERR_INVALID_ARGUMENT);
 	if (maximum_messages == 0U || maximum_payload_bytes == 0U)
 		return (FT_ERR_INVALID_ARGUMENT);
-	error_code = this->replication_.initialize(server_instance_id, session_id,
+	error_code = networking_replication_apply_budget_initialize(this->apply_budget_,
 		maximum_messages, maximum_payload_bytes, maximum_operations);
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
-	error_code = this->replication_.set_callbacks(
-		&WorldReplicationClient::apply_snapshot_payload,
-		&WorldReplicationClient::apply_block_delta_payload,
-		&WorldReplicationClient::apply_light_delta_payload, this);
-	if (error_code != FT_ERR_SUCCESS)
-	{
-		int32_t cleanup_error = this->replication_.destroy();
-		if (error_code == FT_ERR_SUCCESS)
-			error_code = cleanup_error;
-		return (error_code);
-	}
 	error_code = this->received_messages_.initialize();
 	if (error_code != FT_ERR_SUCCESS)
-	{
-		int32_t cleanup_error = this->replication_.destroy();
-		if (error_code == FT_ERR_SUCCESS)
-			error_code = cleanup_error;
 		return (error_code);
-	}
 	this->queue_initialized_ = true;
 	this->server_instance_id_ = server_instance_id;
 	this->session_id_ = session_id;
@@ -435,7 +420,7 @@ int32_t WorldReplicationClient::reset_budget()
 {
 	if (!this->initialized_)
 		return (FT_ERR_NOT_INITIALISED);
-	return (this->replication_.reset_budget());
+	return (networking_replication_apply_budget_reset(this->apply_budget_));
 }
 
 int32_t WorldReplicationClient::enqueue_received_message(
@@ -491,14 +476,18 @@ int32_t WorldReplicationClient::drain_received_messages(
 	while (processed_messages < maximum_messages
 		&& !this->received_messages_.empty())
 	{
-		message = this->received_messages_.pop_front();
+		message = this->received_messages_.front();
 		if (message == nullptr)
 			return (FT_ERR_INTERNAL);
+		bool deferred_for_budget = false;
+		error_code = this->apply_received_message(*message, deferred_for_budget);
+		if (deferred_for_budget)
+			return (FT_ERR_SUCCESS);
+		this->received_messages_.pop_front();
 		if (this->queued_bytes_ >= message->payload.size())
 			this->queued_bytes_ -= message->payload.size();
 		else
 			this->queued_bytes_ = 0U;
-		error_code = this->apply_received_message(*message);
 		delete message;
 		processed_messages += 1U;
 		if (error_code != FT_ERR_SUCCESS)
@@ -521,90 +510,117 @@ void WorldReplicationClient::clear_received_messages()
 	this->queued_bytes_ = 0U;
 }
 
-int32_t WorldReplicationClient::apply_snapshot_payload(
-	const ft_byte_buffer &payload, void *user_data) noexcept
+int32_t WorldReplicationClient::apply_snapshot(
+	const ProtocolChunkSnapshotMessage &snapshot)
 {
-	WorldReplicationClient *client;
-	ProtocolChunkSnapshotMessage snapshot;
-	ft_byte_buffer decoded_payload;
-	int32_t error_code;
-
-	client = static_cast<WorldReplicationClient *>(user_data);
-	if (client == nullptr || client->snapshot_callback_ == nullptr)
+	if (snapshot_callback_ == nullptr)
 		return (FT_ERR_INVALID_POINTER);
-	error_code = decoded_payload.initialize(payload);
+	if (snapshot.session_id != session_id_ || snapshot.world_id != world_id_)
+		return (FT_ERR_PERMISSION_DENIED);
+	if (snapshot.block_revision == 0U || snapshot.light_revision == 0U)
+		return (FT_ERR_INVALID_ARGUMENT);
+	try
+	{
+		const auto key = std::make_pair(snapshot.chunk_x, snapshot.chunk_z);
+		auto entry = chunk_revisions_.try_emplace(key);
+		auto &revision = entry.first->second;
+		int32_t error_code = FT_ERR_SUCCESS;
+		if (entry.second)
+			error_code = revision.initialize();
+		if (error_code == FT_ERR_SUCCESS && replica_store_ != nullptr)
+			error_code = replica_store_->apply_snapshot(snapshot);
+		if (error_code == FT_ERR_SUCCESS && replica_store_ == nullptr)
+			error_code = snapshot_callback_(snapshot, callback_user_data_);
+		if (error_code == FT_ERR_SUCCESS)
+			error_code = revision.accept_snapshot(snapshot.block_revision,
+				snapshot.light_revision, snapshot.generation_epoch);
+		if (error_code != FT_ERR_SUCCESS && entry.second)
+			chunk_revisions_.erase(entry.first);
+		if (error_code == FT_ERR_SUCCESS && replica_store_ != nullptr)
+			error_code = snapshot_callback_(snapshot, callback_user_data_);
+		return (error_code);
+	}
+	catch (const std::bad_alloc &)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+}
+
+int32_t WorldReplicationClient::apply_block_delta(
+	const ProtocolChunkBlockDeltaMessage &message, uint32_t payload_size,
+	bool &deferred_for_budget)
+{
+	const game_block_delta &delta = message.delta;
+	if (block_delta_callback_ == nullptr)
+		return (FT_ERR_INVALID_POINTER);
+	if (delta.session_id != session_id_ || delta.world_id != world_id_)
+		return (FT_ERR_PERMISSION_DENIED);
+	auto entry = chunk_revisions_.find({delta.chunk_x, delta.chunk_z});
+	if (entry == chunk_revisions_.end()
+		|| entry->second.is_snapshot_ready() == FT_FALSE)
+		return (FT_ERR_INVALID_STATE);
+	/* A cached edit result can resend a block delta after the replica already
+	 * reached it. Discard the replay ahead of the per-frame apply budget. */
+	if (delta.revision <= entry->second.get_block_revision())
+		return (FT_ERR_SUCCESS);
+	if (entry->second.can_accept_block_delta(delta.previous_revision,
+			delta.revision) == FT_FALSE)
+		return (FT_ERR_INVALID_STATE);
+	int32_t error_code = networking_replication_apply_budget_consume(
+		this->apply_budget_, payload_size, 1U);
+	if (error_code != FT_ERR_SUCCESS)
+	{
+		deferred_for_budget = error_code == FT_ERR_FULL;
+		return (error_code);
+	}
+	if (replica_store_ != nullptr)
+		error_code = replica_store_->apply_block_delta(message);
+	else
+		error_code = block_delta_callback_(message, callback_user_data_);
 	if (error_code == FT_ERR_SUCCESS)
-		error_code = snapshot.deserialize(decoded_payload);
-	if (error_code == FT_ERR_SUCCESS
-		&& (snapshot.session_id != client->session_id_
-			|| snapshot.world_id != client->world_id_))
-		error_code = FT_ERR_PERMISSION_DENIED;
-	if (error_code == FT_ERR_SUCCESS && client->replica_store_ != nullptr)
-		error_code = client->replica_store_->apply_snapshot(snapshot);
-	if (error_code == FT_ERR_SUCCESS)
-		error_code = client->snapshot_callback_(snapshot,
-		client->callback_user_data_);
-	if (decoded_payload.destroy() != FT_ERR_SUCCESS
-		&& error_code == FT_ERR_SUCCESS)
-		error_code = FT_ERR_INTERNAL;
+		error_code = entry->second.accept_block_delta(delta.previous_revision,
+			delta.revision);
+	if (error_code == FT_ERR_SUCCESS && replica_store_ != nullptr)
+		error_code = block_delta_callback_(message, callback_user_data_);
 	return (error_code);
 }
 
-int32_t WorldReplicationClient::apply_block_delta_payload(
-	const ft_byte_buffer &payload, void *user_data) noexcept
+int32_t WorldReplicationClient::apply_light_delta(
+	const ProtocolChunkLightDeltaMessage &delta, uint32_t payload_size,
+	bool &deferred_for_budget)
 {
-	WorldReplicationClient *client;
-	ProtocolChunkBlockDeltaMessage delta;
-	ft_byte_buffer decoded_payload;
-	int32_t error_code;
-
-	client = static_cast<WorldReplicationClient *>(user_data);
-	if (client == nullptr || client->block_delta_callback_ == nullptr)
+	if (light_delta_callback_ == nullptr)
 		return (FT_ERR_INVALID_POINTER);
-	error_code = decoded_payload.initialize(payload);
+	if (delta.session_id != session_id_ || delta.world_id != world_id_)
+		return (FT_ERR_PERMISSION_DENIED);
+	auto entry = chunk_revisions_.find({delta.chunk_x, delta.chunk_z});
+	if (entry == chunk_revisions_.end()
+		|| entry->second.is_snapshot_ready() == FT_FALSE
+		|| entry->second.get_snapshot_generation() != delta.generation_epoch)
+		return (FT_ERR_INVALID_STATE);
+	/* A replay from the current generation cannot advance light that the
+	 * replica already published. Keep the apply slot for the next real edit. */
+	if (delta.final_light_revision <= entry->second.get_light_revision())
+		return (FT_ERR_SUCCESS);
+	if (entry->second.can_accept_light_delta(delta.base_light_revision,
+			delta.final_light_revision, delta.source_block_revision) == FT_FALSE)
+		return (FT_ERR_INVALID_STATE);
+	int32_t error_code = networking_replication_apply_budget_consume(
+		this->apply_budget_, payload_size, 1U);
+	if (error_code != FT_ERR_SUCCESS)
+	{
+		deferred_for_budget = error_code == FT_ERR_FULL;
+		return (error_code);
+	}
+	if (replica_store_ != nullptr)
+		error_code = replica_store_->apply_light_delta(delta);
+	else
+		error_code = light_delta_callback_(delta, callback_user_data_);
 	if (error_code == FT_ERR_SUCCESS)
-		error_code = delta.deserialize(decoded_payload);
-	if (error_code == FT_ERR_SUCCESS
-		&& (delta.delta.session_id != client->session_id_
-			|| delta.delta.world_id != client->world_id_))
-		error_code = FT_ERR_PERMISSION_DENIED;
-	if (error_code == FT_ERR_SUCCESS && client->replica_store_ != nullptr)
-		error_code = client->replica_store_->apply_block_delta(delta);
-	if (error_code == FT_ERR_SUCCESS)
-		error_code = client->block_delta_callback_(delta,
-		client->callback_user_data_);
-	if (decoded_payload.destroy() != FT_ERR_SUCCESS
-		&& error_code == FT_ERR_SUCCESS)
-		error_code = FT_ERR_INTERNAL;
-	return (error_code);
-}
-
-int32_t WorldReplicationClient::apply_light_delta_payload(
-	const ft_byte_buffer &payload, void *user_data) noexcept
-{
-	WorldReplicationClient *client;
-	ProtocolChunkLightDeltaMessage delta;
-	ft_byte_buffer decoded_payload;
-	int32_t error_code;
-
-	client = static_cast<WorldReplicationClient *>(user_data);
-	if (client == nullptr || client->light_delta_callback_ == nullptr)
-		return (FT_ERR_INVALID_POINTER);
-	error_code = decoded_payload.initialize(payload);
-	if (error_code == FT_ERR_SUCCESS)
-		error_code = delta.deserialize(decoded_payload);
-	if (error_code == FT_ERR_SUCCESS
-		&& (delta.session_id != client->session_id_
-			|| delta.world_id != client->world_id_))
-		error_code = FT_ERR_PERMISSION_DENIED;
-	if (error_code == FT_ERR_SUCCESS && client->replica_store_ != nullptr)
-		error_code = client->replica_store_->apply_light_delta(delta);
-	if (error_code == FT_ERR_SUCCESS)
-		error_code = client->light_delta_callback_(delta,
-		client->callback_user_data_);
-	if (decoded_payload.destroy() != FT_ERR_SUCCESS
-		&& error_code == FT_ERR_SUCCESS)
-		error_code = FT_ERR_INTERNAL;
+		error_code = entry->second.accept_light_delta(delta.base_light_revision,
+			delta.final_light_revision, delta.source_block_revision);
+	if (error_code == FT_ERR_SUCCESS && replica_store_ != nullptr)
+		error_code = light_delta_callback_(delta, callback_user_data_);
 	return (error_code);
 }
 
@@ -791,6 +807,13 @@ int32_t WorldReplicationClient::apply_hash_manifest_payload(
 int32_t WorldReplicationClient::apply_received_message(
 	const networking_received_message &message)
 {
+	bool deferred_for_budget = false;
+	return (this->apply_received_message(message, deferred_for_budget));
+}
+
+int32_t WorldReplicationClient::apply_received_message(
+	const networking_received_message &message, bool &deferred_for_budget)
+{
 	networking_replication_envelope envelope;
 	ft_byte_buffer payload;
 	ProtocolChunkSnapshotMessage snapshot;
@@ -799,6 +822,7 @@ int32_t WorldReplicationClient::apply_received_message(
 	int32_t error_code;
 	int32_t destroy_error;
 
+	deferred_for_budget = false;
 	if (!this->initialized_)
 		return (FT_ERR_NOT_INITIALISED);
 	error_code = payload.initialize();
@@ -813,38 +837,44 @@ int32_t WorldReplicationClient::apply_received_message(
 		&& envelope.message_type == static_cast<uint16_t>(
 			ProtocolMessageHeader::Type::CHUNK_SNAPSHOT))
 	{
+		if (envelope.payload_size > this->maximum_queued_bytes_)
+			error_code = FT_ERR_OUT_OF_RANGE;
+		else
+		{
+			error_code = networking_replication_apply_budget_consume(
+				this->apply_budget_, envelope.payload_size, 1U);
+			/* Only budget exhaustion is retryable without repeating application
+			 * side effects. Leave the message at the queue head for next frame. */
+			deferred_for_budget = error_code == FT_ERR_FULL;
+		}
+	}
+	if (error_code == FT_ERR_SUCCESS
+		&& envelope.message_type == static_cast<uint16_t>(
+			ProtocolMessageHeader::Type::CHUNK_SNAPSHOT))
+	{
 		error_code = snapshot.deserialize(payload);
 		if (error_code == FT_ERR_SUCCESS)
-			error_code = payload.reset_read_position();
-		if (error_code == FT_ERR_SUCCESS)
-			error_code = this->replication_.apply_snapshot(
-				snapshot.block_revision, snapshot.light_revision,
-				snapshot.generation_epoch, payload, 1U);
+			error_code = this->apply_snapshot(snapshot);
 	}
 	else if (error_code == FT_ERR_SUCCESS
 		&& envelope.message_type == static_cast<uint16_t>(
 			ProtocolMessageHeader::Type::CHUNK_BLOCK_DELTA))
 	{
-		error_code = block_delta.deserialize(payload);
+		error_code = envelope.payload_size <= this->maximum_queued_bytes_
+			? block_delta.deserialize(payload) : FT_ERR_OUT_OF_RANGE;
 		if (error_code == FT_ERR_SUCCESS)
-			error_code = payload.reset_read_position();
-		if (error_code == FT_ERR_SUCCESS)
-			error_code = this->replication_.apply_block_delta(
-				block_delta.delta.previous_revision,
-				block_delta.delta.revision, payload, 1U);
+			error_code = this->apply_block_delta(block_delta,
+				envelope.payload_size, deferred_for_budget);
 	}
 	else if (error_code == FT_ERR_SUCCESS
 		&& envelope.message_type == static_cast<uint16_t>(
 			ProtocolMessageHeader::Type::CHUNK_LIGHT_DELTA))
 	{
-		error_code = light_delta.deserialize(payload);
+		error_code = envelope.payload_size <= this->maximum_queued_bytes_
+			? light_delta.deserialize(payload) : FT_ERR_OUT_OF_RANGE;
 		if (error_code == FT_ERR_SUCCESS)
-			error_code = payload.reset_read_position();
-		if (error_code == FT_ERR_SUCCESS)
-			error_code = this->replication_.apply_light_delta(
-				light_delta.base_light_revision,
-				light_delta.final_light_revision,
-				light_delta.source_block_revision, payload, 1U);
+			error_code = this->apply_light_delta(light_delta,
+				envelope.payload_size, deferred_for_budget);
 	}
 	else if (error_code == FT_ERR_SUCCESS
 		&& envelope.message_type == static_cast<uint16_t>(
@@ -881,18 +911,15 @@ int32_t WorldReplicationClient::apply_received_message(
 int32_t WorldReplicationClient::destroy()
 {
 	int32_t error_code;
-	int32_t queue_error;
 
 	this->clear_received_messages();
-	queue_error = FT_ERR_SUCCESS;
+	error_code = FT_ERR_SUCCESS;
 	if (this->queue_initialized_)
 	{
-		queue_error = this->received_messages_.destroy();
+		error_code = this->received_messages_.destroy();
 		this->queue_initialized_ = false;
 	}
-	error_code = this->replication_.destroy();
-	if (error_code == FT_ERR_SUCCESS)
-		error_code = queue_error;
+	this->chunk_revisions_.clear();
 	this->snapshot_callback_ = nullptr;
 	this->block_delta_callback_ = nullptr;
 	this->light_delta_callback_ = nullptr;

@@ -3,6 +3,7 @@
 
 # include "../../Libft/Modules/Voxel/voxel_api.hpp"
 # include "../../src/chunks/WorldChunk.hpp"
+# include "../../src/world/WorldTerrainChunkStore.hpp"
 # include <atomic>
 # include <array>
 # include <condition_variable>
@@ -22,6 +23,9 @@ class WorldGenerationPipeline
 {
   public:
 	static constexpr int32_t LIGHT_SNAPSHOT_HALO = 15;
+	/* Cardinal face order shared by snapshot capture and remesh publication. */
+	static constexpr int32_t BOUNDARY_NEIGHBORS[4][2] = {
+		{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
 	static constexpr std::size_t DEFAULT_MAXIMUM_QUEUED_REQUESTS = 256U;
 	enum class WorldGenerationOperation : uint8_t
 	{
@@ -62,6 +66,10 @@ class WorldGenerationPipeline
 		ft_bool lighting_halo_valid;
 		ft_bool lighting_cardinal_halo_valid;
 		ft_bool lighting_halo_blocked;
+		/* West, east, north, south. These neighbors depend on the source
+		 * relight and their retained light can feed a removed light back. */
+		uint8_t blocked_light_faces = 0U;
+		std::array<std::weak_ptr<const WorldChunkReadState>, 4> boundary_read_states;
 		ft_bool dependency_valid;
 		int32_t dependency_chunk_x;
 		int32_t dependency_chunk_z;
@@ -98,6 +106,15 @@ class WorldGenerationPipeline
 		int32_t z;
 		uint8_t channel;
 		uint8_t level;
+	};
+
+	struct IncrementalLightScratch
+	{
+		/* Zero means the direct-sky height has not been computed. The
+		 * cache belongs to the request and survives across worker slices. */
+		std::array<uint16_t, GAME_VOXEL_CHUNK_WIDTH * GAME_VOXEL_CHUNK_DEPTH>
+			first_direct_sky_y_plus_one = {};
+		uint32_t modified_sections = 0U;
 	};
 
 	struct GenerationFeaturePlan
@@ -195,6 +212,28 @@ class WorldGenerationPipeline
 	static_assert(sizeof(IncrementalLightDelta) == 5U,
 		"incremental light deltas must remain compact queue records");
 
+	struct BoundaryLightChange
+	{
+		static constexpr uint8_t RELIGHT = 1U;
+		static constexpr uint8_t REMESH = 2U;
+		uint8_t x;
+		uint8_t z;
+		uint16_t y;
+		uint8_t before;
+		uint8_t after;
+		bool source_face_visible;
+
+		uint8_t effect_on(const WorldChunkReadState &receiver) const noexcept;
+	};
+
+	struct BoundaryLightChanges
+	{
+		/* Above this bound an obsolete receiver snapshot takes the full solver. */
+		std::array<BoundaryLightChange, 32U> cells;
+		std::size_t count = 0U;
+		bool complete = true;
+	};
+
 	struct							Result
 	{
 		static constexpr uint32_t STAGE_GEOMETRY_ONLY = 1U << 0;
@@ -234,10 +273,23 @@ class WorldGenerationPipeline
 		WorldGenerationOperation	operation;
 		int32_t						error_code;
 		std::unique_ptr<WorldChunk> chunk;
+		bool loaded_from_terrain_store = false;
+		WorldTerrainChunkStore::StagedChunk staged_terrain_chunk;
 		std::unique_ptr<chunk_mesh> mesh;
 		std::unique_ptr<chunk_mesh> retired_mesh;
 		std::unique_ptr<voxel_light_chunk> light;
 		std::vector<IncrementalLightDelta> incremental_light_deltas;
+		/* A completed nonempty patch updates this worker-owned copy for snapshot
+		 * readers. The gameplay thread applies the same delta to the live field. */
+		std::shared_ptr<const std::vector<uint8_t>> incremental_light_samples;
+		/* A changed face may alter propagated light, a visible face sample,
+		 * or both. The captured state identifies the neighbor evaluated by
+		 * the worker so publication can recognize concurrent changes. */
+		uint8_t changed_light_faces = 0U;
+		uint8_t neighbor_relight_faces = 0U;
+		uint8_t neighbor_remesh_faces = 0U;
+		std::array<std::weak_ptr<const WorldChunkReadState>, 4> boundary_read_states;
+		std::array<BoundaryLightChanges, 4> boundary_light_changes;
 		std::vector<WorldDeferredBlockEdit> deferred_edits;
 		std::vector<GenerationFeaturePlan> applied_feature_plans;
 
@@ -254,9 +306,9 @@ class WorldGenerationPipeline
 		 * compute worker is deliberately able to run without touching the live
 		 * world or waiting for the world's lock.
 		 */
+		std::string terrain_chunk_path;
 					uint64_t					request_id;
 					uint64_t					cancellation_epoch;
-					uint64_t					background_remesh_epoch;
 		uint64_t					world_epoch;
 		uint64_t					relevance_epoch;
 		uint32_t					generation_revision;
@@ -296,10 +348,10 @@ class WorldGenerationPipeline
 		std::size_t incremental_removal_addition_queue_index;
 		ft_bool incremental_removal_state_initialized;
 		ft_bool incremental_removal_addition_started;
-		uint8_t incremental_removal_external_new_channel[2];
 		std::size_t incremental_seed_index;
 		ft_bool incremental_additive_state_initialized;
 		uint64_t incremental_processed_cells;
+		IncrementalLightScratch incremental_light_scratch;
 		std::shared_ptr<std::atomic<uint64_t>> cancellation_token;
 		uint64_t cancellation_token_value;
 		std::unique_ptr<WorldChunkSnapshot> snapshot;
@@ -339,7 +391,8 @@ class WorldGenerationPipeline
 		const voxel_generation_config &config, uint32_t stage_mask,
 		WorldGenerationOperation operation,
 		const WorldChunkSnapshot *source_snapshot = nullptr,
-		const std::vector<GenerationFeaturePlan> *feature_plans = nullptr) noexcept;
+		const std::vector<GenerationFeaturePlan> *feature_plans = nullptr,
+		std::string terrain_chunk_path = {}) noexcept;
 	int32_t submit_remesh(uint64_t request_id, uint64_t world_epoch,
 		uint64_t relevance_epoch, uint32_t generation_revision, int32_t chunk_x,
 		int32_t chunk_z, uint64_t voxel_revision, uint64_t light_revision,
@@ -368,8 +421,6 @@ class WorldGenerationPipeline
 		const WorldChunk *southeast,
 		WorldChunkSnapshot &snapshot) const noexcept;
 	void cancel_queued() noexcept;
-	void cancel_queued_background_remeshes() noexcept;
-	void cancel_active_background_remeshes() noexcept;
 	std::size_t queued_count() const noexcept;
 	std::size_t completed_count() const noexcept;
 	std::size_t active_count() const noexcept;
@@ -388,7 +439,6 @@ class WorldGenerationPipeline
 	mutable std::mutex results_mutex_;
 	std::condition_variable condition_;
 	std::atomic<uint64_t> pipeline_epoch_;
-	std::atomic<uint64_t> background_remesh_epoch_;
 	std::atomic<std::size_t> remesh_in_flight_;
 	std::atomic<std::size_t> active_requests_;
 	std::atomic<std::size_t> active_generation_requests_;

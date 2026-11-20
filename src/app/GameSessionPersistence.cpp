@@ -1,10 +1,12 @@
 #include "GameSessionPersistence.hpp"
 #include "GameSession.hpp"
 #include "GameSessionEntityState.hpp"
+#include "../diagnostics/RuntimeAnalytics.hpp"
 #include "../entities/WorldEntityStore.hpp"
 #include "../world/World.hpp"
 
 #include "../../Libft/Modules/Game/game_world.hpp"
+#include "../../Libft/Modules/Game/game_character_snapshot.hpp"
 #include "../../Libft/Modules/Game/game_voxel_chunk.hpp"
 #include "../../Libft/Modules/Buffer/byte_buffer.hpp"
 #include "../../Libft/Modules/Filesystem/filesystem.hpp"
@@ -90,6 +92,37 @@ namespace
 		return (size == 24U || size == 56U || size == 88U || size == 124U);
 	}
 
+	struct Reader
+	{
+		const uint8_t *bytes;
+		std::size_t size;
+		std::size_t offset;
+
+		bool read_u32(uint32_t *value) noexcept
+		{
+			if (value == nullptr || offset > size || size - offset < 4U)
+				return (false);
+			*value = static_cast<uint32_t>(bytes[offset])
+				| (static_cast<uint32_t>(bytes[offset + 1U]) << 8U)
+				| (static_cast<uint32_t>(bytes[offset + 2U]) << 16U)
+				| (static_cast<uint32_t>(bytes[offset + 3U]) << 24U);
+			offset += 4U;
+			return (true);
+		}
+
+		bool read_u64(uint64_t *value) noexcept
+		{
+			uint32_t low;
+			uint32_t high;
+
+			if (!read_u32(&low) || !read_u32(&high))
+				return (false);
+			*value = static_cast<uint64_t>(low)
+				| (static_cast<uint64_t>(high) << 32U);
+			return (true);
+		}
+	};
+
 	static int32_t mcsp_snapshot_world_id(
 		const std::vector<uint8_t> &bytes, uint8_t world_id_out[32],
 		bool *world_id_present_out) noexcept
@@ -138,7 +171,7 @@ namespace
 			if (reader.offset > reader.size
 				|| size > reader.size - reader.offset)
 				return (false);
-			reader.offset += static_cast<std::size_t>(size);
+			reader.offset += FT_UINT64_TO_NATIVE_SIZE_CAST(size);
 			return (true);
 		};
 		if (!skip_payload(character_size) || !skip_payload(item_size)
@@ -161,10 +194,10 @@ namespace
 			return (FT_ERR_INVALID_ARGUMENT);
 		const uint8_t *config = reader.bytes + reader.offset;
 		Reader config_reader = {config,
-			static_cast<std::size_t>(host_config_size), 4U};
+			FT_UINT64_TO_NATIVE_SIZE_CAST(host_config_size), 4U};
 		Reader config_checksum_reader = {config,
-			static_cast<std::size_t>(host_config_size),
-			static_cast<std::size_t>(host_config_size - 8U)};
+			FT_UINT64_TO_NATIVE_SIZE_CAST(host_config_size),
+			FT_UINT64_TO_NATIVE_SIZE_CAST(host_config_size - 8U)};
 		uint32_t config_version = 0U;
 		uint64_t stored_config_checksum = 0U;
 		if (host_config_size < 24U || std::memcmp(config, "RBH1", 4U) != 0
@@ -175,7 +208,7 @@ namespace
 			|| (config_version == 3U && host_config_size != 88U)
 			|| (config_version == 4U && host_config_size != 124U)
 			|| config_version < 1U || config_version > 4U
-			|| checksum(config, static_cast<std::size_t>(host_config_size - 8U))
+			|| checksum(config, FT_UINT64_TO_NATIVE_SIZE_CAST(host_config_size - 8U))
 				!= stored_config_checksum)
 			return (FT_ERR_INVALID_ARGUMENT);
 		if (config_version >= 2U)
@@ -206,37 +239,6 @@ namespace
 		}
 		return (FT_ERR_SUCCESS);
 	}
-
-	struct Reader
-	{
-		const uint8_t *bytes;
-		std::size_t size;
-		std::size_t offset;
-
-		bool read_u32(uint32_t *value) noexcept
-		{
-			if (value == nullptr || offset > size || size - offset < 4U)
-				return (false);
-			*value = static_cast<uint32_t>(bytes[offset])
-				| (static_cast<uint32_t>(bytes[offset + 1U]) << 8U)
-				| (static_cast<uint32_t>(bytes[offset + 2U]) << 16U)
-				| (static_cast<uint32_t>(bytes[offset + 3U]) << 24U);
-			offset += 4U;
-			return (true);
-		}
-
-		bool read_u64(uint64_t *value) noexcept
-		{
-			uint32_t low;
-			uint32_t high;
-
-			if (!read_u32(&low) || !read_u32(&high))
-				return (false);
-			*value = static_cast<uint64_t>(low)
-				| (static_cast<uint64_t>(high) << 32U);
-			return (true);
-		}
-	};
 
 	static int32_t read_file(const char *path,
 		std::vector<uint8_t> &bytes) noexcept
@@ -315,9 +317,9 @@ static int32_t game_session_persistence_save_file(const char *file_path,
 		const std::vector<uint8_t> *crop_growth_policy_state = nullptr,
 		uint64_t output_session_id = 0U,
 		const std::vector<uint8_t> *revision_server_state = nullptr,
-		const std::vector<uint8_t> *host_config_state = nullptr) noexcept
+		const std::vector<uint8_t> *host_config_state = nullptr,
+		std::vector<uint8_t> *serialized_snapshot = nullptr) noexcept
 {
-	game_world serializer;
 	ft_string character_buffer;
 	ft_byte_buffer recipe_buffer;
 	std::vector<uint8_t> item_bytes;
@@ -329,21 +331,34 @@ static int32_t game_session_persistence_save_file(const char *file_path,
 
 	if (file_path == nullptr || file_path[0] == '\0')
 		return (FT_ERR_INVALID_ARGUMENT);
+	const int32_t validation_scope = RuntimeAnalytics::begin_scope(
+		RuntimeAnalyticsScope::SESSION_ENCODE_VALIDATION);
 	result = world_items.validate_instance_id_uniqueness(
 		character.get_inventory());
+	if (validation_scope == FT_ERR_SUCCESS)
+		(void)RuntimeAnalytics::end_scope();
 	if (result != FT_ERR_SUCCESS)
 		return (result);
-	result = serializer.initialize();
+	const int32_t character_scope = RuntimeAnalytics::begin_scope(
+		RuntimeAnalyticsScope::SESSION_ENCODE_CHARACTER);
+	result = character_buffer.initialize();
 	if (result == FT_ERR_SUCCESS)
-		result = character_buffer.initialize();
-	if (result == FT_ERR_SUCCESS && recipe_book != nullptr)
-		if (result == FT_ERR_SUCCESS)
-			result = recipe_buffer.initialize();
-	if (result == FT_ERR_SUCCESS)
-		result = serializer.save_to_buffer(character_buffer, character,
+		result = game_character_save_snapshot(character_buffer, character,
 			character.get_inventory());
+	if (character_scope == FT_ERR_SUCCESS)
+		(void)RuntimeAnalytics::end_scope();
 	if (result == FT_ERR_SUCCESS)
+	{
+		const int32_t items_scope = RuntimeAnalytics::begin_scope(
+			RuntimeAnalyticsScope::SESSION_ENCODE_GROUND_ITEMS);
 		result = world_items.serialize(item_bytes);
+		if (items_scope == FT_ERR_SUCCESS)
+			(void)RuntimeAnalytics::end_scope();
+	}
+	const int32_t recipe_journal_scope = RuntimeAnalytics::begin_scope(
+		RuntimeAnalyticsScope::SESSION_ENCODE_RECIPE_JOURNAL);
+	if (result == FT_ERR_SUCCESS && recipe_book != nullptr)
+		result = recipe_buffer.initialize();
 	if (result == FT_ERR_SUCCESS && recipe_book != nullptr)
 		result = recipe_book->export_book(recipe_buffer);
 	if (result == FT_ERR_SUCCESS && snapshot_version >= 4U
@@ -362,6 +377,8 @@ static int32_t game_session_persistence_save_file(const char *file_path,
 		else
 			result = transaction_journal->serialize(transaction_journal_bytes);
 	}
+	if (recipe_journal_scope == FT_ERR_SUCCESS)
+		(void)RuntimeAnalytics::end_scope();
 	if (result == FT_ERR_SUCCESS
 		&& snapshot_version >= SESSION_SNAPSHOT_VERSION_WITH_CARDS)
 	{
@@ -531,6 +548,19 @@ static int32_t game_session_persistence_save_file(const char *file_path,
 	{
 		return (FT_ERR_NO_MEMORY);
 	}
+	if (serialized_snapshot != nullptr)
+	{
+		serialized_snapshot->swap(output);
+		return (FT_ERR_SUCCESS);
+	}
+	return (GameSessionPersistence::write_serialized_snapshot(file_path, output));
+}
+
+int32_t GameSessionPersistence::write_serialized_snapshot(const char *file_path,
+	const std::vector<uint8_t> &output) noexcept
+{
+	if (file_path == nullptr || file_path[0] == '\0' || output.empty())
+		return (FT_ERR_INVALID_ARGUMENT);
 	std::vector<uint8_t> previous_snapshot;
 	std::string backup_path;
 	int32_t backup_result = read_file(file_path, previous_snapshot);
@@ -804,7 +834,8 @@ int32_t GameSessionPersistence::save_file_with_revision_server_checkpoint_and_ho
 	const std::vector<uint8_t> &crop_growth_state,
 	uint64_t output_session_id,
 	const std::vector<uint8_t> &revision_server_state,
-	const std::vector<uint8_t> &host_config_state) noexcept
+	const std::vector<uint8_t> &host_config_state,
+	std::vector<uint8_t> *serialized_snapshot) noexcept
 {
 	return (game_session_persistence_save_file(file_path, character,
 		world_items, &recipe_catalog.recipe_book(),
@@ -814,7 +845,7 @@ int32_t GameSessionPersistence::save_file_with_revision_server_checkpoint_and_ho
 		SESSION_SNAPSHOT_VERSION_WITH_HOST_CONFIG,
 		&revision_metadata_state, &fluid_state, &entity_state,
 		&crop_growth_state, output_session_id, &revision_server_state,
-		&host_config_state));
+		&host_config_state, serialized_snapshot));
 }
 
 static int32_t game_session_persistence_load_file_once(const char *file_path,
@@ -1120,7 +1151,7 @@ static int32_t game_session_persistence_load_file_once(const char *file_path,
 			- FT_UINT64_TO_NATIVE_SIZE_CAST(entity_state_size)
 			- FT_UINT64_TO_NATIVE_SIZE_CAST(crop_growth_policy_size)
 			- (version >= SESSION_SNAPSHOT_VERSION_WITH_OUTPUT_SESSION_ID
-				? 8U : 0U))
+				? 8U : 0U)
 		|| host_config_state_size > reader.size - reader.offset
 			- FT_UINT64_TO_NATIVE_SIZE_CAST(character_size)
 			- FT_UINT64_TO_NATIVE_SIZE_CAST(item_size)
@@ -2041,12 +2072,12 @@ static int32_t game_session_bundle_validate_chunk_record(const char *name,
 		|| record_checksum != checksum(bytes.data(), bytes.size() - 8U))
 		return (FT_ERR_INVALID_ARGUMENT);
 	ft_byte_buffer payload;
-	int32_t result = payload.initialize(static_cast<ft_size_t>(payload_size),
+	int32_t result = payload.initialize(payload_size,
 		FT_TRUE);
 	const bool payload_initialized = result == FT_ERR_SUCCESS;
 	if (result == FT_ERR_SUCCESS)
 		result = payload.append(bytes.data() + 24U,
-			static_cast<ft_size_t>(payload_size));
+			payload_size);
 	if (result == FT_ERR_SUCCESS)
 		result = payload.reset_read_position();
 	game_voxel_chunk chunk;
@@ -2245,8 +2276,8 @@ static int32_t game_session_bundle_parse_terrain(const uint8_t *bytes,
 			std::vector<uint8_t> file_bytes(
 				reader.bytes + reader.offset,
 				reader.bytes + reader.offset
-					+ static_cast<std::size_t>(file_size));
-			reader.offset += static_cast<std::size_t>(file_size);
+					+ FT_UINT64_TO_NATIVE_SIZE_CAST(file_size));
+			reader.offset += FT_UINT64_TO_NATIVE_SIZE_CAST(file_size);
 			if (checksum(file_bytes.data(), file_bytes.size()) != file_checksum)
 				return (FT_ERR_INVALID_ARGUMENT);
 			const int32_t chunk_result =
@@ -2319,7 +2350,7 @@ static int32_t game_session_bundle_install_terrain(const uint8_t world_id[32],
 		if (result == FT_ERR_SUCCESS)
 			result = file_write_all_atomic(path.c_str(),
 				reinterpret_cast<const char *>(entry.second.data()),
-				static_cast<ft_size_t>(entry.second.size()));
+				FT_NATIVE_SIZE_TO_FT_SIZE_CAST(entry.second.size()));
 		if (result != FT_ERR_SUCCESS)
 			return (result);
 	}
@@ -2354,7 +2385,7 @@ static int32_t game_session_bundle_restore_file(const char *path,
 			return (FT_ERR_INVALID_PATH);
 		return (file_write_all_atomic(path,
 			reinterpret_cast<const char *>(bytes.data()),
-			static_cast<ft_size_t>(bytes.size())));
+			FT_NATIVE_SIZE_TO_FT_SIZE_CAST(bytes.size())));
 	}
 	if (type == FILE_TYPE_MISSING)
 		return (FT_ERR_SUCCESS);
@@ -2633,7 +2664,7 @@ int32_t GameSessionPersistence::export_world_bundle(const char *snapshot_path,
 	}
 	return (file_write_all_atomic(bundle_path,
 		reinterpret_cast<const char *>(bundle.data()),
-		static_cast<ft_size_t>(bundle.size())));
+		FT_NATIVE_SIZE_TO_FT_SIZE_CAST(bundle.size())));
 }
 
 int32_t GameSessionPersistence::backup_catalog_world(
@@ -2749,14 +2780,14 @@ static int32_t game_session_bundle_prepare_delete_journal(
 	result = snapshot_type == FILE_TYPE_REGULAR
 		? file_write_all_atomic(snapshot_backup_path.c_str(),
 			reinterpret_cast<const char *>(snapshot.data()),
-			static_cast<ft_size_t>(snapshot.size()))
+			FT_NATIVE_SIZE_TO_FT_SIZE_CAST(snapshot.size()))
 		: game_session_bundle_remove_file(snapshot_backup_path.c_str());
 	if (result != FT_ERR_SUCCESS)
 		return (result);
 	result = revision_type == FILE_TYPE_REGULAR
 		? file_write_all_atomic(revision_backup_path.c_str(),
 			reinterpret_cast<const char *>(revision.data()),
-			static_cast<ft_size_t>(revision.size()))
+			FT_NATIVE_SIZE_TO_FT_SIZE_CAST(revision.size()))
 		: game_session_bundle_remove_file(revision_backup_path.c_str());
 	if (result != FT_ERR_SUCCESS)
 	{
@@ -2785,7 +2816,7 @@ static int32_t game_session_bundle_prepare_delete_journal(
 	}
 	result = file_write_all_atomic(journal_path.c_str(),
 		reinterpret_cast<const char *>(journal.data()),
-		static_cast<ft_size_t>(journal.size()));
+		FT_NATIVE_SIZE_TO_FT_SIZE_CAST(journal.size()));
 	if (result != FT_ERR_SUCCESS)
 	{
 		(void)game_session_bundle_remove_file(snapshot_backup_path.c_str());
@@ -2835,7 +2866,7 @@ static int32_t game_session_bundle_write_deletion_marker(
 	}
 	return (file_write_all_atomic(marker_path.c_str(),
 		reinterpret_cast<const char *>(marker.data()),
-		static_cast<ft_size_t>(marker.size())));
+		FT_NATIVE_SIZE_TO_FT_SIZE_CAST(marker.size())));
 }
 
 static int32_t game_session_bundle_parse_deletion_marker(
@@ -2917,10 +2948,10 @@ int32_t GameSessionPersistence::recover_catalog_world_deletions(
 			break ;
 		if (marker.size() != 48U
 			|| std::memcmp(marker.data(), "WDL1", 4U) != 0
-			|| read_u32(marker.data(), 4U) != 1U
+			|| game_session_bundle_read_u32(marker.data() + 4U) != 1U
 			|| std::memcmp(marker.data() + 8U, world_id, 32U) != 0
 			|| checksum(marker.data(), marker.size() - 8U)
-			!= read_u64(marker.data(), marker.size() - 8U))
+			!= game_session_bundle_read_u64(marker.data() + marker.size() - 8U))
 		{
 			result = FT_ERR_INVALID_ARGUMENT;
 			break ;
@@ -3210,7 +3241,7 @@ int32_t GameSessionPersistence::import_world_bundle(const char *bundle_path,
 			revision_begin + revision_size);
 		if (version == 3U)
 			bundle_terrain.assign(revision_begin + revision_size,
-				bundle.data() + reader.size);
+				revision_begin + revision_size + terrain_size);
 	}
 	catch (const std::bad_alloc &)
 	{
@@ -3299,7 +3330,7 @@ int32_t GameSessionPersistence::import_world_bundle(const char *bundle_path,
 	if (had_snapshot)
 		result = file_write_all_atomic(snapshot_backup_path.c_str(),
 			reinterpret_cast<const char *>(old_snapshot.data()),
-			static_cast<ft_size_t>(old_snapshot.size()));
+			FT_NATIVE_SIZE_TO_FT_SIZE_CAST(old_snapshot.size()));
 	else
 		result = game_session_bundle_remove_file(snapshot_backup_path.c_str());
 	if (result != FT_ERR_SUCCESS)
@@ -3307,7 +3338,7 @@ int32_t GameSessionPersistence::import_world_bundle(const char *bundle_path,
 	if (had_revision)
 		result = file_write_all_atomic(revision_backup_path.c_str(),
 			reinterpret_cast<const char *>(old_revision_metadata.data()),
-			static_cast<ft_size_t>(old_revision_metadata.size()));
+			FT_NATIVE_SIZE_TO_FT_SIZE_CAST(old_revision_metadata.size()));
 	else
 		result = game_session_bundle_remove_file(revision_backup_path.c_str());
 	if (result != FT_ERR_SUCCESS)
@@ -3320,7 +3351,7 @@ int32_t GameSessionPersistence::import_world_bundle(const char *bundle_path,
 		if (had_terrain)
 			result = file_write_all_atomic(terrain_backup_path.c_str(),
 				reinterpret_cast<const char *>(old_terrain_archive.data()),
-				static_cast<ft_size_t>(old_terrain_archive.size()));
+				FT_NATIVE_SIZE_TO_FT_SIZE_CAST(old_terrain_archive.size()));
 		else
 			result = game_session_bundle_remove_file(
 				terrain_backup_path.c_str());
@@ -3359,7 +3390,7 @@ int32_t GameSessionPersistence::import_world_bundle(const char *bundle_path,
 	}
 	result = file_write_all_atomic(journal_path.c_str(),
 		reinterpret_cast<const char *>(journal.data()),
-		static_cast<ft_size_t>(journal.size()));
+		FT_NATIVE_SIZE_TO_FT_SIZE_CAST(journal.size()));
 	if (result != FT_ERR_SUCCESS)
 	{
 		(void)game_session_bundle_remove_file(snapshot_backup_path.c_str());
@@ -3369,7 +3400,7 @@ int32_t GameSessionPersistence::import_world_bundle(const char *bundle_path,
 	}
 	result = file_write_all_atomic(snapshot_path,
 		reinterpret_cast<const char *>(snapshot.data()),
-		static_cast<ft_size_t>(snapshot.size()));
+		FT_NATIVE_SIZE_TO_FT_SIZE_CAST(snapshot.size()));
 	if (result != FT_ERR_SUCCESS)
 	{
 		const int32_t rollback_result =
@@ -3386,7 +3417,7 @@ int32_t GameSessionPersistence::import_world_bundle(const char *bundle_path,
 	else
 		result = file_write_all_atomic(revision_metadata_path,
 			reinterpret_cast<const char *>(revision_metadata.data()),
-			static_cast<ft_size_t>(revision_metadata.size()));
+			FT_NATIVE_SIZE_TO_FT_SIZE_CAST(revision_metadata.size()));
 	if (result == FT_ERR_SUCCESS && version == 3U)
 		result = game_session_bundle_install_terrain(target_world_id,
 			bundle_terrain.data(), bundle_terrain.size());

@@ -1,6 +1,7 @@
 #include "../../src/validators/RendererPublicationValidator.hpp"
 #include "../../src/camera/Camera.hpp"
 #include "../../src/diagnostics/ApplicationError.hpp"
+#include "../../src/font/FontRenderer.hpp"
 #include "../../src/player/PlayerController.hpp"
 #include "../../src/platform/ApplicationWindow.hpp"
 #include "../../src/frame/RendererColor.hpp"
@@ -8,6 +9,7 @@
 #include "../../src/world/World.hpp"
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <new>
 #include <thread>
@@ -18,6 +20,94 @@ namespace
 	 * keep this below a visible hitch while leaving the repeated block-edit
 	 * percentile gate responsible for the tighter CPU-side budget. */
 	static const uint64_t RENDERER_EDIT_PUBLICATION_MAX_LATENCY_MS = 500U;
+
+	static bool cached_debug_overlay_is_drawn(ApplicationWindow &window,
+		VoxelRenderer &renderer, const World &world)
+	{
+		const int width = 128;
+		const int height = 28;
+		const int y = window.get_gpu_window()->get_height() - height;
+		uint8_t background[width * height * 4];
+		uint8_t refreshed[width * height * 4];
+		uint8_t cached[width * height * 4];
+		Camera camera;
+		RenderDebug debug;
+
+		camera.initialize();
+		camera.y = GAME_VOXEL_CHUNK_HEIGHT * 4.0;
+		debug.fps = 60.0;
+		if (!FontRenderer::instance().is_loaded())
+			FontRenderer::instance().load(22.0f);
+		renderer.render_world(window.framebuffer(), camera, world, nullptr);
+		glReadPixels(0, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, background);
+		renderer.render_world(window.framebuffer(), camera, world, &debug);
+		glReadPixels(0, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, refreshed);
+		renderer.render_world(window.framebuffer(), camera, world, &debug);
+		glReadPixels(0, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, cached);
+		return (std::memcmp(background, refreshed, sizeof(background)) != 0
+			&& std::memcmp(refreshed, cached, sizeof(cached)) == 0);
+	}
+
+	static bool overlay_region_preserves_surrounding_pixels(
+		ApplicationWindow &window, GpuRenderer &gpu, const World &world)
+	{
+		const int size = 48;
+		uint32_t pixels[size * size] = {};
+		uint8_t before[8] = {};
+		uint8_t updated[8] = {};
+		uint8_t restored[8] = {};
+		Camera camera;
+
+		camera.initialize();
+		camera.y = GAME_VOXEL_CHUNK_HEIGHT * 4.0;
+		/* The right pixel is outside the region and must survive both uploads. */
+		pixels[26 * size + 24] = 0x0000FFU;
+		gpu.upload_overlay(pixels, size, size);
+		const auto sample_frame = [&](uint8_t *sample)
+		{
+			gpu.render(camera, world);
+			gpu.draw_overlay();
+			glReadPixels(23, window.get_gpu_window()->get_height() - 27,
+				2, 1, GL_RGBA, GL_UNSIGNED_BYTE, sample);
+		};
+		sample_frame(before);
+		pixels[26 * size + 23] = 0xFF0000U;
+		gpu.upload_overlay_region(pixels, size, size, 21, 25, 3, 2);
+		sample_frame(updated);
+		pixels[26 * size + 23] = 0U;
+		gpu.upload_overlay_region(pixels, size, size, 21, 25, 3, 2);
+		sample_frame(restored);
+		return (updated[0] == 255U && updated[1] == 0U && updated[2] == 0U
+			&& updated[4] == 0U && updated[5] == 0U && updated[6] == 255U
+			&& std::memcmp(before, restored, sizeof(before)) == 0);
+	}
+
+	static bool item_markers_draw_without_altering_overlay(ApplicationWindow &window,
+		GpuRenderer &gpu)
+	{
+		const int size = 48;
+		const int y = window.get_gpu_window()->get_height() - 27;
+		uint32_t pixels[size * size] = {};
+		uint8_t background[8] = {};
+		uint8_t drawn[8] = {};
+		uint8_t restored[8] = {};
+		const GpuOverlayRenderer::ItemMarker marker{size - 1, 26, 2, 0xFF0000U};
+
+		pixels[26 * size + size - 1] = 0x0000FFU;
+		gpu.upload_overlay(pixels, size, size);
+		gpu.clear_screen();
+		gpu.draw_overlay();
+		glReadPixels(size - 1, y, 2, 1, GL_RGBA, GL_UNSIGNED_BYTE, background);
+		gpu.draw_item_markers(&marker, 1U, size, size);
+		glReadPixels(size - 1, y, 2, 1, GL_RGBA, GL_UNSIGNED_BYTE, drawn);
+		gpu.clear_screen();
+		gpu.draw_overlay();
+		gpu.draw_item_markers(nullptr, 0U, size, size);
+		glReadPixels(size - 1, y, 2, 1, GL_RGBA, GL_UNSIGNED_BYTE, restored);
+		return (background[2] == 255U && drawn[0] == 255U && drawn[2] == 0U
+			&& std::memcmp(background + 4, drawn + 4, 4U) == 0
+			&& std::memcmp(background, restored, sizeof(background)) == 0);
+	}
 
 	static bool mesh_has_light(const chunk_mesh &mesh, uint8_t *minimum,
 		uint8_t *maximum, std::size_t *nonzero) noexcept
@@ -82,6 +172,7 @@ namespace
 		uint32_t target_block = air_block;
 		uint32_t neighbour_block = air_block;
 		bool place_first = false;
+		int32_t unrelated_chunk_z = 0;
 		int32_t edit_y = -1;
 		int32_t slot_index;
 		int32_t local_z;
@@ -131,11 +222,17 @@ namespace
 
 				if (candidate->initialized)
 				{
+					const WorldChunk *unrelated = world.find_chunk(candidate->chunk_x,
+						candidate->chunk_z - 1);
+					if (unrelated == nullptr || !unrelated->initialized)
+						unrelated = world.find_chunk(candidate->chunk_x,
+							candidate->chunk_z + 1);
 					east = world.find_chunk_mutable(candidate->chunk_x + 1,
 						candidate->chunk_z);
-					local_z = 0;
+					local_z = 1;
 					while (east != nullptr && east->initialized
-						&& local_z < GAME_VOXEL_CHUNK_DEPTH && edit_y < 0)
+						&& unrelated != nullptr && unrelated->initialized
+						&& local_z < GAME_VOXEL_CHUNK_DEPTH - 1 && edit_y < 0)
 					{
 						local_y = 0;
 						while (local_y < GAME_VOXEL_CHUNK_HEIGHT && edit_y < 0)
@@ -155,6 +252,7 @@ namespace
 								target_chunk_x = candidate->chunk_x;
 								neighbour_chunk_x = east->chunk_x;
 								chunk_z = candidate->chunk_z;
+								unrelated_chunk_z = unrelated->chunk_z;
 								target_x = candidate->world_x
 									+ GAME_VOXEL_CHUNK_WIDTH - 1;
 								world_z = candidate->world_z + local_z;
@@ -243,6 +341,10 @@ namespace
 		if (world.delete_block_at(target_x, edit_y, world_z)
 			!= FT_ERR_SUCCESS)
 			return (1);
+		if (!world.block_id_at(target_x, edit_y, world_z, &target_block)
+			|| target_block != air_block
+			|| target_chunk->last_mesh_publication_voxel_revision != old_target_voxel)
+			return (FT_ERR_INTERNAL);
 		deadline = static_cast<uint64_t>(
 			std::chrono::duration_cast<std::chrono::milliseconds>(
 				std::chrono::steady_clock::now().time_since_epoch()).count())
@@ -252,8 +354,17 @@ namespace
 			if (world.update_around(camera.x, camera.z, 0,
 					WorldCoordinates::MIN_RENDER_DISTANCE) != FT_ERR_SUCCESS)
 				return (FT_ERR_INVALID_OPERATION);
+			WorldChunk *unrelated = world.find_chunk_mutable(target_chunk_x,
+				unrelated_chunk_z);
+			if (unrelated == nullptr || !unrelated->initialized)
+				return (FT_ERR_INVALID_STATE);
+			/* An unrelated cardinal neighbor still relighting must not keep
+			 * the deleted block visible after its own mesh has committed. */
+			const bool previous_mesh_dirty = unrelated->mesh_dirty;
+			unrelated->mesh_dirty = true;
 			renderer.render_world(window.framebuffer(), camera, world,
 				static_cast<const RenderDebug *>(nullptr));
+			unrelated->mesh_dirty = previous_mesh_dirty;
 			if (window.poll_events() != FT_ERR_SUCCESS
 				|| window.present() != FT_ERR_SUCCESS)
 				return (FT_ERR_INVALID_OPERATION);
@@ -402,6 +513,17 @@ int RendererPublicationValidator::validate() const
 		world.destroy();
 		(void)window.destroy();
 		return (ApplicationError::fail("renderer-publication GPU", error_code));
+	}
+	if (!overlay_region_preserves_surrounding_pixels(window,
+			*renderer.get_gpu_renderer(), world)
+		|| !item_markers_draw_without_altering_overlay(window,
+			*renderer.get_gpu_renderer())
+		|| !cached_debug_overlay_is_drawn(window, renderer, world))
+	{
+		world.destroy();
+		(void)window.destroy();
+		return (ApplicationError::fail("renderer-publication cached debug overlay",
+			FT_ERR_INTERNAL));
 	}
 	camera.initialize();
 	PlayerController::spawn_player_on_ground(&camera, world);

@@ -170,7 +170,10 @@ class GameSessionPersistence
 		const std::vector<uint8_t> &crop_growth_state,
 		uint64_t output_session_id,
 		const std::vector<uint8_t> &revision_server_state,
-		const std::vector<uint8_t> &host_config_state) noexcept;
+		const std::vector<uint8_t> &host_config_state,
+		std::vector<uint8_t> *serialized_snapshot = nullptr) noexcept;
+	static int32_t write_serialized_snapshot(const char *file_path,
+		const std::vector<uint8_t> &snapshot) noexcept;
 	static int32_t load_file(const char *file_path,
 		game_character &character, WorldItemStore &world_items) noexcept;
 	static int32_t load_file(const char *file_path, game_character &character,

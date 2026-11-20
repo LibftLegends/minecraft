@@ -120,6 +120,8 @@ class WorldChunkStreamer
 		uint16_t light_input_version;
 		std::vector<WorldGenerationPipeline::IncrementalLightSeed>
 			incremental_light_seeds;
+		bool requires_full_light = false;
+		uint16_t single_cell_baseline_input_version = world_light_version::INVALID_VERSION;
 	};
 
 	std::atomic<uint64_t> remesh_snapshot_bytes_ = 0U;
@@ -156,13 +158,6 @@ class WorldChunkStreamer
 	std::size_t stale_remesh_dependency_count_ = 0U;
 	std::size_t stale_remesh_pending_count_ = 0U;
 	std::size_t stale_remesh_revision_count_ = 0U;
-	/* A completed source result can be held briefly when a face-sharing chunk
-	 * is explicitly waiting on it.  The committer then publishes the source and
-	 * dependent result in one drain pass, while the bounded age fallback keeps a
-	 * cancelled/missing dependency from stalling publication forever. */
-	std::unique_ptr<WorldGenerationPipeline::Result>
-		staged_border_source_result_;
-	uint64_t staged_border_source_frame_ = 0U;
 	struct RemeshCaptureTask
 	{
 		/*
@@ -269,6 +264,8 @@ class WorldChunkStreamer
 	void mark_remesh_dirty(WorldChunk &chunk,
 		ft_bool light_input_changed = FT_FALSE) noexcept;
 	void mark_light_remesh_pending(WorldChunk &chunk) noexcept;
+	void invalidate_boundary_receivers(
+		const WorldGenerationPipeline::Result &result) noexcept;
 	void mark_neighbor_remeshes(int32_t chunk_x, int32_t chunk_z,
 		bool incremental_edit = false, bool source_arrival = false) noexcept;
 	void mark_edit_remeshes(int32_t chunk_x, int32_t chunk_z,

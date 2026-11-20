@@ -160,7 +160,6 @@ int32_t WorldEditHistory::apply(World &world, const Record &entry,
 	}
 	}
 	world.fluid_cell_overrides_.swap(staged_overrides);
-	world.mark_geometry_changed();
 	world.chunk_streamer.mark_remesh_dirty(*wc);
 	recorded_edit.world_x = entry.edit.world_x;
 	recorded_edit.world_y = entry.edit.world_y;

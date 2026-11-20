@@ -79,8 +79,7 @@ int32_t PlaceBlockCommand::execute(World &world) const
 		}
 	}
 	wc->mark_content_changed();
-	wc->commit_prepared_read_state_after_block_edit(prepared_read_state);
-	world.mark_geometry_changed();
+	wc->commit_prepared_read_state(prepared_read_state);
 	world.chunk_streamer.mark_remesh_dirty(*wc);
 	wc->cancel_remesh_work();
 	WorldEditHistory::Record record;

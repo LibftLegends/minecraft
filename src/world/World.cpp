@@ -66,6 +66,8 @@ void World::copy_seed(const char *seed_value)
 
 void World::mark_geometry_changed() noexcept
 {
+	/* Render visibility follows drawable mesh publication and chunk membership.
+	 * Edits use voxel revisions until the replacement mesh is published. */
 	this->geometry_revision += 1U;
 	if (this->geometry_revision == 0U)
 		this->geometry_revision = 1U;

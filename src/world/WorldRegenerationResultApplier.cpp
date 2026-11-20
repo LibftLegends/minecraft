@@ -281,7 +281,7 @@ void WorldRegenerationResultApplier::apply_chunk(WorldChunkStreamer &streamer,
 			result.chunk_x, result.chunk_z);
 	};
 	auto restore_terrain_chunk = [&world, &previous_chunk, &result,
-		&terrain_chunk_replaced]() noexcept
+		&terrain_chunk_replaced]() noexcept -> int32_t
 	{
 		if (!terrain_chunk_replaced)
 			return (FT_ERR_SUCCESS);
@@ -448,6 +448,7 @@ void WorldRegenerationResultApplier::apply_chunk(WorldChunkStreamer &streamer,
 	replacement.initialized = true;
 	replacement.mesh_revision = chunk->mesh_revision + 1U;
 	replacement.voxel_revision = chunk->voxel_revision + 1U;
+	replacement.last_mesh_publication_voxel_revision = replacement.voxel_revision;
 	replacement.light_revision = chunk->light_revision + 1U;
 	replacement.content_version = 1U;
 	replacement.light_version = 1U;

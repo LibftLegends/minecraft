@@ -28,7 +28,8 @@ class WorldItemPickupTransaction
 		GameTransactionJournal &journal,
 		const GameTransactionJournal::Record &record,
 		WorldItemPickupResult *result_out,
-		const GameSessionSnapshotWriter *snapshot_writer = nullptr) noexcept;
+		const GameSessionSnapshotWriter *snapshot_writer = nullptr,
+		int32_t *pickup_status_out = nullptr) noexcept;
 	static int32_t execute(const char *snapshot_path,
 		game_character &character, WorldItemStore &world_items,
 		const MinecraftRecipeCatalog &recipe_catalog,

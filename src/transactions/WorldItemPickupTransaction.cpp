@@ -116,7 +116,8 @@ namespace
 		GameTransactionJournal &journal,
 		const GameTransactionJournal::Record &record,
 		WorldItemPickupResult *result_out,
-		const GameSessionSnapshotWriter *snapshot_writer) noexcept
+		const GameSessionSnapshotWriter *snapshot_writer,
+		int32_t *pickup_status_out) noexcept
 	{
 		uint64_t entity_id;
 		uint64_t entity_revision;
@@ -153,6 +154,11 @@ namespace
 		else
 			error_code = GameSessionPersistence::save_file(snapshot_path,
 				character, world_items, recipe_catalog, journal);
+	if (pickup_status_out != nullptr)
+	{
+		*pickup_status_out = pickup_result;
+		return (error_code);
+	}
 		return (error_code == FT_ERR_SUCCESS ? pickup_result : error_code);
 	}
 }
@@ -251,10 +257,11 @@ int32_t WorldItemPickupTransaction::apply_prepared(
 	GameTransactionJournal &journal,
 	const GameTransactionJournal::Record &record,
 	WorldItemPickupResult *result_out,
-	const GameSessionSnapshotWriter *snapshot_writer) noexcept
+	const GameSessionSnapshotWriter *snapshot_writer,
+	int32_t *pickup_status_out) noexcept
 {
 	return (apply_record(snapshot_path, character, world_items, recipe_catalog,
-		journal, record, result_out, snapshot_writer));
+		journal, record, result_out, snapshot_writer, pickup_status_out));
 }
 
 int32_t WorldItemPickupTransaction::execute(const char *snapshot_path,

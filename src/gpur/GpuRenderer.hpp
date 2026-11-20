@@ -20,7 +20,11 @@ class GpuRenderer
 	void resize(int width, int height);
 	void render(const Camera &camera, const World &world);
 	void upload_overlay(const uint32_t *pixels, int w, int h);
+	void upload_overlay_region(const uint32_t *pixels, int w, int h,
+		int x, int y, int region_width, int region_height);
 	void draw_overlay();
+	void draw_item_markers(const GpuOverlayRenderer::ItemMarker *markers,
+		std::size_t count, int canvas_w, int canvas_h);
 	void draw_tint(float r, float g, float b, float a);
 	void clear_screen();
 	void upload_menu(const uint32_t *pixels, int w, int h);

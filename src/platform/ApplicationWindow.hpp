@@ -25,6 +25,7 @@ class ApplicationWindow
 	int mouse_x() const;
 	int mouse_y() const;
 	bool was_mouse_clicked() const;
+	uint32_t primary_press_count() const noexcept;
 	void set_cursor_visible(bool visible);
 	bool was_settings_key_pressed() const;
 

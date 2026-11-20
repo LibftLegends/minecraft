@@ -48,13 +48,18 @@ int32_t WorldChunkSnapshotCapture::capture_read_states(
 	const std::shared_ptr<const WorldChunkReadState> &northeast,
 	const std::shared_ptr<const WorldChunkReadState> &southwest,
 	const std::shared_ptr<const WorldChunkReadState> &southeast,
-	WorldGenerationPipeline::WorldChunkSnapshot &snapshot) noexcept
+	WorldGenerationPipeline::WorldChunkSnapshot &snapshot,
+	bool include_full_lighting_halo) noexcept
 {
 	const std::shared_ptr<const WorldChunkReadState> sources[9] = {target,
 		west, east, north, south, northwest, northeast, southwest, southeast};
-	std::vector<uint32_t> source_blocks[9];
 	const int32_t halo = WorldGenerationPipeline::LIGHT_SNAPSHOT_HALO;
 	const int32_t edge = GAME_VOXEL_CHUNK_WIDTH + halo * 2;
+	/* Keep the lookup coordinate system the same for both captures. Local
+	 * frontiers and mesh generation only read the immediately adjacent cells.
+	 * A full solver needs the wider ring to discover paths and sources. */
+	const int32_t border_begin = include_full_lighting_halo ? 0 : halo - 1;
+	const int32_t border_end = edge - border_begin;
 	std::size_t full_size = static_cast<std::size_t>(GAME_VOXEL_CHUNK_WIDTH)
 		* static_cast<std::size_t>(GAME_VOXEL_CHUNK_HEIGHT)
 		* static_cast<std::size_t>(GAME_VOXEL_CHUNK_DEPTH);
@@ -62,19 +67,17 @@ int32_t WorldChunkSnapshotCapture::capture_read_states(
 	int32_t x;
 	int32_t z;
 
-	if (target == nullptr || target->initialized == FT_FALSE
-		|| target->light.size() != full_size)
+	if (target == nullptr || target->initialized == FT_FALSE)
 		return (FT_ERR_NOT_FOUND);
-	for (std::size_t source_index = 0U; source_index < 9U; ++source_index)
+	for (const auto &source : sources)
 	{
-		if (sources[source_index] != nullptr
-			&& sources[source_index]->initialized != FT_FALSE
-			&& sources[source_index]->materialize_blocks(
-				source_blocks[source_index]) != FT_ERR_SUCCESS)
-			return (FT_ERR_NO_MEMORY);
+		if (source != nullptr && source->initialized != FT_FALSE
+			&& (source->light == nullptr || source->light->size() != full_size))
+			return (FT_ERR_INVALID_OPERATION);
 	}
-	if (source_blocks[0].size() != full_size)
-		return (FT_ERR_INVALID_OPERATION);
+	const int32_t materialize_error = target->materialize_blocks(snapshot.blocks);
+	if (materialize_error != FT_ERR_SUCCESS)
+		return (materialize_error);
 	snapshot.chunk_x = target->chunk_x;
 	snapshot.chunk_z = target->chunk_z;
 	snapshot.generation_metadata = target->generation_metadata;
@@ -88,6 +91,8 @@ int32_t WorldChunkSnapshotCapture::capture_read_states(
 		&& south->initialized != FT_FALSE ? FT_TRUE : FT_FALSE;
 	snapshot.existing_light_valid = target->light_valid;
 	snapshot.lighting_halo_blocked = FT_FALSE;
+	snapshot.blocked_light_faces = 0U;
+	snapshot.boundary_read_states = {west, east, north, south};
 	snapshot.lighting_cardinal_halo_valid = FT_TRUE;
 	snapshot.dependency_valid = FT_FALSE;
 	snapshot.dependency_chunk_x = 0;
@@ -143,8 +148,7 @@ int32_t WorldChunkSnapshotCapture::capture_read_states(
 	}
 	try
 	{
-		snapshot.blocks = source_blocks[0];
-		snapshot.existing_light = target->light;
+		snapshot.existing_light = *target->light;
 		snapshot.west_border.assign(static_cast<std::size_t>(GAME_VOXEL_CHUNK_HEIGHT)
 			* GAME_VOXEL_CHUNK_DEPTH, GAME_VOXEL_AIR_BLOCK);
 		snapshot.east_border = snapshot.west_border;
@@ -153,8 +157,8 @@ int32_t WorldChunkSnapshotCapture::capture_read_states(
 		snapshot.south_border = snapshot.north_border;
 		snapshot.lighting_ring_offsets.assign(static_cast<std::size_t>(edge) * edge,
 			UINT32_MAX);
-		for (z = 0; z < edge; ++z)
-			for (x = 0; x < edge; ++x)
+		for (z = border_begin; z < border_end; ++z)
+			for (x = border_begin; x < border_end; ++x)
 				if (x < halo || x >= GAME_VOXEL_CHUNK_WIDTH + halo
 					|| z < halo || z >= GAME_VOXEL_CHUNK_DEPTH + halo)
 					snapshot.lighting_ring_offsets[static_cast<std::size_t>(z) * edge + x]
@@ -176,44 +180,9 @@ int32_t WorldChunkSnapshotCapture::capture_read_states(
 	{
 		return (FT_ERR_NO_MEMORY);
 	}
-	for (z = 0; z < GAME_VOXEL_CHUNK_DEPTH; ++z)
+	for (z = border_begin; z < border_end; ++z)
 	{
-		for (int32_t y = 0; y < GAME_VOXEL_CHUNK_HEIGHT; ++y)
-		{
-			snapshot.west_border[static_cast<std::size_t>(y)
-				* GAME_VOXEL_CHUNK_DEPTH + z] = west != nullptr
-				&& west->initialized != FT_FALSE ? source_blocks[1U][
-				(static_cast<std::size_t>(z) * GAME_VOXEL_CHUNK_HEIGHT + y)
-				* GAME_VOXEL_CHUNK_WIDTH + GAME_VOXEL_CHUNK_WIDTH - 1]
-				: GAME_VOXEL_AIR_BLOCK;
-			snapshot.east_border[static_cast<std::size_t>(y)
-				* GAME_VOXEL_CHUNK_DEPTH + z] = east != nullptr
-				&& east->initialized != FT_FALSE ? source_blocks[2U][
-				(static_cast<std::size_t>(z) * GAME_VOXEL_CHUNK_HEIGHT + y)
-				* GAME_VOXEL_CHUNK_WIDTH]
-				: GAME_VOXEL_AIR_BLOCK;
-		}
-	}
-	for (x = 0; x < GAME_VOXEL_CHUNK_WIDTH; ++x)
-	{
-		for (int32_t y = 0; y < GAME_VOXEL_CHUNK_HEIGHT; ++y)
-		{
-			snapshot.north_border[static_cast<std::size_t>(y)
-				* GAME_VOXEL_CHUNK_WIDTH + x] = north != nullptr
-				&& north->initialized != FT_FALSE ? source_blocks[3U][
-				(static_cast<std::size_t>(GAME_VOXEL_CHUNK_DEPTH - 1)
-				* GAME_VOXEL_CHUNK_HEIGHT + y) * GAME_VOXEL_CHUNK_WIDTH + x]
-				: GAME_VOXEL_AIR_BLOCK;
-			snapshot.south_border[static_cast<std::size_t>(y)
-				* GAME_VOXEL_CHUNK_WIDTH + x] = south != nullptr
-				&& south->initialized != FT_FALSE ? source_blocks[4U][
-				(static_cast<std::size_t>(y) * GAME_VOXEL_CHUNK_WIDTH) + x]
-				: GAME_VOXEL_AIR_BLOCK;
-		}
-	}
-	for (z = 0; z < edge; ++z)
-	{
-		for (x = 0; x < edge; ++x)
+		for (x = border_begin; x < border_end; ++x)
 		{
 			int32_t local_x = x - halo;
 			int32_t local_z = z - halo;
@@ -236,19 +205,38 @@ int32_t WorldChunkSnapshotCapture::capture_read_states(
 				snapshot.lighting_halo_valid = FT_FALSE;
 				continue ;
 			}
-			if (side_x < 0) local_x += GAME_VOXEL_CHUNK_WIDTH;
-			else if (side_x > 0) local_x -= GAME_VOXEL_CHUNK_WIDTH;
-			if (side_z < 0) local_z += GAME_VOXEL_CHUNK_DEPTH;
-			else if (side_z > 0) local_z -= GAME_VOXEL_CHUNK_DEPTH;
-			std::size_t ring = snapshot.lighting_ring_offsets[
+			std::vector<uint32_t> *mesh_border = nullptr;
+			std::size_t border_column = 0U;
+			std::size_t border_stride = 0U;
+			if (side_z == 0 && (local_x == -1 || local_x == GAME_VOXEL_CHUNK_WIDTH))
+			{
+				mesh_border = side_x < 0 ? &snapshot.west_border : &snapshot.east_border;
+				border_column = static_cast<std::size_t>(local_z);
+				border_stride = GAME_VOXEL_CHUNK_DEPTH;
+			}
+			else if (side_x == 0
+				&& (local_z == -1 || local_z == GAME_VOXEL_CHUNK_DEPTH))
+			{
+				mesh_border = side_z < 0 ? &snapshot.north_border : &snapshot.south_border;
+				border_column = static_cast<std::size_t>(local_x);
+				border_stride = GAME_VOXEL_CHUNK_WIDTH;
+			}
+			local_x -= side_x * GAME_VOXEL_CHUNK_WIDTH;
+			local_z -= side_z * GAME_VOXEL_CHUNK_DEPTH;
+			const WorldChunkReadState &source = *sources[source_index];
+			const std::size_t ring = snapshot.lighting_ring_offsets[
 				static_cast<std::size_t>(z) * edge + x];
 			for (int32_t y = 0; y < GAME_VOXEL_CHUNK_HEIGHT; ++y)
 			{
 				std::size_t source_offset = (static_cast<std::size_t>(local_z)
 					* GAME_VOXEL_CHUNK_HEIGHT + y) * GAME_VOXEL_CHUNK_WIDTH
 					+ static_cast<std::size_t>(local_x);
-				snapshot.lighting_blocks[ring + y] = source_blocks[source_index][source_offset];
-				snapshot.lighting_existing_light[ring + y] = sources[source_index]->light[source_offset];
+				const uint32_t block_id = source.block_at(local_x, y, local_z);
+				snapshot.lighting_blocks[ring + y] = block_id;
+				snapshot.lighting_existing_light[ring + y] = (*source.light)[source_offset];
+				if (mesh_border != nullptr)
+					(*mesh_border)[static_cast<std::size_t>(y) * border_stride
+						+ border_column] = block_id;
 			}
 		}
 	}
@@ -506,6 +494,12 @@ int32_t WorldChunkSnapshotCapture::capture(const WorldChunk &target,
 	snapshot.lighting_halo_valid = FT_FALSE;
 	snapshot.lighting_cardinal_halo_valid = FT_FALSE;
 	snapshot.lighting_halo_blocked = FT_FALSE;
+	snapshot.blocked_light_faces = 0U;
+	snapshot.boundary_read_states = {
+		west != nullptr ? west->read_state : nullptr,
+		east != nullptr ? east->read_state : nullptr,
+		north != nullptr ? north->read_state : nullptr,
+		south != nullptr ? south->read_state : nullptr};
 	snapshot.dependency_valid = FT_FALSE;
 	snapshot.dependency_chunk_x = 0;
 	snapshot.dependency_chunk_z = 0;

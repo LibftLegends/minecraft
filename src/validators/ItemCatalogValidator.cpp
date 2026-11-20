@@ -942,15 +942,14 @@ ItemCatalogValidator &ItemCatalogValidator::operator=(
 }
 
 static int32_t item_catalog_test_revision_occupancy_provider(
-	std::vector<World::RevisionChunkCoordinate> &chunks_out,
+	WorldRevisionOccupancySample &sample_out,
 	void *user_data) noexcept
 {
 	if (user_data == nullptr)
 		return (FT_ERR_INVALID_ARGUMENT);
 	try
 	{
-		chunks_out.push_back({-3, 7});
-		chunks_out.push_back({4, -9});
+		sample_out = {{{-3, 7}, {4, -9}}, {1U, 2U}, 2U, 1000U};
 	}
 	catch (...)
 	{

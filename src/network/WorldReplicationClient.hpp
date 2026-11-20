@@ -19,8 +19,10 @@
 # include "WorldItemReplicaStore.hpp"
 # include "ProtocolMessageHeader.hpp"
 # include "WorldReplicationReplicaStore.hpp"
-# include "../../Libft/Modules/Networking/networking_replication_client.hpp"
+# include "../../Libft/Modules/Networking/networking_replication_protocol.hpp"
 # include "../../Libft/Modules/Template/deque.hpp"
+# include <map>
+# include <utility>
 
 typedef int32_t (*world_replication_snapshot_callback)(
 	const ProtocolChunkSnapshotMessage &snapshot, void *user_data) noexcept;
@@ -112,7 +114,9 @@ class WorldReplicationClient
 	int32_t destroy();
 
   private:
-	networking_replication_client replication_;
+	std::map<std::pair<int32_t, int32_t>,
+		networking_replication_revision_tracker> chunk_revisions_;
+	networking_replication_apply_budget apply_budget_;
 	world_replication_snapshot_callback snapshot_callback_;
 	world_replication_block_delta_callback block_delta_callback_;
 	world_replication_light_delta_callback light_delta_callback_;
@@ -140,12 +144,13 @@ class WorldReplicationClient
 	bool queue_initialized_;
 	bool initialized_;
 
-	static int32_t apply_snapshot_payload(const ft_byte_buffer &payload,
-		void *user_data) noexcept;
-	static int32_t apply_block_delta_payload(const ft_byte_buffer &payload,
-		void *user_data) noexcept;
-	static int32_t apply_light_delta_payload(const ft_byte_buffer &payload,
-		void *user_data) noexcept;
+	int32_t apply_snapshot(const ProtocolChunkSnapshotMessage &snapshot);
+	int32_t apply_block_delta(const ProtocolChunkBlockDeltaMessage &delta,
+		uint32_t payload_size, bool &deferred_for_budget);
+	int32_t apply_light_delta(const ProtocolChunkLightDeltaMessage &delta,
+		uint32_t payload_size, bool &deferred_for_budget);
+	int32_t apply_received_message(const networking_received_message &message,
+		bool &deferred_for_budget);
 	int32_t apply_edit_result_payload(const ft_byte_buffer &payload);
 	int32_t apply_boat_move_result_payload(const ft_byte_buffer &payload);
 	int32_t apply_entity_update_payload(const ft_byte_buffer &payload);

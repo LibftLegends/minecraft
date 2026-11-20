@@ -34,7 +34,7 @@ class BlockInteractor
 		const GameSessionSnapshotWriter *snapshot_writer,
 		const char *snapshot_path, uint64_t owner_id, uint64_t server_tick,
 		game_inventory *inventory = nullptr,
-		game_character *character = nullptr);
+		game_character *character = nullptr, uint64_t *pending_request_id = nullptr);
 	static int32_t try_pick_target_block(const World *world,
 		const Camera &camera, uint32_t *selected_block_id);
 	static int32_t try_place_selected_block(World *world, const Camera &camera,

@@ -55,7 +55,6 @@ int32_t WorldGenerationRequestBuilder::build(std::unique_ptr<WorldGenerationPipe
 		return (FT_ERR_NO_MEMORY);
 	request->request_id = request_id;
 	request->cancellation_epoch = cancellation_epoch;
-	request->background_remesh_epoch = 0U;
 	request->world_epoch = world_epoch;
 	request->relevance_epoch = relevance_epoch;
 	request->generation_revision = generation_revision;
@@ -146,7 +145,6 @@ int32_t WorldGenerationRequestBuilder::build_remesh(std::unique_ptr<WorldGenerat
 		return (FT_ERR_NO_MEMORY);
 	request->request_id = request_id;
 	request->cancellation_epoch = cancellation_epoch;
-	request->background_remesh_epoch = 0U;
 	request->world_epoch = world_epoch;
 	request->relevance_epoch = relevance_epoch;
 	request->generation_revision = generation_revision;
@@ -175,8 +173,6 @@ int32_t WorldGenerationRequestBuilder::build_remesh(std::unique_ptr<WorldGenerat
 	request->incremental_removal_addition_queue_index = 0U;
 	request->incremental_removal_state_initialized = FT_FALSE;
 	request->incremental_removal_addition_started = FT_FALSE;
-	request->incremental_removal_external_new_channel[0] = 0U;
-	request->incremental_removal_external_new_channel[1] = 0U;
 	request->incremental_seed_index = 0U;
 	request->incremental_additive_state_initialized = FT_FALSE;
 	request->incremental_processed_cells = 0U;

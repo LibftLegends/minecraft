@@ -3,8 +3,11 @@
 
 # include "../../Libft/Modules/Game/game_voxel_chunk.hpp"
 # include <cstdint>
+# include <memory>
 # include <mutex>
 # include <string>
+
+struct WorldChunkReadState;
 
 /* Durable per-world voxel chunk payloads. The caller coordinates writes with
  * chunk mutation and invokes load before procedural generation. */
@@ -23,6 +26,45 @@ class WorldTerrainChunkStore
 	 * validates the complete record before replacing the target chunk. */
 	int32_t load_chunk(int32_t chunk_x, int32_t chunk_z,
 		game_voxel_chunk &chunk) const noexcept;
+	/* Copies the path for a worker. An empty path means no terrain store. */
+	int32_t capture_stream_path(int32_t chunk_x, int32_t chunk_z,
+		std::string &path_out) const noexcept;
+	static int32_t load_stream_chunk(const std::string &path,
+		int32_t chunk_x, int32_t chunk_z, game_voxel_chunk &chunk) noexcept;
+	/* Only the publication step installs the canonical file. A discarded
+	 * worker result removes its private staging file. */
+	class StagedChunk
+	{
+	  public:
+		StagedChunk() = default;
+		~StagedChunk() noexcept;
+		StagedChunk(const StagedChunk &) = delete;
+		StagedChunk &operator=(const StagedChunk &) = delete;
+
+		int32_t prepare(const std::string &destination, int32_t chunk_x,
+			int32_t chunk_z, const game_voxel_chunk &chunk) noexcept;
+
+	  private:
+		friend class WorldTerrainChunkStore;
+		std::string path_;
+		std::string destination_;
+	};
+	int32_t commit_staged_chunk(int32_t chunk_x, int32_t chunk_z,
+		StagedChunk &staged, bool replace_existing = false) const noexcept;
+	struct PreparedEdit
+	{
+		int32_t chunk_x = 0;
+		int32_t chunk_z = 0;
+		int32_t world_y = 0;
+		int32_t local_x = 0;
+		int32_t local_z = 0;
+		uint32_t replacement = 0U;
+		uint64_t terrain_revision = 0U;
+		std::string destination;
+		std::shared_ptr<const WorldChunkReadState> base;
+		game_voxel_chunk voxels;
+		StagedChunk file;
+	};
 	int32_t remove_chunk(int32_t chunk_x, int32_t chunk_z) const noexcept;
 	int32_t has_chunk(int32_t chunk_x, int32_t chunk_z,
 		bool *exists_out) const noexcept;
@@ -35,7 +77,7 @@ class WorldTerrainChunkStore
 	mutable std::mutex mutex_;
 
 	int32_t chunk_path(int32_t chunk_x, int32_t chunk_z,
-		std::string &path_out) const noexcept;
+		std::string &path_out, bool validate_resolution = true) const noexcept;
 };
 
 #endif

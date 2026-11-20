@@ -1,47 +1,96 @@
 #include "../../src/chunks/WorldChunk.hpp"
+#include <algorithm>
 
 namespace
 {
-	/* A light-only publication does not introduce a new block version.  Keep
-	 * its block parent anchored at the most recent state that actually owns a
-	 * block snapshot (full or overlay), otherwise repeated light publications
-	 * create an unbounded read-state chain and every worker capture becomes
-	 * progressively more expensive. */
-	static std::shared_ptr<const WorldChunkReadState> block_owner(
-		const std::shared_ptr<const WorldChunkReadState> &state) noexcept
+	static bool boundary_has_transparent_block(const WorldChunkReadState &state,
+		uint8_t face) noexcept
 	{
-		std::shared_ptr<const WorldChunkReadState> owner = state;
-		while (owner != nullptr && owner->block_parent != nullptr
-			&& owner->has_block_overlay == FT_FALSE)
-			owner = owner->block_parent;
-		return (owner);
+		const bool x_boundary = face < 2U;
+		const int32_t fixed = (face % 2U == 0U) ? 0
+			: (x_boundary ? GAME_VOXEL_CHUNK_WIDTH - 1
+				: GAME_VOXEL_CHUNK_DEPTH - 1);
+		const int32_t span = x_boundary
+			? GAME_VOXEL_CHUNK_DEPTH : GAME_VOXEL_CHUNK_WIDTH;
+		for (int32_t y = GAME_VOXEL_CHUNK_HEIGHT - 1; y >= 0; --y)
+		{
+			for (int32_t offset = 0; offset < span; ++offset)
+			{
+				const uint32_t block_id = state.block_at(x_boundary ? fixed : offset,
+					y, x_boundary ? offset : fixed);
+				if (voxel_block_is_transparent(block_id) != FT_FALSE)
+					return (true);
+			}
+		}
+		return (false);
 	}
+
+	constexpr int32_t SECTION_HEIGHT = GAME_VOXEL_CHUNK_HEIGHT
+		/ GAME_VOXEL_CHUNK_SECTION_COUNT;
+	constexpr std::size_t CHUNK_CELLS = WorldChunkReadState::LIGHT_SAMPLE_COUNT;
+
+	uint8_t boundary_light_maximum(const std::vector<uint8_t> &samples,
+		uint8_t face) noexcept
+	{
+		const bool x_boundary = face < 2U;
+		const int32_t fixed = (face % 2U != 0U) ? 0
+			: (x_boundary ? GAME_VOXEL_CHUNK_WIDTH - 1
+				: GAME_VOXEL_CHUNK_DEPTH - 1);
+		const int32_t span = x_boundary
+			? GAME_VOXEL_CHUNK_DEPTH : GAME_VOXEL_CHUNK_WIDTH;
+		uint8_t maximum = 0U;
+		for (int32_t y = GAME_VOXEL_CHUNK_HEIGHT - 1; y >= 0; --y)
+		{
+			for (int32_t offset = 0; offset < span; ++offset)
+			{
+				const uint8_t packed = samples[WorldChunkReadState::light_offset(
+					x_boundary ? fixed : offset, y, x_boundary ? offset : fixed)];
+				maximum = std::max(maximum, voxel_light_combined(packed, 0U));
+				if (maximum == 15U)
+					return (maximum);
+			}
+		}
+		return (maximum);
+	}
+
+	std::size_t block_section_offset(int32_t x, int32_t y, int32_t z) noexcept
+	{
+		return ((static_cast<std::size_t>(z) * SECTION_HEIGHT
+			+ y % SECTION_HEIGHT) * GAME_VOXEL_CHUNK_WIDTH + x);
+	}
+}
+
+uint32_t WorldChunkReadState::block_at(int32_t x, int32_t y, int32_t z)
+const noexcept
+{
+	return ((*this->block_sections[y / SECTION_HEIGHT])[
+		block_section_offset(x, y, z)]);
 }
 
 int32_t WorldChunkReadState::materialize_blocks(
 	std::vector<uint32_t> &output) const noexcept
 {
+	if (this->initialized == FT_FALSE)
+		return (FT_ERR_NOT_INITIALISED);
 	try
 	{
-		if (this->block_parent != nullptr)
-		{
-			if (this->block_parent->materialize_blocks(output)
-				!= FT_ERR_SUCCESS)
-				return (FT_ERR_INVALID_OPERATION);
-			if (this->has_block_overlay != FT_FALSE)
-			{
-				if (this->block_overlay_index >= output.size())
-					return (FT_ERR_INVALID_ARGUMENT);
-				output[this->block_overlay_index] = this->block_overlay_value;
-			}
-			return (FT_ERR_SUCCESS);
-		}
-		output = this->blocks;
+		output.resize(CHUNK_CELLS);
 	}
 	catch (...)
 	{
-		output.clear();
 		return (FT_ERR_NO_MEMORY);
+	}
+	for (int32_t z = 0; z < GAME_VOXEL_CHUNK_DEPTH; ++z)
+	{
+		for (int32_t y = 0; y < GAME_VOXEL_CHUNK_HEIGHT; ++y)
+		{
+			const BlockSection &section = *this->block_sections[y / SECTION_HEIGHT];
+			const std::size_t destination =
+				(static_cast<std::size_t>(z) * GAME_VOXEL_CHUNK_HEIGHT + y)
+				* GAME_VOXEL_CHUNK_WIDTH;
+			std::copy_n(section.data() + block_section_offset(0, y, z),
+				GAME_VOXEL_CHUNK_WIDTH, output.data() + destination);
+		}
 	}
 	return (FT_ERR_SUCCESS);
 }
@@ -62,8 +111,7 @@ WorldChunk::WorldChunk() : chunk_x(0), chunk_z(0), world_x(0), world_z(0),
 	last_incremental_light_voxel_revision(0U),
 	incremental_light_protection_until_frame(0U), light_ready_for_render(false),
 	remesh_cancellation_token(std::make_shared<std::atomic<uint64_t>>(0U)),
-	mesh_dirty(false), border_mesh_publication_pending(false),
-	border_mesh_publication_voxel_revision(0U),
+	mesh_dirty(false),
 	initialized(false), waits_for_neighbor_light(false),
 	light_dependency_chunk_x(0), light_dependency_chunk_z(0), chunk(), light(), mesh(),
 	read_state()
@@ -91,8 +139,7 @@ WorldChunk::WorldChunk(const WorldChunk &other) : chunk_x(0), chunk_z(0),
 	last_incremental_light_voxel_revision(0U),
 	incremental_light_protection_until_frame(0U), light_ready_for_render(false),
 	remesh_cancellation_token(std::make_shared<std::atomic<uint64_t>>(0U)),
-	mesh_dirty(false), border_mesh_publication_pending(false),
-	border_mesh_publication_voxel_revision(0U),
+	mesh_dirty(false),
 	initialized(false), waits_for_neighbor_light(false),
 	light_dependency_chunk_x(0), light_dependency_chunk_z(0),
 	chunk(), light(), mesh(), read_state()
@@ -202,9 +249,6 @@ int32_t WorldChunk::move(WorldChunk &other) noexcept
 		this->remesh_cancellation_token =
 			std::make_shared<std::atomic<uint64_t>>(0U);
 	this->mesh_dirty = other.mesh_dirty;
-	this->border_mesh_publication_pending = other.border_mesh_publication_pending;
-	this->border_mesh_publication_voxel_revision =
-		other.border_mesh_publication_voxel_revision;
 	this->read_state = std::move(other.read_state);
 	this->waits_for_neighbor_light = other.waits_for_neighbor_light;
 	this->light_dependency_chunk_x = other.light_dependency_chunk_x;
@@ -271,8 +315,6 @@ void WorldChunk::reset_coordinates()
 	this->incremental_light_protection_until_frame = 0U;
 	this->light_ready_for_render = false;
 	this->mesh_dirty = false;
-	this->border_mesh_publication_pending = false;
-	this->border_mesh_publication_voxel_revision = 0U;
 	this->waits_for_neighbor_light = false;
 	this->light_dependency_chunk_x = 0;
 	this->light_dependency_chunk_z = 0;
@@ -288,8 +330,7 @@ void WorldChunk::cancel_remesh_work() noexcept
 		this->remesh_cancellation_token->fetch_add(1U,
 			std::memory_order_acq_rel);
 	this->clear_pending_remesh_request();
-	this->last_mesh_publication_interactive = FT_FALSE;
-	this->last_mesh_publication_voxel_revision = 0U;
+	/* Cancelling pending work does not change the mesh already published. */
 	this->last_light_remesh_incremental = FT_FALSE;
 	this->last_incremental_light_content_version = 0U;
 	this->last_incremental_light_voxel_revision = 0U;
@@ -316,8 +357,9 @@ void WorldChunk::destroy()
 	this->incremental_light_protection_until_frame = 0U;
 	this->light_ready_for_render = false;
 	this->cancel_remesh_work();
+	this->last_mesh_publication_interactive = FT_FALSE;
+	this->last_mesh_publication_voxel_revision = 0U;
 	this->mesh_dirty = false;
-	this->border_mesh_publication_voxel_revision = 0U;
 	this->clear_light_dependency();
 	ft_memset(this->boundary_source_light_max, 0,
 		sizeof(this->boundary_source_light_max));
@@ -362,205 +404,10 @@ bool WorldChunk::owns_current_interactive_remesh() const noexcept
 	return (true);
 }
 
-void WorldChunk::set_border_mesh_publication_pending(bool pending) noexcept
-{
-	this->border_mesh_publication_pending = pending;
-	this->border_mesh_publication_voxel_revision = pending
-		? this->voxel_revision : 0U;
-}
-
-bool WorldChunk::border_mesh_publication_is_current() const noexcept
-{
-	return (this->border_mesh_publication_pending
-		&& this->border_mesh_publication_voxel_revision != 0U
-		&& this->border_mesh_publication_voxel_revision
-		== this->voxel_revision);
-}
-
 int32_t WorldChunk::publish_read_state() noexcept
 {
 	std::shared_ptr<WorldChunkReadState> next_state;
-	ft_memset(this->boundary_source_light_max, 0,
-		sizeof(this->boundary_source_light_max));
-	ft_memset(this->boundary_target_has_transparent, 0,
-		sizeof(this->boundary_target_has_transparent));
-	try
-	{
-		next_state = std::make_shared<WorldChunkReadState>();
-		next_state->chunk_x = this->chunk_x;
-		next_state->chunk_z = this->chunk_z;
-		next_state->world_x = this->world_x;
-		next_state->world_z = this->world_z;
-		next_state->voxel_revision = this->voxel_revision;
-		next_state->light_revision = this->light_revision;
-		next_state->content_version = this->content_version;
-		next_state->light_input_version = this->light_input_version;
-		next_state->light_version = this->light_version;
-		next_state->computed_light_input_version =
-		this->computed_light_input_version;
-		next_state->initialized = this->initialized ? FT_TRUE : FT_FALSE;
-		next_state->light_valid = this->light_buffer_is_valid() ? FT_TRUE : FT_FALSE;
-		next_state->generation_metadata = this->chunk.get_generation_metadata();
-		next_state->block_parent.reset();
-		next_state->block_overlay_index = 0U;
-		next_state->block_overlay_value = GAME_VOXEL_AIR_BLOCK;
-		next_state->has_block_overlay = FT_FALSE;
-		if (this->initialized == false)
-		{
-			this->read_state = std::move(next_state);
-			return (FT_ERR_SUCCESS);
-		}
-		const std::size_t full_size = static_cast<std::size_t>(
-			GAME_VOXEL_CHUNK_WIDTH) * static_cast<std::size_t>(
-			GAME_VOXEL_CHUNK_HEIGHT) * static_cast<std::size_t>(
-			GAME_VOXEL_CHUNK_DEPTH);
-		const std::shared_ptr<const WorldChunkReadState> previous_block_owner =
-			block_owner(this->read_state);
-		const bool reuse_previous_blocks = previous_block_owner != nullptr
-			&& this->read_state->initialized != FT_FALSE
-			&& this->read_state->voxel_revision == this->voxel_revision
-			&& (previous_block_owner->block_parent != nullptr
-				|| previous_block_owner->blocks.size() == full_size);
-		if (reuse_previous_blocks)
-		{
-			next_state->block_parent = previous_block_owner;
-			next_state->has_block_overlay = FT_FALSE;
-		}
-		else
-			next_state->blocks.resize(full_size);
-		next_state->light.resize(full_size);
-	}
-	catch (...)
-	{
-		return (FT_ERR_NO_MEMORY);
-	}
-	if (next_state->block_parent == nullptr
-		&& this->chunk.copy_blocks(&next_state->blocks[0],
-			static_cast<uint32_t>(next_state->blocks.size())) != FT_ERR_SUCCESS)
-		return (FT_ERR_INVALID_OPERATION);
-	/* Light publication still copies the complete immutable light field, but
-	 * boundary transparency is independent of it.  Recompute only the four
-	 * exposed faces so a light-only commit does not scan the whole block field. */
-	ft_memset(this->boundary_target_has_transparent, 0,
-		sizeof(this->boundary_target_has_transparent));
-	for (int32_t z = 0; z < GAME_VOXEL_CHUNK_DEPTH; ++z)
-		for (int32_t y = 0; y < GAME_VOXEL_CHUNK_HEIGHT; ++y)
-			for (int32_t x = 0; x < GAME_VOXEL_CHUNK_WIDTH; ++x)
-			{
-				std::size_t block_index = (static_cast<std::size_t>(z)
-					* GAME_VOXEL_CHUNK_HEIGHT + y) * GAME_VOXEL_CHUNK_WIDTH + x;
-				uint8_t light_value = this->light.get(x, y, z);
-
-				next_state->light[block_index]
-					= light_value;
-				if (x == GAME_VOXEL_CHUNK_WIDTH - 1)
-				{
-					if (voxel_light_sky(light_value)
-						> this->boundary_source_light_max[0])
-						this->boundary_source_light_max[0] =
-							voxel_light_sky(light_value);
-					if (voxel_light_block(light_value)
-						> this->boundary_source_light_max[0])
-						this->boundary_source_light_max[0] =
-							voxel_light_block(light_value);
-				}
-				if (x == 0)
-				{
-					if (voxel_light_sky(light_value)
-						> this->boundary_source_light_max[1])
-						this->boundary_source_light_max[1] =
-							voxel_light_sky(light_value);
-					if (voxel_light_block(light_value)
-						> this->boundary_source_light_max[1])
-						this->boundary_source_light_max[1] =
-							voxel_light_block(light_value);
-				}
-				if (z == GAME_VOXEL_CHUNK_DEPTH - 1)
-				{
-					if (voxel_light_sky(light_value)
-						> this->boundary_source_light_max[2])
-						this->boundary_source_light_max[2] =
-							voxel_light_sky(light_value);
-					if (voxel_light_block(light_value)
-						> this->boundary_source_light_max[2])
-						this->boundary_source_light_max[2] =
-							voxel_light_block(light_value);
-				}
-				if (z == 0)
-				{
-					if (voxel_light_sky(light_value)
-						> this->boundary_source_light_max[3])
-						this->boundary_source_light_max[3] =
-							voxel_light_sky(light_value);
-					if (voxel_light_block(light_value)
-						> this->boundary_source_light_max[3])
-						this->boundary_source_light_max[3] =
-							voxel_light_block(light_value);
-				}
-			}
-	for (int32_t z = 0; z < GAME_VOXEL_CHUNK_DEPTH; ++z)
-		for (int32_t y = 0; y < GAME_VOXEL_CHUNK_HEIGHT; ++y)
-		{
-			uint32_t boundary_block;
-			if (this->chunk.read_block(0, y, z, &boundary_block)
-				== FT_ERR_SUCCESS
-				&& voxel_block_is_transparent(boundary_block) != FT_FALSE)
-				this->boundary_target_has_transparent[0] = true;
-			if (this->chunk.read_block(GAME_VOXEL_CHUNK_WIDTH - 1, y, z,
-				&boundary_block) == FT_ERR_SUCCESS
-				&& voxel_block_is_transparent(boundary_block) != FT_FALSE)
-				this->boundary_target_has_transparent[1] = true;
-		}
-	for (int32_t x = 0; x < GAME_VOXEL_CHUNK_WIDTH; ++x)
-		for (int32_t y = 0; y < GAME_VOXEL_CHUNK_HEIGHT; ++y)
-		{
-			uint32_t boundary_block;
-			if (this->chunk.read_block(x, y, 0, &boundary_block)
-				== FT_ERR_SUCCESS
-				&& voxel_block_is_transparent(boundary_block) != FT_FALSE)
-				this->boundary_target_has_transparent[2] = true;
-			if (this->chunk.read_block(x, y, GAME_VOXEL_CHUNK_DEPTH - 1,
-				&boundary_block) == FT_ERR_SUCCESS
-				&& voxel_block_is_transparent(boundary_block) != FT_FALSE)
-				this->boundary_target_has_transparent[3] = true;
-		}
-	this->read_state = std::move(next_state);
-	return (FT_ERR_SUCCESS);
-}
-
-int32_t WorldChunk::prepare_read_state_after_block_edit(int32_t local_x,
-	int32_t local_y, int32_t local_z, uint32_t block_id,
-	std::shared_ptr<WorldChunkReadState> &prepared_state) noexcept
-{
-	const std::size_t full_size = static_cast<std::size_t>(
-		GAME_VOXEL_CHUNK_WIDTH) * static_cast<std::size_t>(
-		GAME_VOXEL_CHUNK_HEIGHT) * static_cast<std::size_t>(
-		GAME_VOXEL_CHUNK_DEPTH);
-	std::shared_ptr<WorldChunkReadState> next_state;
-	std::shared_ptr<const WorldChunkReadState> previous_state;
-	std::size_t overlay_index;
-
-	prepared_state.reset();
-	if (local_x < 0 || local_x >= GAME_VOXEL_CHUNK_WIDTH
-		|| local_y < 0 || local_y >= GAME_VOXEL_CHUNK_HEIGHT
-		|| local_z < 0 || local_z >= GAME_VOXEL_CHUNK_DEPTH)
-		return (FT_ERR_INVALID_ARGUMENT);
-	previous_state = this->read_state;
-	/* A delta state is valid only when the previous immutable state describes
-	 * the same chunk.  Loader/recovery paths can publish without a parent, so
-	 * publish a complete baseline before preparing the edit overlay.  This
-	 * happens before authoritative voxel mutation, so allocation failure is
-	 * still failure-atomic. */
-	if (previous_state == nullptr || previous_state->initialized == FT_FALSE
-		|| previous_state->chunk_x != this->chunk_x
-		|| previous_state->chunk_z != this->chunk_z
-		|| previous_state->light.size() != full_size)
-	{
-		const int32_t publish_error = this->publish_read_state();
-		if (publish_error != FT_ERR_SUCCESS)
-			return (publish_error);
-		previous_state = this->read_state;
-	}
+	std::shared_ptr<std::vector<uint8_t>> samples;
 	try
 	{
 		next_state = std::make_shared<WorldChunkReadState>();
@@ -576,30 +423,141 @@ int32_t WorldChunk::prepare_read_state_after_block_edit(int32_t local_x,
 		next_state->computed_light_input_version =
 			this->computed_light_input_version;
 		next_state->initialized = this->initialized ? FT_TRUE : FT_FALSE;
-		next_state->light_valid = this->light_buffer_is_valid()
-			? FT_TRUE : FT_FALSE;
+		next_state->light_valid = this->light_buffer_is_valid() ? FT_TRUE : FT_FALSE;
+		if (!this->initialized)
+		{
+			this->read_state = std::move(next_state);
+			return (FT_ERR_SUCCESS);
+		}
 		next_state->generation_metadata = this->chunk.get_generation_metadata();
-		next_state->light = previous_state->light;
-		next_state->block_parent = block_owner(previous_state);
-		overlay_index = (static_cast<std::size_t>(local_z)
-			* static_cast<std::size_t>(GAME_VOXEL_CHUNK_HEIGHT)
-			+ static_cast<std::size_t>(local_y))
-			* static_cast<std::size_t>(GAME_VOXEL_CHUNK_WIDTH)
-			+ static_cast<std::size_t>(local_x);
-		next_state->block_overlay_index = overlay_index;
-		next_state->block_overlay_value = block_id;
-		next_state->has_block_overlay = FT_TRUE;
+		if (this->read_state != nullptr
+			&& this->read_state->initialized != FT_FALSE
+			&& this->read_state->chunk_x == this->chunk_x
+			&& this->read_state->chunk_z == this->chunk_z
+			&& this->read_state->voxel_revision == this->voxel_revision
+			&& this->read_state->content_version == this->content_version)
+			next_state->block_sections = this->read_state->block_sections;
+		else
+		{
+			std::vector<uint32_t> blocks(CHUNK_CELLS);
+			const int32_t copy_error = this->chunk.copy_blocks(blocks.data(),
+				static_cast<uint32_t>(blocks.size()));
+			if (copy_error != FT_ERR_SUCCESS)
+				return (copy_error);
+			for (int32_t index = 0; index < GAME_VOXEL_CHUNK_SECTION_COUNT; ++index)
+			{
+				auto section = std::make_shared<WorldChunkReadState::BlockSection>();
+				for (int32_t z = 0; z < GAME_VOXEL_CHUNK_DEPTH; ++z)
+				{
+					const std::size_t source =
+						(static_cast<std::size_t>(z) * GAME_VOXEL_CHUNK_HEIGHT
+							+ index * SECTION_HEIGHT) * GAME_VOXEL_CHUNK_WIDTH;
+					std::copy_n(blocks.data() + source,
+						SECTION_HEIGHT * GAME_VOXEL_CHUNK_WIDTH,
+						section->data() + block_section_offset(0, 0, z));
+				}
+				next_state->block_sections[index] = std::move(section);
+			}
+		}
+		samples = std::make_shared<std::vector<uint8_t>>(CHUNK_CELLS);
 	}
 	catch (...)
 	{
 		return (FT_ERR_NO_MEMORY);
 	}
-	prepared_state = std::move(next_state);
+	for (int32_t z = 0; z < GAME_VOXEL_CHUNK_DEPTH; ++z)
+		for (int32_t y = 0; y < GAME_VOXEL_CHUNK_HEIGHT; ++y)
+			for (int32_t x = 0; x < GAME_VOXEL_CHUNK_WIDTH; ++x)
+				(*samples)[WorldChunkReadState::light_offset(x, y, z)] = this->light.get(x, y, z);
+	for (uint8_t face = 0U; face < 4U; ++face)
+	{
+		this->boundary_source_light_max[face] = boundary_light_maximum(*samples, face);
+		this->boundary_target_has_transparent[face] =
+			boundary_has_transparent_block(*next_state, face);
+	}
+	next_state->light = std::move(samples);
+	this->read_state = std::move(next_state);
 	return (FT_ERR_SUCCESS);
 }
 
-void WorldChunk::commit_prepared_read_state_after_block_edit(
+int32_t WorldChunk::prepare_read_state_after_light_patch(
+	const std::shared_ptr<const std::vector<uint8_t>> &updated_samples,
+	std::shared_ptr<WorldChunkReadState> &prepared_state) const noexcept
+{
+	prepared_state.reset();
+	if (this->read_state == nullptr || this->read_state->initialized == FT_FALSE
+		|| this->read_state->chunk_x != this->chunk_x
+		|| this->read_state->chunk_z != this->chunk_z
+		|| this->read_state->voxel_revision != this->voxel_revision
+		|| this->read_state->content_version != this->content_version)
+		return (FT_ERR_NOT_FOUND);
+	const auto &samples = updated_samples != nullptr ? updated_samples : this->read_state->light;
+	if (samples == nullptr || samples->size() != CHUNK_CELLS
+		|| (updated_samples == nullptr && this->read_state->light_valid == FT_FALSE))
+		return (FT_ERR_NOT_FOUND);
+	try
+	{
+		prepared_state = std::make_shared<WorldChunkReadState>(*this->read_state);
+		prepared_state->light = samples;
+		prepared_state->edited_faces = 0U;
+	}
+	catch (const std::bad_alloc &)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t WorldChunk::prepare_read_state_after_block_edit(int32_t local_x,
+	int32_t local_y, int32_t local_z, uint32_t block_id,
 	std::shared_ptr<WorldChunkReadState> &prepared_state) noexcept
+{
+	prepared_state.reset();
+	if (!this->initialized)
+		return (FT_ERR_NOT_INITIALISED);
+	if (local_x < 0 || local_x >= GAME_VOXEL_CHUNK_WIDTH
+		|| local_y < 0 || local_y >= GAME_VOXEL_CHUNK_HEIGHT
+		|| local_z < 0 || local_z >= GAME_VOXEL_CHUNK_DEPTH)
+		return (FT_ERR_INVALID_ARGUMENT);
+	if (this->read_state == nullptr || this->read_state->initialized == FT_FALSE
+		|| this->read_state->chunk_x != this->chunk_x
+		|| this->read_state->chunk_z != this->chunk_z
+		|| this->read_state->voxel_revision != this->voxel_revision
+		|| this->read_state->content_version != this->content_version)
+	{
+		const int32_t publish_error = this->publish_read_state();
+		if (publish_error != FT_ERR_SUCCESS)
+			return (publish_error);
+	}
+	try
+	{
+		auto next_state = std::make_shared<WorldChunkReadState>(*this->read_state);
+		const int32_t section_index = local_y / SECTION_HEIGHT;
+		auto section = std::make_shared<WorldChunkReadState::BlockSection>(
+			*next_state->block_sections[section_index]);
+		(*section)[block_section_offset(local_x, local_y, local_z)] = block_id;
+		next_state->block_sections[section_index] = std::move(section);
+		next_state->edited_faces = 0U;
+		if (local_x == 0)
+			next_state->edited_faces |= 1U << 0U;
+		if (local_x == GAME_VOXEL_CHUNK_WIDTH - 1)
+			next_state->edited_faces |= 1U << 1U;
+		if (local_z == 0)
+			next_state->edited_faces |= 1U << 2U;
+		if (local_z == GAME_VOXEL_CHUNK_DEPTH - 1)
+			next_state->edited_faces |= 1U << 3U;
+		prepared_state = std::move(next_state);
+	}
+	catch (...)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	return (FT_ERR_SUCCESS);
+}
+
+void WorldChunk::commit_prepared_read_state(
+	std::shared_ptr<WorldChunkReadState> &prepared_state,
+	uint8_t changed_light_faces) noexcept
 {
 	if (prepared_state == nullptr)
 		return ;
@@ -612,34 +570,18 @@ void WorldChunk::commit_prepared_read_state_after_block_edit(
 		this->computed_light_input_version;
 	prepared_state->light_valid = this->light_buffer_is_valid()
 		? FT_TRUE : FT_FALSE;
-	ft_memset(this->boundary_target_has_transparent, 0,
-		sizeof(this->boundary_target_has_transparent));
-	for (int32_t z = 0; z < GAME_VOXEL_CHUNK_DEPTH; ++z)
-		for (int32_t y = 0; y < GAME_VOXEL_CHUNK_HEIGHT; ++y)
-		{
-			uint32_t boundary_block;
-			if (this->chunk.read_block(0, y, z, &boundary_block)
-				== FT_ERR_SUCCESS
-				&& voxel_block_is_transparent(boundary_block) != FT_FALSE)
-				this->boundary_target_has_transparent[0] = true;
-			if (this->chunk.read_block(GAME_VOXEL_CHUNK_WIDTH - 1, y, z,
-				&boundary_block) == FT_ERR_SUCCESS
-				&& voxel_block_is_transparent(boundary_block) != FT_FALSE)
-				this->boundary_target_has_transparent[1] = true;
-		}
-	for (int32_t x = 0; x < GAME_VOXEL_CHUNK_WIDTH; ++x)
-		for (int32_t y = 0; y < GAME_VOXEL_CHUNK_HEIGHT; ++y)
-		{
-			uint32_t boundary_block;
-			if (this->chunk.read_block(x, y, 0, &boundary_block)
-				== FT_ERR_SUCCESS
-				&& voxel_block_is_transparent(boundary_block) != FT_FALSE)
-				this->boundary_target_has_transparent[2] = true;
-			if (this->chunk.read_block(x, y, GAME_VOXEL_CHUNK_DEPTH - 1,
-				&boundary_block) == FT_ERR_SUCCESS
-				&& voxel_block_is_transparent(boundary_block) != FT_FALSE)
-				this->boundary_target_has_transparent[3] = true;
-		}
+	/* Interior edits cannot change a face summary. Boundary edits only
+	 * resample the affected faces, starting in the usually open sky. */
+	for (uint8_t face = 0U; face < 4U; ++face)
+	{
+		if ((prepared_state->edited_faces & (1U << face)) != 0U)
+			this->boundary_target_has_transparent[face] =
+				boundary_has_transparent_block(*prepared_state, face);
+		/* Source summaries index the opposite face of this chunk. */
+		if ((changed_light_faces & (1U << (face ^ 1U))) != 0U)
+			this->boundary_source_light_max[face] =
+				boundary_light_maximum(*prepared_state->light, face);
+	}
 	this->read_state = std::move(prepared_state);
 }
 
@@ -651,7 +593,7 @@ int32_t WorldChunk::publish_read_state_after_block_edit(int32_t local_x,
 		local_y, local_z, block_id, prepared_state);
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
-	this->commit_prepared_read_state_after_block_edit(prepared_state);
+	this->commit_prepared_read_state(prepared_state);
 	return (FT_ERR_SUCCESS);
 }
 

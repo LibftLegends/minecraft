@@ -1,14 +1,47 @@
 #include "../../src/world/WorldGenerationPipeline.hpp"
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 
 namespace
 {
+	bool light_input_can_change(uint8_t previous, uint8_t current,
+		uint8_t receiver, int32_t cost) noexcept
+	{
+		const int32_t previous_input = std::max(0, previous - cost);
+		const int32_t current_input = std::max(0, current - cost);
+		if (current_input > previous_input)
+			return (current_input > receiver);
+		return (current_input < previous_input && current_input < receiver
+			&& previous_input >= receiver);
+	}
+}
+
+uint8_t WorldGenerationPipeline::BoundaryLightChange::effect_on(
+	const WorldChunkReadState &receiver) const noexcept
+{
+	const uint32_t block = receiver.block_at(this->x, this->y, this->z);
+	const uint8_t mesh_effect = block != GAME_VOXEL_AIR_BLOCK
+		&& this->source_face_visible ? REMESH : 0U;
+	const auto &metadata = voxel_get_block_metadata(block);
+	if (metadata.occludes_faces != FT_FALSE || metadata.light_attenuation >= 15U)
+		return (mesh_effect);
+	if (receiver.light_valid == FT_FALSE || receiver.light == nullptr
+		|| receiver.light->size() != WorldChunkReadState::LIGHT_SAMPLE_COUNT)
+		return (static_cast<uint8_t>(mesh_effect | RELIGHT));
+	const int32_t cost = std::max(1, static_cast<int32_t>(metadata.light_attenuation));
+	const uint8_t packed = (*receiver.light)[
+		WorldChunkReadState::light_offset(this->x, this->y, this->z)];
+	if (light_input_can_change(voxel_light_sky(this->before),
+			voxel_light_sky(this->after), voxel_light_sky(packed), cost)
+		|| light_input_can_change(voxel_light_block(this->before),
+			voxel_light_block(this->after), voxel_light_block(packed), cost))
+		return (static_cast<uint8_t>(mesh_effect | RELIGHT));
+	return (mesh_effect);
 }
 
 WorldGenerationPipeline::WorldGenerationPipeline() noexcept : requests_(),
 results_(), retired_results_(), mutex_(), results_mutex_(), condition_(), pipeline_epoch_(1U),
-	background_remesh_epoch_(1U),
 	remesh_in_flight_(0U), active_requests_(0U),
 	active_generation_requests_(0U), stopping_(false), active_request_ids_(),
 	active_request_chunk_x_(), active_request_chunk_z_(),
@@ -111,7 +144,6 @@ int32_t WorldGenerationPipeline::initialize(std::size_t worker_count,
 	this->maximum_queued_ = maximum_queued;
 	this->stopping_ = false;
 	this->pipeline_epoch_.fetch_add(1U);
-	this->background_remesh_epoch_.fetch_add(1U);
 	try
 	{
 		index = 0U;
@@ -143,7 +175,6 @@ int32_t WorldGenerationPipeline::destroy() noexcept
 
 		this->stopping_ = true;
 		this->pipeline_epoch_.fetch_add(1U);
-		this->background_remesh_epoch_.fetch_add(1U);
 		this->requests_.clear();
 	}
 	this->condition_.notify_all();
@@ -187,7 +218,8 @@ int32_t WorldGenerationPipeline::submit_generation(uint64_t request_id,
 	const char *seed, const voxel_generation_config &config,
 	uint32_t stage_mask, WorldGenerationOperation operation,
 	const WorldChunkSnapshot *source_snapshot,
-	const std::vector<GenerationFeaturePlan> *feature_plans) noexcept
+	const std::vector<GenerationFeaturePlan> *feature_plans,
+	std::string terrain_chunk_path) noexcept
 {
 	std::unique_ptr<Request> request;
 	int32_t error_code;
@@ -198,6 +230,8 @@ int32_t WorldGenerationPipeline::submit_generation(uint64_t request_id,
 			operation, source_snapshot, feature_plans);
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
+	if (operation == WorldGenerationOperation::STREAM)
+		request->terrain_chunk_path = std::move(terrain_chunk_path);
 	{
 		std::lock_guard<std::mutex> lock(this->mutex_);
 
@@ -385,9 +419,6 @@ int32_t WorldGenerationPipeline::submit_remesh(uint64_t request_id,
 		if (this->requests_.size() >= this->maximum_queued_)
 			return (FT_ERR_FULL);
 		this->remesh_in_flight_.fetch_add(1U);
-		if (request->remesh_interactive == FT_FALSE)
-			request->background_remesh_epoch =
-				this->background_remesh_epoch_.load();
 		this->requests_.push_front(std::move(request));
 	}
 	this->condition_.notify_one();
@@ -493,49 +524,6 @@ void WorldGenerationPipeline::cancel_queued() noexcept
 			replacement_count))
 			break ;
 	}
-}
-
-void WorldGenerationPipeline::cancel_queued_background_remeshes() noexcept
-{
-	std::size_t cancelled_count = 0U;
-
-	{
-		std::lock_guard<std::mutex> lock(this->mutex_);
-		std::deque<std::unique_ptr<Request>>::iterator iterator =
-			this->requests_.begin();
-		while (iterator != this->requests_.end())
-		{
-			if (*iterator != nullptr
-				&& (*iterator)->operation == WorldGenerationOperation::REMESH
-				&& (*iterator)->remesh_interactive == FT_FALSE)
-			{
-				iterator = this->requests_.erase(iterator);
-				cancelled_count += 1U;
-			}
-			else
-				++iterator;
-		}
-	}
-	while (cancelled_count > 0U)
-	{
-		std::size_t observed = this->remesh_in_flight_.load();
-		const std::size_t replacement = observed > cancelled_count
-			? observed - cancelled_count : 0U;
-		if (this->remesh_in_flight_.compare_exchange_weak(observed,
-			replacement))
-			break ;
-	}
-	this->condition_.notify_all();
-}
-
-void WorldGenerationPipeline::cancel_active_background_remeshes() noexcept
-{
-	/* Background remeshes are disposable maintenance work.  An interactive
-	 * edit must be able to invalidate both queued work and the current bounded
-	 * worker slice without cancelling terrain generation. */
-	this->background_remesh_epoch_.fetch_add(1U, std::memory_order_acq_rel);
-	this->cancel_queued_background_remeshes();
-	this->condition_.notify_all();
 }
 
 std::size_t WorldGenerationPipeline::queued_count() const noexcept

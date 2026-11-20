@@ -36,7 +36,8 @@ int32_t WorldBlockEditor::place_block_at(World &world, int32_t world_x,
 
 int32_t WorldBlockEditor::replace_block_state(World &world, int32_t world_x,
 	int32_t world_y, int32_t world_z, uint32_t expected_block_id,
-	uint32_t replacement_block_id, uint64_t expected_voxel_revision)
+	uint32_t replacement_block_id, uint64_t expected_voxel_revision,
+	WorldTerrainChunkStore::PreparedEdit *prepared)
 {
 	int32_t chunk_x;
 	int32_t chunk_z;
@@ -68,44 +69,43 @@ int32_t WorldBlockEditor::replace_block_state(World &world, int32_t world_x,
 		return (error_code);
 	if (current_block_id != expected_block_id)
 		return (FT_ERR_INVALID_STATE);
+	const bool prepared_matches = prepared != nullptr && prepared->base != nullptr
+		&& chunk->read_state != nullptr && prepared->chunk_x == chunk_x
+		&& prepared->chunk_z == chunk_z && prepared->local_x == local_x
+		&& prepared->local_z == local_z && prepared->world_y == world_y
+		&& prepared->replacement == replacement_block_id
+		&& prepared->base->voxel_revision == chunk->voxel_revision
+		&& prepared->base->block_sections == chunk->read_state->block_sections
+		&& prepared->terrain_revision == chunk->chunk.get_revision();
 	existing_light = chunk->light.get(local_x, world_y, local_z);
+	std::shared_ptr<WorldChunkReadState> prepared_read_state;
+	error_code = chunk->prepare_read_state_after_block_edit(local_x, world_y,
+		local_z, replacement_block_id, prepared_read_state);
+	if (error_code != FT_ERR_SUCCESS)
+		return (error_code);
 	error_code = chunk->chunk.write_block(local_x, world_y, local_z,
 		replacement_block_id);
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
-	chunk->mark_content_changed();
-	error_code = chunk->publish_read_state_after_block_edit(local_x, world_y,
-		local_z, replacement_block_id);
-	if (error_code != FT_ERR_SUCCESS)
-	{
-		const int32_t edit_error = error_code;
-		if (chunk->chunk.write_block(local_x, world_y, local_z,
-				current_block_id) != FT_ERR_SUCCESS)
-			return (FT_ERR_INVALID_STATE);
-		chunk->mark_content_changed();
-		if (chunk->publish_read_state_after_block_edit(local_x, world_y,
-				local_z, current_block_id) != FT_ERR_SUCCESS)
-			return (FT_ERR_INVALID_STATE);
-		return (edit_error);
-	}
 	if (world.terrain_chunk_store().is_initialized())
 	{
-		error_code = world.terrain_chunk_store().save_chunk(chunk_x, chunk_z,
-			chunk->chunk);
+		if (prepared_matches)
+			error_code = world.terrain_chunk_store().commit_staged_chunk(chunk_x,
+				chunk_z, prepared->file, true);
+		else
+			error_code = world.terrain_chunk_store().save_chunk(chunk_x, chunk_z,
+				chunk->chunk);
 		if (error_code != FT_ERR_SUCCESS)
 		{
 			const int32_t restore_block_result = chunk->chunk.write_block(
 				local_x, world_y, local_z, current_block_id);
 			if (restore_block_result != FT_ERR_SUCCESS)
 				return (FT_ERR_INVALID_STATE);
-			chunk->mark_content_changed();
-			if (chunk->publish_read_state_after_block_edit(local_x, world_y,
-					local_z, current_block_id) != FT_ERR_SUCCESS)
-				return (FT_ERR_INVALID_STATE);
 			return (error_code);
 		}
 	}
-	world.mark_geometry_changed();
+	chunk->mark_content_changed();
+	chunk->commit_prepared_read_state(prepared_read_state);
 	world.chunk_streamer.mark_remesh_dirty(*chunk);
 	chunk->cancel_remesh_work();
 	{

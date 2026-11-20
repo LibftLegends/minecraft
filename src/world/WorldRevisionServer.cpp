@@ -1490,7 +1490,7 @@ int32_t WorldRevisionServer::handle_card_hand_message(int32_t client_handle,
 			this->card_hand_query_user_data_);
 	if (result == FT_ERR_SUCCESS && (hand.card_session_id == 0U
 		|| hand.cards.size() > FT_CARD_GAME_MAX_CARDS
-		hand.required_discard_count > hand.cards.size()
+		|| hand.required_discard_count > hand.cards.size()
 		|| hand.pending_choices.size() > FT_CARD_GAME_MAX_CHOICES))
 		result = FT_ERR_INVALID_STATE;
 	if (result == FT_ERR_SUCCESS)

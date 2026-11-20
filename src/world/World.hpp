@@ -219,7 +219,12 @@ class World
 	int32_t replace_block_state_at(int32_t world_x, int32_t world_y,
 		int32_t world_z, uint32_t expected_block_id,
 		uint32_t replacement_block_id,
-		uint64_t expected_voxel_revision);
+		uint64_t expected_voxel_revision,
+		WorldTerrainChunkStore::PreparedEdit *prepared = nullptr);
+	int32_t capture_block_state_write(int32_t world_x, int32_t world_y,
+		int32_t world_z, uint32_t expected_block_id, uint32_t replacement_block_id,
+		uint64_t expected_voxel_revision,
+		std::unique_ptr<WorldTerrainChunkStore::PreparedEdit> &out) const noexcept;
 	int32_t till_farmland_at(int32_t world_x, int32_t world_y,
 		int32_t world_z, uint64_t expected_voxel_revision);
 	bool farmland_is_hydrated(int32_t world_x, int32_t world_y,

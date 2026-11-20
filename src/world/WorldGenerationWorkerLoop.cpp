@@ -23,13 +23,7 @@ WorldGenerationWorkerLoop &WorldGenerationWorkerLoop::operator=(const WorldGener
 bool WorldGenerationWorkerLoop::request_is_cancelled(const WorldGenerationPipeline &pipeline,
 	const WorldGenerationPipeline::Request &request) noexcept
 {
-	if (request.cancellation_epoch != pipeline.pipeline_epoch_.load())
-		return (true);
-	return (request.operation
-			== WorldGenerationPipeline::WorldGenerationOperation::REMESH
-		&& request.remesh_interactive == FT_FALSE
-		&& request.background_remesh_epoch
-			!= pipeline.background_remesh_epoch_.load());
+	return (request.cancellation_epoch != pipeline.pipeline_epoch_.load());
 }
 
 std::unique_ptr<WorldGenerationPipeline::Result> WorldGenerationWorkerLoop::process_request(WorldGenerationPipeline &pipeline,
@@ -140,10 +134,13 @@ void WorldGenerationWorkerLoop::run(WorldGenerationPipeline &pipeline) noexcept
 				 * empty let border lighting remain dirty for many seconds and made
 				 * the renderer appear black or stale.  Interactive edits still win
 				 * through the branch above; ordinary generation gets at most eight
-				 * selections before one background remesh is serviced. */
+				 * selections before one background remesh is serviced. A worker
+				 * reserved by the generation limit can service a remesh immediately. */
 				else if (first_remesh != pipeline.requests_.end()
 					&& (first_generation == pipeline.requests_.end()
-						|| generations_since_remesh >= 8U))
+						|| generations_since_remesh >= 8U
+						|| pipeline.active_generation_requests_.load()
+							>= pipeline.generation_worker_limit_))
 				{
 					selected_request = first_remesh;
 					generations_since_remesh = 0U;
@@ -257,14 +254,24 @@ void WorldGenerationWorkerLoop::run(WorldGenerationPipeline &pipeline) noexcept
 						break ;
 					}
 				}
-				if (request->remesh_interactive != FT_FALSE)
-					pipeline.requests_.push_front(std::move(request));
-				else
-					pipeline.requests_.push_back(std::move(request));
+				/* The continuation owns the partial solver. Let other queued
+				 * work of the same priority take its turn before resuming. */
+				pipeline.requests_.push_back(std::move(request));
 			}
 			pipeline.condition_.notify_one();
 			continue ;
 		}
+		if (result != nullptr && !pipeline.stopping_.load())
+		{
+			std::lock_guard<std::mutex> lock(pipeline.results_mutex_);
+
+			result->completed_at_nanoseconds = static_cast<uint64_t>(
+				std::chrono::duration_cast<std::chrono::nanoseconds>(
+					std::chrono::steady_clock::now().time_since_epoch()).count());
+			pipeline.results_.push_back(std::move(result));
+		}
+		/* Ownership must overlap the result handoff. The world can check for
+		 * orphaned requests between any two operations here. */
 		if (is_remesh)
 			pipeline.release_remesh_slot();
 		pipeline.active_requests_.fetch_sub(1U);
@@ -291,18 +298,7 @@ void WorldGenerationWorkerLoop::run(WorldGenerationPipeline &pipeline) noexcept
 				}
 			}
 		}
-		if (result == nullptr)
-			continue ;
-		{
-			std::lock_guard<std::mutex> lock(pipeline.results_mutex_);
-
-			if (!pipeline.stopping_.load())
-			{
-				result->completed_at_nanoseconds = static_cast<uint64_t>(
-					std::chrono::duration_cast<std::chrono::nanoseconds>(
-						std::chrono::steady_clock::now().time_since_epoch()).count());
-				pipeline.results_.push_back(std::move(result));
-			}
-		}
+		if (is_generation)
+			pipeline.condition_.notify_one();
 	}
 }

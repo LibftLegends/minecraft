@@ -230,7 +230,23 @@ void Application::run_single_frame(ApplicationWindow &window,
 	#endif
 	ApplicationPhaseController::render_frame(phase, window, menu, session,
 		renderer);
+#if defined(LIBFT_ENABLE_ANALYTICS)
+	const int32_t present_scope_error = RuntimeAnalytics::begin_scope(
+		RuntimeAnalyticsScope::FRAME_PRESENT_PHASE);
+	if (present_scope_error != FT_ERR_SUCCESS)
+		std::fprintf(stderr, "Analytics: present scope start failed (%d)\n",
+			present_scope_error);
+#endif
 	window.present();
+#if defined(LIBFT_ENABLE_ANALYTICS)
+	if (present_scope_error == FT_ERR_SUCCESS)
+	{
+		analytics_error = RuntimeAnalytics::end_scope();
+		if (analytics_error != FT_ERR_SUCCESS)
+			std::fprintf(stderr, "Analytics: present scope end failed (%d)\n",
+				analytics_error);
+	}
+#endif
 	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
 	{
 		const uint64_t render_us = static_cast<uint64_t>(

@@ -6,12 +6,21 @@
 # endif
 # include "../ft_vox.hpp"
 # include "../world/WorldLightVersion.hpp"
+# include <array>
 # include <atomic>
 # include <memory>
 # include <vector>
 
 struct WorldChunkReadState
 {
+	static constexpr std::size_t LIGHT_SAMPLE_COUNT = GAME_VOXEL_CHUNK_WIDTH
+		* GAME_VOXEL_CHUNK_HEIGHT * GAME_VOXEL_CHUNK_DEPTH;
+	static constexpr std::size_t light_offset(int32_t x, int32_t y, int32_t z) noexcept
+	{
+		return ((static_cast<std::size_t>(z) * GAME_VOXEL_CHUNK_HEIGHT + y)
+			* GAME_VOXEL_CHUNK_WIDTH + x);
+	}
+
 	int32_t chunk_x;
 	int32_t chunk_z;
 	int32_t world_x;
@@ -25,17 +34,15 @@ struct WorldChunkReadState
 	ft_bool initialized;
 	ft_bool light_valid;
 	game_voxel_generation_metadata generation_metadata;
-	std::vector<uint32_t> blocks;
-	std::vector<uint8_t> light;
-	/* Block edits use a copy-on-write overlay.  The live writer publishes the
-	 * changed cell immediately without copying the complete 256-column chunk;
-	 * the capture worker materializes the immutable chain before it starts a
-	 * mesh/light solve. */
-	std::shared_ptr<const WorldChunkReadState> block_parent;
-	std::size_t block_overlay_index;
-	uint32_t block_overlay_value;
-	ft_bool has_block_overlay;
+	using BlockSection = std::array<uint32_t, GAME_VOXEL_SECTION_BLOCKS>;
+	/* Readers own the sections they captured. An edit replaces only the
+	 * affected section and shares the previously published light samples. */
+	std::array<std::shared_ptr<const BlockSection>,
+		GAME_VOXEL_CHUNK_SECTION_COUNT> block_sections;
+	std::shared_ptr<const std::vector<uint8_t>> light;
+	uint8_t edited_faces;
 
+	uint32_t block_at(int32_t x, int32_t y, int32_t z) const noexcept;
 	int32_t materialize_blocks(std::vector<uint32_t> &output) const noexcept;
 };
 
@@ -75,11 +82,6 @@ class WorldChunk
 	bool light_ready_for_render;
 	std::shared_ptr<std::atomic<uint64_t>> remesh_cancellation_token;
 	bool mesh_dirty;
-	/* A boundary edit may expose a face in a loaded neighbor.  Keep the
-	 * changed chunk's old GPU publication until those neighbor faces are
-	 * uploaded, preventing a transient hole between two chunks. */
-	bool border_mesh_publication_pending;
-	uint64_t border_mesh_publication_voxel_revision;
 	bool initialized;
 	bool waits_for_neighbor_light;
 	int32_t light_dependency_chunk_x;
@@ -113,19 +115,21 @@ class WorldChunk
 	uint8_t get_boundary_source_light_max(uint8_t face) const noexcept;
 	bool boundary_has_transparent_target(uint8_t face) const noexcept;
 	int32_t publish_read_state() noexcept;
+	int32_t prepare_read_state_after_light_patch(
+		const std::shared_ptr<const std::vector<uint8_t>> &updated_samples,
+		std::shared_ptr<WorldChunkReadState> &prepared_state) const noexcept;
 	int32_t prepare_read_state_after_block_edit(int32_t local_x,
 		int32_t local_y, int32_t local_z, uint32_t block_id,
 		std::shared_ptr<WorldChunkReadState> &prepared_state) noexcept;
-	void commit_prepared_read_state_after_block_edit(
-		std::shared_ptr<WorldChunkReadState> &prepared_state) noexcept;
+	void commit_prepared_read_state(
+		std::shared_ptr<WorldChunkReadState> &prepared_state,
+		uint8_t changed_light_faces = 0U) noexcept;
 	int32_t publish_read_state_after_block_edit(int32_t local_x,
 		int32_t local_y, int32_t local_z, uint32_t block_id) noexcept;
 	void set_pending_remesh_request(uint64_t request_id,
 		ft_bool interactive) noexcept;
 	void clear_pending_remesh_request() noexcept;
 	bool owns_current_interactive_remesh() const noexcept;
-	void set_border_mesh_publication_pending(bool pending) noexcept;
-	bool border_mesh_publication_is_current() const noexcept;
 
 	void reset_coordinates();
 	void destroy();

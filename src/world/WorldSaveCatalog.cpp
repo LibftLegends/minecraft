@@ -1096,8 +1096,8 @@ int32_t WorldSaveCatalog::set_allowed_actors(const uint8_t world_id[32],
 	if (!id_is_nonzero(world_id) || actor_id == 0U
 		|| actor_ids.size() > WORLD_SAVE_CATALOG_MAX_ACTORS)
 		return (FT_ERR_INVALID_ARGUMENT);
-	for (uint64_t actor_id : actor_ids)
-		if (actor_id == 0U)
+	for (uint64_t allowed_actor_id : actor_ids)
+		if (allowed_actor_id == 0U)
 			return (FT_ERR_INVALID_ARGUMENT);
 	if (!std::is_sorted(actor_ids.begin(), actor_ids.end())
 		|| std::adjacent_find(actor_ids.begin(), actor_ids.end())

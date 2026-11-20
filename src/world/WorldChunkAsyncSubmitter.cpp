@@ -1,5 +1,7 @@
 #include "../../src/world/WorldChunkAsyncSubmitter.hpp"
+#include <algorithm>
 #include <cstdio>
+#include <iterator>
 
 namespace
 {
@@ -92,10 +94,14 @@ bool WorldChunkAsyncSubmitter::submit_async_candidate(WorldChunkStreamer &stream
 	int32_t error_code;
 	std::vector<WorldGenerationPipeline::GenerationFeaturePlan>
 		completed_feature_plans;
+	std::string terrain_chunk_path;
 
 	request_id = streamer.next_request_id_++;
-	error_code = streamer.world_.revision_manager.copy_completed_chunk_feature_plans(
-		chunk_x, chunk_z, completed_feature_plans);
+	error_code = streamer.world_.terrain_chunk_store().capture_stream_path(
+		chunk_x, chunk_z, terrain_chunk_path);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = streamer.world_.revision_manager.copy_completed_chunk_feature_plans(
+			chunk_x, chunk_z, completed_feature_plans);
 	if (error_code != FT_ERR_SUCCESS)
 	{
 		candidate.state = WorldChunkStreamer::CANDIDATE_FAILED_RETRYABLE;
@@ -110,7 +116,7 @@ bool WorldChunkAsyncSubmitter::submit_async_candidate(WorldChunkStreamer &stream
 			VOXEL_STAGE_BASE_TERRAIN | VOXEL_STAGE_CAVES | VOXEL_STAGE_FLUIDS | VOXEL_STAGE_DECORATION | VOXEL_STAGE_STRUCTURES | VOXEL_STAGE_ORES,
 			WorldGenerationPipeline::WorldGenerationOperation::STREAM,
 		nullptr, completed_feature_plans.empty()
-			? nullptr : &completed_feature_plans);
+			? nullptr : &completed_feature_plans, std::move(terrain_chunk_path));
 	if (error_code == FT_ERR_FULL)
 		return (true);
 	if (error_code != FT_ERR_SUCCESS)
@@ -153,37 +159,6 @@ bool WorldChunkAsyncSubmitter::process_async_candidate(WorldChunkStreamer &strea
 	{
 		candidate.state = WorldChunkStreamer::CANDIDATE_READY;
 		return (false);
-	}
-	if (streamer.world_.terrain_chunk_store().is_initialized())
-	{
-		bool saved_chunk_exists = false;
-		int32_t store_error = streamer.world_.terrain_chunk_store().has_chunk(
-			chunk_x, chunk_z, &saved_chunk_exists);
-		if (store_error != FT_ERR_SUCCESS)
-		{
-			candidate.state = WorldChunkStreamer::CANDIDATE_FAILED_RETRYABLE;
-			candidate.last_error = store_error;
-			candidate.retry_frames = 1;
-			return (false);
-		}
-		if (saved_chunk_exists)
-		{
-			store_error = WorldChunkCandidateScanner::try_load_chunk_at(
-				streamer, chunk_x, chunk_z);
-			if (store_error < 0)
-			{
-				candidate.state = WorldChunkStreamer::CANDIDATE_FAILED_RETRYABLE;
-				candidate.last_error = store_error;
-				candidate.retry_frames = 1;
-				return (false);
-			}
-			if (store_error > 0)
-			{
-				candidate.state = WorldChunkStreamer::CANDIDATE_READY;
-				candidate.last_error = FT_ERR_SUCCESS;
-				return (false);
-			}
-		}
 	}
 	return (WorldChunkAsyncSubmitter::submit_async_candidate(streamer,
 			candidate, chunk_x, chunk_z, submitted, budget));
@@ -260,76 +235,60 @@ int32_t WorldChunkAsyncSubmitter::submit_dirty_remeshes(
 	}
 	if (streamer.priority_remesh_pending_)
 	{
-		const WorldChunkStreamer::RemeshPriority priority =
-			streamer.priority_remeshes_.front();
-		WorldChunk *priority_chunk = streamer.world_.find_chunk_mutable(
-			priority.chunk_x, priority.chunk_z);
-		if (priority_chunk == nullptr || !priority_chunk->mesh_dirty)
+		WorldChunk *ready = nullptr;
+		int32_t inspected = 0;
+		for (auto entry = streamer.priority_remeshes_.begin();
+			entry != streamer.priority_remeshes_.end() && inspected < scan_budget;)
 		{
-			streamer.priority_remeshes_.pop_front();
-			streamer.priority_remesh_pending_ =
-				!streamer.priority_remeshes_.empty();
-		}
-		else
-		{
-			error_code = streamer.queue_chunk_remesh(*priority_chunk,
-				priority.incremental_additive_light,
-				priority.incremental_removal_light,
-				priority.incremental_local_x, priority.incremental_local_y,
-				priority.incremental_local_z,
-				priority.incremental_old_block_id,
-				priority.incremental_new_block_id,
-				&priority.incremental_light_seeds,
-				priority.geometry_only);
-		#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
-			if (error_code != FT_ERR_SUCCESS
-				&& (error_code != FT_ERR_FULL
-					|| streamer.stream_frame_ % 32U == 0U))
-				std::fprintf(stderr,
-					"[WorldGen] priority remesh deferred chunk=(%d,%d) "
-					"error=%d in_flight=%zu queued=%zu\n",
-					priority.chunk_x, priority.chunk_z, error_code,
-					streamer.generation_pipeline_.remesh_in_flight_count(),
-					streamer.generation_pipeline_.queued_count());
-		#endif
-			if (error_code == FT_ERR_SUCCESS
-				&& priority_chunk->pending_mesh_request_id != 0U)
+			WorldChunk *chunk = streamer.world_.find_chunk_mutable(
+				entry->chunk_x, entry->chunk_z);
+			inspected += 1;
+			if (chunk == nullptr || !chunk->mesh_dirty)
+				entry = streamer.priority_remeshes_.erase(entry);
+			else if (chunk->pending_mesh_request_id != 0U)
+				++entry;
+			else
 			{
-				streamer.priority_remeshes_.pop_front();
-				streamer.priority_remesh_pending_ =
-					!streamer.priority_remeshes_.empty();
-				if (streamer.priority_remesh_pending_)
-				{
-					streamer.priority_remesh_chunk_x_ =
-						streamer.priority_remeshes_.front().chunk_x;
-					streamer.priority_remesh_chunk_z_ =
-						streamer.priority_remeshes_.front().chunk_z;
-				}
-				streamer.next_remesh_submission_frame_ = streamer.stream_frame_ + 2U;
+				ready = chunk;
+				break ;
 			}
-			else if (error_code == FT_ERR_FULL
-				&& streamer.priority_remeshes_.size() > 1U)
+		}
+		/* Keep edit seeds until publication. A cancelled or stale request
+		 * does not advance the published light baseline. */
+		if (ready != nullptr)
+		{
+			error_code = streamer.queue_chunk_remesh(*ready);
+			if (error_code == FT_ERR_SUCCESS && ready->pending_mesh_request_id != 0U)
 			{
-				/* A dependency-gated entry must not hold the queue head forever.
-				 * FT_ERR_FULL also represents temporary pipeline capacity, so defer
-				 * exactly one entry and let the next affected chunk make progress on
-				 * the following frame.  The queue remains bounded and interactive
-				 * entries retain their relative order after the rotation. */
-				WorldChunkStreamer::RemeshPriority deferred =
-					std::move(streamer.priority_remeshes_.front());
-				streamer.priority_remeshes_.pop_front();
-				streamer.priority_remeshes_.push_back(std::move(deferred));
-				streamer.priority_remesh_pending_ = true;
-				streamer.priority_remesh_chunk_x_ =
-					streamer.priority_remeshes_.front().chunk_x;
-				streamer.priority_remesh_chunk_z_ =
-					streamer.priority_remeshes_.front().chunk_z;
-				streamer.next_remesh_submission_frame_ =
-					streamer.stream_frame_ + 1U;
+				streamer.next_remesh_submission_frame_ = streamer.stream_frame_ + 2U;
 				return (FT_ERR_SUCCESS);
 			}
-			else if (error_code != FT_ERR_FULL)
+			if (error_code != FT_ERR_SUCCESS && error_code != FT_ERR_FULL)
 				return (error_code);
+			if (error_code == FT_ERR_FULL)
+			{
+				/* Submission can promote a dependency. Locate this entry again
+				 * before allowing another ready chunk to take its place. */
+				for (auto entry = streamer.priority_remeshes_.begin();
+					entry != streamer.priority_remeshes_.end(); ++entry)
+				{
+					if (entry->chunk_x == ready->chunk_x
+						&& entry->chunk_z == ready->chunk_z)
+					{
+						std::rotate(entry, std::next(entry),
+							streamer.priority_remeshes_.end());
+						break ;
+					}
+				}
+			}
+		}
+		streamer.priority_remesh_pending_ = !streamer.priority_remeshes_.empty();
+		if (streamer.priority_remesh_pending_)
+		{
+			streamer.priority_remesh_chunk_x_ =
+				streamer.priority_remeshes_.front().chunk_x;
+			streamer.priority_remesh_chunk_z_ =
+				streamer.priority_remeshes_.front().chunk_z;
 		}
 	}
 	dirty_index = streamer.dirty_remesh_cursor_;

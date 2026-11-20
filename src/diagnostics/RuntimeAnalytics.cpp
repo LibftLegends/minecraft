@@ -31,7 +31,13 @@ namespace
             "world_stream_commit", "world_stream_deferred_edits",
             "gpu_batch_signature", "gpu_batch_cache_sync",
             "gpu_batch_visibility_scan", "world_stream_recenter",
-            "input_device_poll"};
+            "input_device_poll", "mining_checkpoint", "world_stream_save",
+            "chunk_read_state_publish", "session_snapshot_capture",
+            "session_snapshot_identity_check", "session_snapshot_encode",
+            "ground_item_pickup", "session_encode_validation",
+            "session_encode_character", "session_encode_ground_items",
+            "session_encode_recipe_journal", "gpu_item_markers",
+            "gpu_overlay_transfer", "gpu_overlay_draw"};
         static_assert(sizeof(names) / sizeof(names[0])
             == ANALYTICS_REGION_COUNT, "analytics region table mismatch");
 
@@ -79,6 +85,8 @@ int32_t RuntimeAnalytics::initialize(ft_bool start_exporter,
      * serialization. Detailed traces remain available on selected frames. */
     configuration.trace_frame_interval = 120U;
     configuration.frame_export_interval = 120U;
+    if (start_exporter != FT_FALSE)
+        configuration.slow_frame_export_threshold_nanoseconds = 40000000U;
     configuration.start_exporter = start_exporter;
     error_code = g_session.initialize(configuration);
     if (error_code == FT_ERR_SUCCESS)

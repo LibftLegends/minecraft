@@ -1,6 +1,7 @@
 #include "../../src/world/WorldGenerationResultCommitter.hpp"
 #include "../../src/diagnostics/RuntimeAnalytics.hpp"
 #include "../../Libft/Modules/Basic/limits.hpp"
+#include <algorithm>
 #include <cstdio>
 #if defined(LIBFT_ENABLE_ANALYTICS)
 # include <chrono>
@@ -14,9 +15,18 @@ namespace
 	static const int32_t WORLD_STREAM_MAX_COMMITS_PER_FRAME = 1;
 	static const int32_t WORLD_STREAM_MAX_INTERACTIVE_COMMITS_PER_FRAME = 4;
 	static const uint32_t WORLD_STREAM_DEFERRED_EDIT_BUDGET_MS = 1U;
-	static const uint64_t WORLD_STREAM_BORDER_SOURCE_MAX_AGE_FRAMES = 4U;
 
-#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	static int32_t publish_chunk_read_state(WorldChunk &chunk) noexcept
+	{
+		const int32_t scope_error = RuntimeAnalytics::begin_scope(
+			RuntimeAnalyticsScope::CHUNK_READ_STATE_PUBLISH);
+		const int32_t publish_error = chunk.publish_read_state();
+		if (scope_error == FT_ERR_SUCCESS)
+			(void)RuntimeAnalytics::end_scope();
+		return (publish_error);
+	}
+
+#if defined(LIBFT_ENABLE_ANALYTICS)
 	static void mesh_light_range(const chunk_mesh &mesh, uint8_t *minimum,
 		uint8_t *maximum, std::size_t *nonzero) noexcept
 	{
@@ -39,9 +49,9 @@ namespace
 		*maximum = max_value;
 		*nonzero = nonzero_count;
 	}
-
 #endif
 
+#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
 	static bool mesh_has_nonzero_light(const chunk_mesh &mesh) noexcept
 	{
 		for (std::size_t index = 0U; index < mesh.vertices.size(); ++index)
@@ -51,39 +61,7 @@ namespace
 		}
 		return (false);
 	}
-
-	static bool mesh_light_is_severely_regressed(const chunk_mesh &previous,
-		const chunk_mesh &replacement) noexcept
-	{
-		std::size_t previous_nonzero = 0U;
-		std::size_t replacement_nonzero = 0U;
-
-		for (const chunk_mesh_vertex &vertex : previous.vertices)
-		{
-			if (vertex.packed_light != 0U)
-				previous_nonzero += 1U;
-		}
-		for (const chunk_mesh_vertex &vertex : replacement.vertices)
-		{
-			if (vertex.packed_light != 0U)
-				replacement_nonzero += 1U;
-		}
-		/* A valid local edit may change a few vertices, but it must not turn a
-		 * visibly lit mesh into an almost entirely black replacement. */
-		return (previous_nonzero >= 16U
-			&& replacement_nonzero * 4U < previous_nonzero);
-	}
-
-	static bool light_field_has_nonzero(
-		const voxel_light_chunk &light) noexcept
-	{
-		for (int32_t z = 0; z < GAME_VOXEL_CHUNK_DEPTH; ++z)
-			for (int32_t y = 0; y < GAME_VOXEL_CHUNK_HEIGHT; ++y)
-				for (int32_t x = 0; x < GAME_VOXEL_CHUNK_WIDTH; ++x)
-					if (light.get(x, y, z) != 0U)
-						return (true);
-		return (false);
-	}
+#endif
 
 	/* Prepare the sections touched by a compact incremental result before the
 	 * live chunk is changed.  voxel_light_section::set() can allocate when a
@@ -160,49 +138,6 @@ namespace
 		}
 	}
 
-	static bool result_has_light_publication(
-		const WorldGenerationPipeline::Result &result) noexcept
-	{
-		const bool geometry_only = (result.stage_mask
-			& WorldGenerationPipeline::Result::STAGE_GEOMETRY_ONLY) != 0U;
-		const bool geometry_final = (result.stage_mask
-			& WorldGenerationPipeline::Result::STAGE_GEOMETRY_FINAL) != 0U;
-		const bool compact_incremental_patch =
-			result.incremental_light != FT_FALSE
-			&& result.incremental_light_deltas_complete != FT_FALSE;
-		return (!geometry_only || geometry_final)
-			&& (result.light != nullptr || compact_incremental_patch);
-	}
-
-	static bool should_stage_border_source(const World &world,
-		const WorldGenerationPipeline::Result &result) noexcept
-	{
-		if (result.operation != WorldGenerationPipeline::WorldGenerationOperation::REMESH
-			|| !result_has_light_publication(result))
-			return (false);
-		for (int32_t index = 0; index < world.chunk_count; ++index)
-		{
-			const WorldChunk &candidate = world.chunks[index];
-			if (candidate.initialized
-				&& candidate.waits_for_neighbor_light
-				&& candidate.light_dependency_chunk_x == result.chunk_x
-				&& candidate.light_dependency_chunk_z == result.chunk_z
-				&& candidate.pending_mesh_request_id != 0U)
-				return (true);
-		}
-		return (false);
-	}
-
-	static bool result_depends_on(const WorldGenerationPipeline::Result &result,
-		const WorldGenerationPipeline::Result &source) noexcept
-	{
-		return (result.operation
-			== WorldGenerationPipeline::WorldGenerationOperation::REMESH
-			&& result.dependency_valid != FT_FALSE
-			&& result.dependency_chunk_x == source.chunk_x
-			&& result.dependency_chunk_z == source.chunk_z
-			&& result_has_light_publication(result));
-	}
 }
 
 WorldGenerationResultCommitter::WorldGenerationResultCommitter()
@@ -259,8 +194,8 @@ int32_t WorldGenerationResultCommitter::commit_remesh_result(World &world,
 	bool dependency_stale;
 	bool pending_stale;
 	bool revision_stale;
-	bool light_commit_deferred;
 	bool compact_incremental_patch;
+	std::shared_ptr<WorldChunkReadState> prepared_read_state;
 	voxel_light_section prepared_incremental_sections[16];
 	bool prepared_incremental_sections_valid[16];
 #if defined(LIBFT_ENABLE_ANALYTICS)
@@ -287,7 +222,6 @@ int32_t WorldGenerationResultCommitter::commit_remesh_result(World &world,
 	dependency_stale = false;
 	pending_stale = false;
 	revision_stale = false;
-	light_commit_deferred = false;
 
 	chunk = world.find_chunk_mutable(result.chunk_x, result.chunk_z);
 	if (result.dependency_valid != FT_FALSE)
@@ -345,11 +279,25 @@ int32_t WorldGenerationResultCommitter::commit_remesh_result(World &world,
 		{
 			chunk->clear_pending_remesh_request();
 			chunk->mesh_dirty = true;
+			if (dependency_stale)
+				chunk->set_light_dependency(result.dependency_chunk_x,
+					result.dependency_chunk_z);
 			/* The stale result has no authority to describe the replacement
 			 * request.  Leave scheduling to the dirty/priority queues so a newer
 			 * edit's incremental light seeds cannot be replaced by an empty full
 			 * remesh notification. */
 		}
+		return (FT_ERR_SUCCESS);
+	}
+	/* Both geometry stages use a revision-checked, previously published field.
+	 * The preview deliberately precedes the relight for this voxel revision.
+	 * A final geometry-only result also requires the field to be current. */
+	if (geometry_only && (!chunk->light_buffer_is_valid()
+		|| !chunk->light_ready_for_render
+		|| (geometry_final && !chunk->light_is_current())))
+	{
+		chunk->clear_pending_remesh_request();
+		chunk->mesh_dirty = true;
 		return (FT_ERR_SUCCESS);
 	}
 #if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
@@ -418,6 +366,15 @@ int32_t WorldGenerationResultCommitter::commit_remesh_result(World &world,
 		error_code = prepare_incremental_light_sections(chunk->light,
 			result.incremental_light_deltas, prepared_incremental_sections,
 			prepared_incremental_sections_valid);
+		if (error_code == FT_ERR_SUCCESS
+			&& (result.incremental_light_samples != nullptr
+				|| result.incremental_light_deltas.empty()))
+		{
+			error_code = chunk->prepare_read_state_after_light_patch(
+				result.incremental_light_samples, prepared_read_state);
+			if (error_code == FT_ERR_NOT_FOUND)
+				error_code = FT_ERR_SUCCESS;
+		}
 		if (error_code != FT_ERR_SUCCESS)
 		{
 			chunk->clear_pending_remesh_request();
@@ -447,115 +404,6 @@ int32_t WorldGenerationResultCommitter::commit_remesh_result(World &world,
 		if (chunk_mesh_destroy(replacement_mesh) != FT_ERR_SUCCESS)
 			return (FT_ERR_NO_MEMORY);
 		return (error_code);
-	}
-	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
-	{
-		uint8_t result_light_min;
-		uint8_t result_light_max;
-		std::size_t result_light_nonzero;
-		mesh_light_range(replacement_mesh, &result_light_min, &result_light_max,
-			&result_light_nonzero);
-		if (!replacement_mesh.vertices.empty() && result_light_nonzero == 0U)
-		{
-			uint8_t field_min = 0U;
-			uint8_t field_max = 0U;
-			std::size_t field_nonzero = 0U;
-			if (result.light != nullptr)
-			{
-				field_min = 255U;
-				for (int32_t z = 0; z < GAME_VOXEL_CHUNK_DEPTH; ++z)
-					for (int32_t y = 0; y < GAME_VOXEL_CHUNK_HEIGHT; ++y)
-						for (int32_t x = 0; x < GAME_VOXEL_CHUNK_WIDTH; ++x)
-						{
-							const uint8_t value = result.light->get(x, y, z);
-							if (value < field_min)
-								field_min = value;
-							if (value > field_max)
-								field_max = value;
-							if (value != 0U)
-								field_nonzero += 1U;
-						}
-			}
-			std::fprintf(stderr,
-				"[WorldLight] zero-light remesh result chunk=(%d,%d) request=%llu "
-				"geometry_only=%d geometry_final=%d incremental=%d content=%u "
-				"light_input=%u field_min=%u field_max=%u field_nonzero=%zu\n",
-				result.chunk_x, result.chunk_z,
-				static_cast<unsigned long long>(result.request_id),
-				geometry_only ? 1 : 0, geometry_final ? 1 : 0,
-				result.incremental_light != FT_FALSE ? 1 : 0,
-				result.content_version, result.light_input_version,
-				static_cast<unsigned int>(field_min),
-				static_cast<unsigned int>(field_max), field_nonzero);
-		}
-	}
-	#endif
-	if (geometry_only && geometry_final
-		&& !mesh_has_nonzero_light(replacement_mesh))
-	{
-		/* A geometry-only result must never publish an all-zero light field.  The
-		 * snapshot may have been labelled valid while its source was still in the
-		 * initialization/publication window, and a newly arrived chunk may not
-		 * have an older lit mesh to protect.  Keep the previous publication,
-		 * invalidate the light readiness state, and let the normal dirty scheduler
-		 * submit a full worker-side light solve. */
-		(void)chunk_mesh_destroy(replacement_mesh);
-		chunk->clear_pending_remesh_request();
-		chunk->mesh_dirty = true;
-		chunk->light_ready_for_render = false;
-		chunk->mark_light_input_changed();
-		return (FT_ERR_SUCCESS);
-	}
-	/* Revisions identify the immutable request snapshot, but light-input
-	 * validity can also change through a local invalidation that intentionally
-	 * preserves the previous drawable buffer.  Never publish geometry whose
-	 * packed light was prepared from that now-stale field. */
-	if (geometry_only
-		&& (!chunk->light_is_current() || !chunk->light_ready_for_render))
-	{
-		(void)chunk_mesh_destroy(replacement_mesh);
-		chunk->clear_pending_remesh_request();
-		chunk->mesh_dirty = true;
-		return (FT_ERR_SUCCESS);
-	}
-	if (!geometry_only && !geometry_final
-		&& result.incremental_light != FT_FALSE
-		&& (mesh_light_is_severely_regressed(chunk->mesh, replacement_mesh)
-			|| (!mesh_has_nonzero_light(replacement_mesh)
-				&& light_field_has_nonzero(chunk->light))))
-	{
-		/* An incremental frontier is allowed to change nearby cells, but it is
-		 * never allowed to turn an already-lit publication into an almost-black
-		 * mesh.  Keep the previous complete publication intact, invalidate the
-		 * light input revision, and let the normal dirty scheduler submit a full
-		 * solve. */
-		if (chunk_mesh_destroy(replacement_mesh) != FT_ERR_SUCCESS)
-			return (FT_ERR_INTERNAL);
-		chunk->clear_pending_remesh_request();
-		chunk->mesh_dirty = true;
-		chunk->mark_light_input_changed();
-		return (FT_ERR_SUCCESS);
-	}
-	/* Geometry-only remeshes deliberately do not replace the authoritative
-	 * light buffer.  Their worker mesh may have been built from an older
-	 * immutable snapshot, however, so publishing its packed-light bytes would
-	 * let stale/zero light values overwrite a valid live baseline as chunks
-	 * enter the render range.  Reapply the current live field to the prepared
-	 * mesh before transferring ownership to the chunk. */
-	if (geometry_only
-		&& chunk->light_version != world_light_version::INVALID_VERSION
-		&& chunk->computed_light_input_version
-			!= world_light_version::INVALID_VERSION
-		&& light_field_has_nonzero(chunk->light))
-	{
-		error_code = chunk_mesh_apply_light(replacement_mesh, chunk->light);
-		if (error_code != FT_ERR_SUCCESS)
-		{
-			(void)chunk_mesh_destroy(replacement_mesh);
-			chunk->clear_pending_remesh_request();
-			chunk->mesh_dirty = true;
-			return (error_code);
-		}
 	}
 	retired_mesh.reset(new (std::nothrow) chunk_mesh());
 	if (retired_mesh == nullptr)
@@ -603,7 +451,7 @@ int32_t WorldGenerationResultCommitter::commit_remesh_result(World &world,
 	#endif
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
-	if (!geometry_only && !geometry_final && !light_commit_deferred)
+	if (!geometry_only)
 	{
 		chunk->clear_pending_remesh_request();
 		if (result.incremental_light != FT_FALSE)
@@ -662,14 +510,6 @@ int32_t WorldGenerationResultCommitter::commit_remesh_result(World &world,
 			geometry_only ? 1 : 0, geometry_final ? 1 : 0);
 		#endif
 	}
-	if (light_commit_deferred)
-	{
-		/* The geometry is authoritative, but the anomalous light result was not.
-		 * Keep the old light versions so the normal dirty scheduler submits a
-		 * complete solve instead of allowing a black intermediate to persist. */
-		chunk->clear_pending_remesh_request();
-		chunk->mesh_dirty = true;
-	}
 	result.retired_mesh = std::move(retired_mesh);
 	#if defined(LIBFT_ENABLE_ANALYTICS)
 	light_move_us = static_cast<uint64_t>(std::chrono::duration_cast<
@@ -693,7 +533,7 @@ int32_t WorldGenerationResultCommitter::commit_remesh_result(World &world,
 	#endif
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
-	if (!geometry_only || geometry_final)
+	if (!geometry_only)
 	{
 		if (result.incremental_light != FT_FALSE)
 			world.chunk_streamer.remesh_incremental_completed_count_ += 1U;
@@ -704,17 +544,56 @@ int32_t WorldGenerationResultCommitter::commit_remesh_result(World &world,
 		world.chunk_streamer.remesh_geometry_only_count_ += 1U;
 	chunk->mesh_revision += 1U;
 	chunk->mesh_dirty = geometry_only && !geometry_final;
+	chunk->last_mesh_publication_interactive = result.interactive_remesh;
+	chunk->last_mesh_publication_voxel_revision = result.voxel_revision;
 	if (!geometry_only || geometry_final)
 	{
-		chunk->last_mesh_publication_interactive = result.interactive_remesh;
-		chunk->last_mesh_publication_voxel_revision = result.voxel_revision;
-	}
-	if (!geometry_only || geometry_final)
 		chunk->clear_pending_remesh_request();
+		chunk->clear_light_dependency();
+	}
 	world.mark_geometry_changed();
-	error_code = chunk->publish_read_state();
-	if (error_code != FT_ERR_SUCCESS)
-		return (error_code);
+	if (!geometry_only)
+	{
+		if (prepared_read_state != nullptr)
+		{
+			const int32_t scope_error = RuntimeAnalytics::begin_scope(
+				RuntimeAnalyticsScope::CHUNK_READ_STATE_PUBLISH);
+			chunk->commit_prepared_read_state(prepared_read_state, result.changed_light_faces);
+			if (scope_error == FT_ERR_SUCCESS)
+				(void)RuntimeAnalytics::end_scope();
+		}
+		else
+			error_code = publish_chunk_read_state(*chunk);
+		if (error_code != FT_ERR_SUCCESS)
+			return (error_code);
+	}
+	if (!chunk->mesh_dirty)
+	{
+		/* The final result passed the request and revision gates. Retire its
+		 * priority entry with publication so clean chunks cannot still look
+		 * queued while the submission cadence is waiting for another frame. */
+		WorldChunkStreamer &streamer = world.chunk_streamer;
+		const auto entry = std::find_if(streamer.priority_remeshes_.begin(),
+			streamer.priority_remeshes_.end(),
+			[&result](const WorldChunkStreamer::RemeshPriority &priority)
+			{
+				return (priority.chunk_x == result.chunk_x
+					&& priority.chunk_z == result.chunk_z);
+			});
+		if (entry != streamer.priority_remeshes_.end())
+		{
+			streamer.priority_remeshes_.erase(entry);
+			streamer.priority_remesh_pending_ = !streamer.priority_remeshes_.empty();
+			if (streamer.priority_remesh_pending_)
+			{
+				const auto &next = streamer.priority_remeshes_.front();
+				streamer.priority_remesh_chunk_x_ = next.chunk_x;
+				streamer.priority_remesh_chunk_z_ = next.chunk_z;
+			}
+		}
+	}
+	if (!geometry_only)
+		world.chunk_streamer.invalidate_boundary_receivers(result);
 	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
 	if (chunk->voxel_revision > 1U
 		&& world.chunk_streamer.remesh_completed_count_ % 64U == 0U)
@@ -741,7 +620,8 @@ void WorldGenerationResultCommitter::populate_chunk_slot(WorldChunk &slot,
 	 * resets. Keep it in the renderer-visible identity so reloading the same
 	 * coordinates cannot be mistaken for the old GPU mesh. */
 	slot.mesh_revision = geometry_revision == 0U ? 1U : geometry_revision;
-	slot.voxel_revision = 1U;
+	slot.voxel_revision = result.loaded_from_terrain_store
+		? std::max<uint64_t>(1U, slot.chunk.get_revision()) : 1U;
 	slot.light_revision = 1U;
 	slot.content_version = 1U;
 	slot.light_version = 1U;
@@ -818,6 +698,13 @@ int32_t WorldGenerationResultCommitter::create_chunk_from_stream_result(WorldChu
 	slot->light_ready_for_render = result.chunk->light_ready_for_render;
 	WorldGenerationResultCommitter::populate_chunk_slot(*slot, result,
 		world.geometry_revision);
+	slot->read_state = std::move(result.chunk->read_state);
+	ft_memcpy(slot->boundary_source_light_max,
+		result.chunk->boundary_source_light_max,
+		sizeof(slot->boundary_source_light_max));
+	ft_memcpy(slot->boundary_target_has_transparent,
+		result.chunk->boundary_target_has_transparent,
+		sizeof(slot->boundary_target_has_transparent));
 	#if defined(LIBFT_ENABLE_ANALYTICS)
 	if (world.loaded_chunk_count <= 16)
 	{
@@ -838,45 +725,42 @@ int32_t WorldGenerationResultCommitter::create_chunk_from_stream_result(WorldChu
 		&fluid_state_changed);
 	if (error_code != FT_ERR_SUCCESS)
 	{
-		cleanup_error = chunk_mesh_destroy(slot->mesh);
-		const int32_t chunk_cleanup_error = slot->chunk.destroy();
-		if (cleanup_error == FT_ERR_SUCCESS)
-			cleanup_error = chunk_cleanup_error;
-		(void)slot->light.destroy();
-		if (world.loaded_chunk_count > 0)
-			world.loaded_chunk_count -= 1;
-		slot->reset_coordinates();
+		slot->destroy();
+		world.loaded_chunk_count -= 1;
 		candidate.state = WorldChunkStreamer::CANDIDATE_FAILED_RETRYABLE;
-		candidate.last_error = cleanup_error == FT_ERR_SUCCESS
-			? error_code : cleanup_error;
+		candidate.last_error = error_code;
 		candidate.retry_frames = 1;
 		return (FT_ERR_SUCCESS);
 	}
-	if (world.terrain_chunk_store().is_initialized())
+	if (world.terrain_chunk_store().is_initialized()
+		&& (!result.loaded_from_terrain_store || fluid_state_changed))
 	{
-		error_code = world.terrain_chunk_store().save_chunk(slot->chunk_x,
-			slot->chunk_z, slot->chunk);
+		const int32_t scope_error = RuntimeAnalytics::begin_scope(
+			RuntimeAnalyticsScope::WORLD_STREAM_SAVE);
+		if (fluid_state_changed)
+			error_code = world.terrain_chunk_store().save_chunk(slot->chunk_x,
+				slot->chunk_z, slot->chunk);
+		else
+			error_code = world.terrain_chunk_store().commit_staged_chunk(
+				slot->chunk_x, slot->chunk_z, result.staged_terrain_chunk);
+		if (scope_error == FT_ERR_SUCCESS)
+			(void)RuntimeAnalytics::end_scope();
 		if (error_code != FT_ERR_SUCCESS)
 		{
-			cleanup_error = chunk_mesh_destroy(slot->mesh);
-			const int32_t chunk_cleanup_error = slot->chunk.destroy();
-			if (cleanup_error == FT_ERR_SUCCESS)
-				cleanup_error = chunk_cleanup_error;
-			(void)slot->light.destroy();
-			if (world.loaded_chunk_count > 0)
-				world.loaded_chunk_count -= 1;
-			slot->reset_coordinates();
+			slot->destroy();
+			world.loaded_chunk_count -= 1;
 			candidate.state = WorldChunkStreamer::CANDIDATE_FAILED_RETRYABLE;
-			candidate.last_error = cleanup_error == FT_ERR_SUCCESS
-				? error_code : cleanup_error;
+			candidate.last_error = error_code;
 			candidate.retry_frames = 1;
 			return (FT_ERR_SUCCESS);
 		}
 	}
-	error_code = slot->publish_read_state();
+	if (slot->read_state == nullptr)
+		error_code = publish_chunk_read_state(*slot);
 	if (error_code != FT_ERR_SUCCESS)
 	{
 		slot->destroy();
+		world.loaded_chunk_count -= 1;
 		candidate.state = WorldChunkStreamer::CANDIDATE_FAILED_RETRYABLE;
 		candidate.last_error = error_code;
 		candidate.retry_frames = 1;
@@ -1069,25 +953,6 @@ int32_t WorldGenerationResultCommitter::drain(WorldChunkStreamer &streamer,
 	while (processed < commit_limit
 		&& (processed == 0 || std::chrono::steady_clock::now() < deadline))
 	{
-		/* A source result is held only while its explicitly dependent border
-		 * result has a chance to arrive.  The fallback is checked before polling
-		 * so a result already in the pipeline cannot be consumed and then lost
-		 * while the source is committed. */
-		if (streamer.staged_border_source_result_ != nullptr
-			&& streamer.stream_frame_
-				>= streamer.staged_border_source_frame_
-				+ WORLD_STREAM_BORDER_SOURCE_MAX_AGE_FRAMES)
-		{
-			error_code = WorldGenerationResultCommitter::commit(streamer, world,
-				*streamer.staged_border_source_result_);
-			if (error_code != FT_ERR_SUCCESS)
-				return (error_code);
-			streamer.generation_pipeline_.retire_result(
-				std::move(streamer.staged_border_source_result_));
-			streamer.staged_border_source_frame_ = 0U;
-			processed += 1;
-			continue ;
-		}
 #if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
 		const auto poll_start = std::chrono::steady_clock::now();
 #endif
@@ -1100,36 +965,6 @@ int32_t WorldGenerationResultCommitter::drain(WorldChunkStreamer &streamer,
 #endif
 		if (poll_error != FT_ERR_SUCCESS)
 			break ;
-		/* Border lighting is computed against a source snapshot.  Publishing
-		 * the source and the result that consumed that snapshot in the same
-		 * drain pass prevents a visible one-frame invalidation at the boundary.
-		 * Both commits still perform their normal revision/dependency checks. */
-		if (streamer.staged_border_source_result_ != nullptr
-			&& result_depends_on(*result,
-				*streamer.staged_border_source_result_))
-		{
-			error_code = WorldGenerationResultCommitter::commit(streamer, world,
-				*streamer.staged_border_source_result_);
-			if (error_code != FT_ERR_SUCCESS)
-				return (error_code);
-			streamer.generation_pipeline_.retire_result(
-				std::move(streamer.staged_border_source_result_));
-			streamer.staged_border_source_frame_ = 0U;
-			error_code = WorldGenerationResultCommitter::commit(streamer, world,
-				*result);
-			if (error_code != FT_ERR_SUCCESS)
-				return (error_code);
-			streamer.generation_pipeline_.retire_result(std::move(result));
-			processed += 1;
-			continue ;
-		}
-		if (streamer.staged_border_source_result_ == nullptr
-			&& should_stage_border_source(world, *result))
-		{
-			streamer.staged_border_source_result_ = std::move(result);
-			streamer.staged_border_source_frame_ = streamer.stream_frame_;
-			continue ;
-		}
 #if defined(LIBFT_ENABLE_ANALYTICS)
 		const uint64_t result_request_id = result->request_id;
 		const int32_t result_chunk_x = result->chunk_x;

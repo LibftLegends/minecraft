@@ -1269,7 +1269,7 @@ int32_t MinecraftRecipeCatalog::query_recipes(const game_inventory &inventory,
 					static_cast<uint32_t>(station_id), 0, 0, 0, 0U,
 					catalog_revision,
 					inventory_snapshot.revision, recipe_book_revision, known,
-					status, output, batch_count});
+					status, output, batch_count, 0U});
 				for (ft_size_t index = 0U; index < missing_groups.size(); ++index)
 					staged_missing.push_back({recipe_id, missing_groups[index]});
 			}
@@ -1279,7 +1279,8 @@ int32_t MinecraftRecipeCatalog::query_recipes(const game_inventory &inventory,
 			if (result != FT_ERR_SUCCESS)
 				return (result);
 		}
-		result = this->recipe_book_.get_revision(&recipe_book_revision_after);
+		int32_t result = this->recipe_book_.get_revision(
+			&recipe_book_revision_after);
 		if (result != FT_ERR_SUCCESS)
 			return (result);
 		if (recipe_book_revision_after != recipe_book_revision)

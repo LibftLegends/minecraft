@@ -97,12 +97,37 @@ struct WorldItemStore::Entry
 	double z;
 	bool published;
 	game_inventory contents;
+	mutable game_inventory_snapshot cached_inventory = {};
+	mutable bool inventory_cached = false;
 
 	Entry() : entity_id(0U), entity_revision(1U), spawned_tick(0U),
 		owner_id(0U), owner_lock_until_tick(0U), chunk_x(0), chunk_z(0),
 		item_id(0), max_stack(0), x(0.0), y(0.0), z(0.0),
 		published(true), contents()
 	{
+	}
+
+	/* Entry inventories own their items, and callers hold the store mutex.
+	 * Keep their value snapshots across render and save reads until a transfer
+	 * changes the inventory revision. */
+	int32_t get_inventory_snapshot(const game_inventory_snapshot *&snapshot) const noexcept
+	{
+		uint64_t revision = 0U;
+		int32_t result = this->contents.get_revision(&revision);
+		if (result != FT_ERR_SUCCESS)
+			return (result);
+		if (!this->inventory_cached || this->cached_inventory.revision != revision)
+		{
+			this->inventory_cached = false;
+			result = this->contents.get_snapshot(this->cached_inventory);
+			if (result != FT_ERR_SUCCESS)
+				return (result);
+			if (this->cached_inventory.items.size() != 1U)
+				return (FT_ERR_INVALID_STATE);
+			this->inventory_cached = true;
+		}
+		snapshot = &this->cached_inventory;
+		return (FT_ERR_SUCCESS);
 	}
 };
 
@@ -244,14 +269,12 @@ int32_t WorldItemStore::spawn_pending(const ft_sharedptr<game_item> &item,
 	{
 		for (const auto &existing_entry : this->entries_)
 		{
-			game_inventory_snapshot existing_snapshot = {};
-			error_code = existing_entry.second->contents.get_snapshot(
+			const game_inventory_snapshot *existing_snapshot = nullptr;
+			error_code = existing_entry.second->get_inventory_snapshot(
 				existing_snapshot);
 			if (error_code != FT_ERR_SUCCESS)
 				return (error_code);
-			if (existing_snapshot.items.size() != 1U)
-				return (FT_ERR_INVALID_STATE);
-			if (existing_snapshot.items[0].instance_id
+			if (existing_snapshot->items[0].instance_id
 				== item->get_instance_id())
 				return (FT_ERR_ALREADY_EXISTS);
 		}
@@ -374,10 +397,8 @@ int32_t WorldItemStore::merge_stacks(uint64_t source_entity_id,
 	std::lock_guard<std::mutex> lock(this->mutex_);
 	std::unordered_map<uint64_t, std::unique_ptr<Entry> >::iterator source;
 	std::unordered_map<uint64_t, std::unique_ptr<Entry> >::iterator destination;
-	game_inventory_snapshot source_snapshot = {};
-	game_inventory_snapshot destination_snapshot = {};
-	uint64_t source_inventory_revision;
-	uint64_t destination_inventory_revision;
+	const game_inventory_snapshot *source_snapshot = nullptr;
+	const game_inventory_snapshot *destination_snapshot = nullptr;
 	uint64_t transaction_id;
 	int32_t transfer_quantity;
 	int32_t source_remaining;
@@ -423,29 +444,21 @@ int32_t WorldItemStore::merge_stacks(uint64_t source_entity_id,
 		if (dx * dx + dy * dy + dz * dz > 1.0)
 			return (FT_ERR_OUT_OF_RANGE);
 	}
-	result = source_entry.contents.get_snapshot(source_snapshot);
+	result = source_entry.get_inventory_snapshot(source_snapshot);
 	if (result == FT_ERR_SUCCESS)
-		result = destination_entry.contents.get_snapshot(destination_snapshot);
+		result = destination_entry.get_inventory_snapshot(destination_snapshot);
 	if (result != FT_ERR_SUCCESS)
 		return (result);
-	if (source_snapshot.items.size() != 1U
-		|| destination_snapshot.items.size() != 1U
-		|| source_snapshot.items[0].item_id != source_entry.item_id
-		|| destination_snapshot.items[0].item_id != destination_entry.item_id
-		|| source_snapshot.items[0].instance_id != 0U
-		|| destination_snapshot.items[0].instance_id != 0U)
+	if (source_snapshot->items[0].item_id != source_entry.item_id
+		|| destination_snapshot->items[0].item_id != destination_entry.item_id
+		|| source_snapshot->items[0].instance_id != 0U
+		|| destination_snapshot->items[0].instance_id != 0U)
 		return (FT_ERR_INVALID_ARGUMENT);
-	if (source_snapshot.items[0].stack_size <= 0
-		|| destination_snapshot.items[0].stack_size
-			>= destination_snapshot.items[0].max_stack)
+	if (source_snapshot->items[0].stack_size <= 0
+		|| destination_snapshot->items[0].stack_size
+			>= destination_snapshot->items[0].max_stack)
 		return (FT_ERR_FULL);
-	result = source_entry.contents.get_revision(&source_inventory_revision);
-	if (result == FT_ERR_SUCCESS)
-		result = destination_entry.contents.get_revision(
-			&destination_inventory_revision);
-	if (result != FT_ERR_SUCCESS)
-		return (result);
-	transfer_quantity = source_snapshot.items[0].stack_size;
+	transfer_quantity = source_snapshot->items[0].stack_size;
 	while (transfer_quantity > 0)
 	{
 		if (this->next_transfer_transaction_id_ == 0U
@@ -455,7 +468,7 @@ int32_t WorldItemStore::merge_stacks(uint64_t source_entity_id,
 		transaction_id = this->next_transfer_transaction_id_++;
 		result = source_entry.contents.transfer_to(
 			destination_entry.contents, 0, transfer_quantity,
-			source_inventory_revision, destination_inventory_revision,
+			source_snapshot->revision, destination_snapshot->revision,
 			0x57494D45524745ULL, transaction_id, &transfer_result);
 		if (result != FT_ERR_FULL)
 			break ;
@@ -621,12 +634,10 @@ int32_t WorldItemStore::query_internal(double x, double y, double z,
 					if (dx * dx + dy * dy + dz * dz > radius_squared)
 						continue ;
 					WorldItemSnapshot snapshot = {};
-					std::vector<game_inventory_item_snapshot> item_values;
-					uint64_t inventory_revision = 0U;
-					if (entry.contents.get_snapshot(item_values,
-							&inventory_revision) != FT_ERR_SUCCESS
-						|| item_values.size() != 1U)
+					const game_inventory_snapshot *inventory = nullptr;
+					if (entry.get_inventory_snapshot(inventory) != FT_ERR_SUCCESS)
 						return (FT_ERR_INVALID_STATE);
+					const game_inventory_item_snapshot &item = inventory->items[0];
 					snapshot.entity_id = entry.entity_id;
 					snapshot.entity_revision = entry.entity_revision;
 					snapshot.spawned_tick = entry.spawned_tick;
@@ -634,21 +645,21 @@ int32_t WorldItemStore::query_internal(double x, double y, double z,
 					snapshot.owner_lock_until_tick = entry.owner_lock_until_tick;
 					snapshot.chunk_x = entry.chunk_x;
 					snapshot.chunk_z = entry.chunk_z;
-					snapshot.item_id = item_values[0].item_id;
-					snapshot.quantity = item_values[0].stack_size;
-					snapshot.max_stack = item_values[0].max_stack;
-					snapshot.item_instance_id = item_values[0].instance_id;
-					snapshot.rarity = item_values[0].rarity;
-					snapshot.width = item_values[0].width;
-					snapshot.height = item_values[0].height;
-					snapshot.modifier1_id = item_values[0].modifier1_id;
-					snapshot.modifier1_value = item_values[0].modifier1_value;
-					snapshot.modifier2_id = item_values[0].modifier2_id;
-					snapshot.modifier2_value = item_values[0].modifier2_value;
-					snapshot.modifier3_id = item_values[0].modifier3_id;
-					snapshot.modifier3_value = item_values[0].modifier3_value;
-					snapshot.modifier4_id = item_values[0].modifier4_id;
-					snapshot.modifier4_value = item_values[0].modifier4_value;
+					snapshot.item_id = item.item_id;
+					snapshot.quantity = item.stack_size;
+					snapshot.max_stack = item.max_stack;
+					snapshot.item_instance_id = item.instance_id;
+					snapshot.rarity = item.rarity;
+					snapshot.width = item.width;
+					snapshot.height = item.height;
+					snapshot.modifier1_id = item.modifier1_id;
+					snapshot.modifier1_value = item.modifier1_value;
+					snapshot.modifier2_id = item.modifier2_id;
+					snapshot.modifier2_value = item.modifier2_value;
+					snapshot.modifier3_id = item.modifier3_id;
+					snapshot.modifier3_value = item.modifier3_value;
+					snapshot.modifier4_id = item.modifier4_id;
+					snapshot.modifier4_value = item.modifier4_value;
 					snapshot.x = entry.x;
 					snapshot.y = entry.y;
 					snapshot.z = entry.z;
@@ -732,17 +743,15 @@ int32_t WorldItemStore::serialize(std::vector<uint8_t> &bytes_out) const noexcep
 		for (entry = this->entries_.begin(); entry != this->entries_.end();
 			++entry)
 		{
-			game_inventory_snapshot inventory_snapshot = {};
+			const game_inventory_snapshot *inventory = nullptr;
 			const Entry &value = *entry->second;
 			uint64_t bits;
-			int32_t error_code = value.contents.get_snapshot(inventory_snapshot);
+			const int32_t error_code = value.get_inventory_snapshot(inventory);
 
-			if (error_code != FT_ERR_SUCCESS
-				|| inventory_snapshot.items.size() != 1U)
-				return (error_code == FT_ERR_SUCCESS
-					? FT_ERR_INVALID_STATE : error_code);
+			if (error_code != FT_ERR_SUCCESS)
+				return (error_code);
 			const game_inventory_item_snapshot &item =
-				inventory_snapshot.items[0];
+				inventory->items[0];
 			if (item.item_id != value.item_id || item.max_stack != value.max_stack
 				|| item.stack_size <= 0 || item.stack_size > item.max_stack)
 				return (FT_ERR_INVALID_STATE);
@@ -831,14 +840,12 @@ int32_t WorldItemStore::get_max_item_instance_id(
 		return (FT_ERR_INVALID_ARGUMENT);
 	for (const auto &entry : this->entries_)
 	{
-		game_inventory_snapshot snapshot = {};
-		const int32_t error_code = entry.second->contents.get_snapshot(snapshot);
+		const game_inventory_snapshot *snapshot = nullptr;
+		const int32_t error_code = entry.second->get_inventory_snapshot(snapshot);
 		if (error_code != FT_ERR_SUCCESS)
 			return (error_code);
-		if (snapshot.items.size() != 1U)
-			return (FT_ERR_INVALID_STATE);
-		if (snapshot.items[0].instance_id > maximum_instance_id)
-			maximum_instance_id = snapshot.items[0].instance_id;
+		if (snapshot->items[0].instance_id > maximum_instance_id)
+			maximum_instance_id = snapshot->items[0].instance_id;
 	}
 	*instance_id_out = maximum_instance_id;
 	return (FT_ERR_SUCCESS);
@@ -952,13 +959,11 @@ int32_t WorldItemStore::validate_instance_id_uniqueness(
 	{
 		for (const auto &entry : this->entries_)
 		{
-			game_inventory_snapshot ground_snapshot = {};
-			error_code = entry.second->contents.get_snapshot(ground_snapshot);
+			const game_inventory_snapshot *ground_snapshot = nullptr;
+			error_code = entry.second->get_inventory_snapshot(ground_snapshot);
 			if (error_code != FT_ERR_SUCCESS)
 				return (error_code);
-			if (ground_snapshot.items.size() != 1U)
-				return (FT_ERR_INVALID_STATE);
-			const uint64_t instance_id = ground_snapshot.items[0].instance_id;
+			const uint64_t instance_id = ground_snapshot->items[0].instance_id;
 			if (instance_id != 0U
 				&& !instance_ids.insert(instance_id).second)
 				return (FT_ERR_ALREADY_EXISTS);
@@ -979,18 +984,17 @@ int32_t WorldItemStore::validate_item_instance_policy(
 		return (FT_ERR_INVALID_STATE);
 	for (const auto &entry : this->entries_)
 	{
-		game_inventory_snapshot snapshot = {};
-		const int32_t result = entry.second->contents.get_snapshot(snapshot);
+		const game_inventory_snapshot *snapshot = nullptr;
+		const int32_t result = entry.second->get_inventory_snapshot(snapshot);
 		if (result != FT_ERR_SUCCESS)
 			return (result);
-		if (snapshot.items.size() != 1U
-			|| snapshot.items[0].item_id != entry.second->item_id
-			|| snapshot.items[0].max_stack != entry.second->max_stack
-			|| snapshot.items[0].stack_size <= 0
-			|| snapshot.items[0].stack_size > snapshot.items[0].max_stack)
+		const game_inventory_item_snapshot &item = snapshot->items[0];
+		if (item.item_id != entry.second->item_id
+			|| item.max_stack != entry.second->max_stack
+			|| item.stack_size <= 0 || item.stack_size > item.max_stack)
 			return (FT_ERR_INVALID_STATE);
 		const int32_t policy_result =
-			catalog.validate_inventory_instance_policy(snapshot);
+			catalog.validate_inventory_instance_policy(*snapshot);
 		if (policy_result != FT_ERR_SUCCESS)
 			return (policy_result);
 	}

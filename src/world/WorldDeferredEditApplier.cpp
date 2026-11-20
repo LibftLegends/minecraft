@@ -102,7 +102,6 @@ int32_t WorldDeferredEditApplier::apply_single_edit(
 	 * edits; the immediate queue below prioritizes the cardinal meshes whose
 	 * border faces are directly affected. */
 	streamer.mark_neighbor_remeshes(chunk->chunk_x, chunk->chunk_z, true);
-	world.mark_geometry_changed();
 	for (std::size_t touched_index = 0U;
 		touched_index < touched_chunks.size(); ++touched_index)
 	{

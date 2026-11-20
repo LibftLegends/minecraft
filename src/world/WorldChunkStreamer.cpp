@@ -165,8 +165,6 @@ void WorldChunkStreamer::reset() noexcept
 	this->stale_remesh_dependency_count_ = 0U;
 	this->stale_remesh_pending_count_ = 0U;
 	this->stale_remesh_revision_count_ = 0U;
-	this->staged_border_source_result_.reset();
-	this->staged_border_source_frame_ = 0U;
 	this->remesh_snapshot_bytes_.store(0U);
 	this->remesh_capture_duration_nanoseconds_.store(0U);
 	this->remesh_capture_count_.store(0U);
@@ -289,12 +287,15 @@ void WorldChunkStreamer::run_remesh_capture_worker() noexcept
 	#endif
 		if (!stale_capture)
 			capture_start = std::chrono::steady_clock::now();
+		const bool needs_full_lighting_halo = task.read_states[0] == nullptr
+			|| task.read_states[0]->light_valid == FT_FALSE
+			|| (!task.geometry_only && task.incremental_light_seeds.empty());
 		error_code = stale_capture ? FT_ERR_INVALID_STATE
 			: WorldChunkSnapshotCapture::capture_read_states(
 				task.read_states[0], task.read_states[1], task.read_states[2],
 				task.read_states[3], task.read_states[4], task.read_states[5],
 				task.read_states[6], task.read_states[7], task.read_states[8],
-				snapshot);
+				snapshot, needs_full_lighting_halo);
 		if (error_code == FT_ERR_SUCCESS
 			&& task.light_dependency_mask != 0U)
 		{
@@ -303,6 +304,8 @@ void WorldChunkStreamer::run_remesh_capture_worker() noexcept
 			 * Such a field is immutable but not a valid source for relighting. */
 			snapshot.lighting_halo_blocked = FT_TRUE;
 			snapshot.lighting_halo_valid = FT_FALSE;
+			snapshot.blocked_light_faces = static_cast<uint8_t>(
+				(task.light_dependency_mask >> 1U) & 0x0fU);
 			for (int32_t source_index = 1; source_index < 9; ++source_index)
 			{
 				if ((task.light_dependency_mask
@@ -774,6 +777,7 @@ int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk,
 	uint64_t request_id;
 	const voxel_light_update_config *resolved_light_config;
 	const RemeshPriority *matching_priority;
+	const WorldChunk *light_dependency = nullptr;
 	bool explicit_incremental_metadata;
 	bool interactive_request;
 
@@ -921,22 +925,20 @@ int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk,
 			else
 				return (FT_ERR_FULL);
 		}
-		chunk.clear_light_dependency();
+		if (dependency != nullptr && dependency->initialized
+			&& dependency->light_is_current())
+			light_dependency = dependency;
 	}
-	/* A neighbour can invalidate this chunk's mesh without invalidating its
-	 * light input.  Do not turn that geometry-only notification into a full
-	 * relight after an interactive edit; the current light buffer remains the
-	 * authoritative visible value until a real light-input revision changes. */
-	if (incremental_additive_light == FT_FALSE
-		&& incremental_removal_light == FT_FALSE
-		&& chunk.light_is_current()
-		&& chunk.light_ready_for_render)
-		geometry_only = true;
-	/* A stale or never-published light field can never back a newly committed
-	 * mesh.  Priority records may outlive the condition that originally marked
-	 * them geometry-only, so revalidate that optimization at submission time. */
-	if (!chunk.light_is_current() || !chunk.light_ready_for_render)
-		geometry_only = false;
+	/* Input versions decide whether this chunk needs a solve. A queued seed
+	 * can outlive the publication that already applied it, while another
+	 * border notification may only need to refresh exposed faces. */
+	geometry_only = chunk.light_is_current() && chunk.light_ready_for_render;
+	if (geometry_only)
+	{
+		incremental_additive_light = FT_FALSE;
+		incremental_removal_light = FT_FALSE;
+		incremental_light_seeds = nullptr;
+	}
 	if (chunk.remesh_cancellation_token == nullptr)
 		return (FT_ERR_INVALID_STATE);
 	interactive_request = false;
@@ -991,8 +993,6 @@ int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk,
 #endif
 	std::shared_ptr<std::atomic<uint64_t>> cancellation_token =
 		chunk.remesh_cancellation_token;
-	const uint64_t cancellation_token_value =
-		cancellation_token->fetch_add(1U, std::memory_order_acq_rel) + 1U;
 	resolved_light_config = &this->light_update_config_;
 	if (interactive_request)
 	{
@@ -1047,11 +1047,12 @@ int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk,
 			task.incremental_light_seeds.size(), geometry_only ? 1 : 0);
 	#endif
 	task.cancellation_token = cancellation_token;
-	task.cancellation_token_value = cancellation_token_value;
 	task.light_update_config = *resolved_light_config;
-	task.dependency_valid = chunk.waits_for_neighbor_light ? FT_TRUE : FT_FALSE;
-	task.dependency_chunk_x = chunk.light_dependency_chunk_x;
-	task.dependency_chunk_z = chunk.light_dependency_chunk_z;
+	task.dependency_valid = light_dependency != nullptr ? FT_TRUE : FT_FALSE;
+	task.dependency_chunk_x = light_dependency != nullptr
+		? light_dependency->chunk_x : 0;
+	task.dependency_chunk_z = light_dependency != nullptr
+		? light_dependency->chunk_z : 0;
 	{
 		const int32_t offsets[9][2] = {{0, 0}, {-1, 0}, {1, 0}, {0, -1},
 			{0, 1}, {-1, -1}, {1, -1}, {-1, 1}, {1, 1}};
@@ -1063,7 +1064,8 @@ int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk,
 			if (source != nullptr)
 			{
 				task.read_states[index] = source->read_state;
-				if (index != 0 && source->waits_for_neighbor_light)
+				if (index != 0 && source->waits_for_neighbor_light
+					&& !source->light_is_current())
 					task.light_dependency_mask |= static_cast<uint16_t>(
 						1U << index);
 			}
@@ -1082,7 +1084,8 @@ int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk,
 			if (iterator->chunk_x == task.chunk_x
 				&& iterator->chunk_z == task.chunk_z)
 			{
-				if (iterator->cancellation_token != nullptr)
+				if (iterator->cancellation_token != nullptr
+					&& iterator->cancellation_token != task.cancellation_token)
 					iterator->cancellation_token->fetch_add(1U,
 						std::memory_order_acq_rel);
 				iterator = this->remesh_capture_tasks_.erase(iterator);
@@ -1092,7 +1095,11 @@ int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk,
 			else
 				++iterator;
 		}
-		this->remesh_capture_tasks_.push_back(task);
+		/* Issue the new token under the capture lock after retiring any old
+		 * tasks. The queued and active requests for this slot share it. */
+		task.cancellation_token_value = task.cancellation_token->fetch_add(1U,
+			std::memory_order_acq_rel) + 1U;
+		this->remesh_capture_tasks_.push_back(std::move(task));
 		/* Publish ownership only after the capture queue accepted the task.  This
 		 * keeps the chunk marker transactional if queue allocation fails. */
 		chunk.set_pending_remesh_request(request_id,
@@ -1135,7 +1142,6 @@ void WorldChunkStreamer::recover_orphaned_remesh_markers() noexcept
 	{
 		WorldChunk &chunk = this->world_.chunks[index];
 		bool capture_owned = false;
-		bool priority_owned = false;
 
 		if (!chunk.initialized || chunk.pending_mesh_request_id == 0U)
 			continue ;
@@ -1153,19 +1159,7 @@ void WorldChunkStreamer::recover_orphaned_remesh_markers() noexcept
 				}
 			}
 		}
-		for (const RemeshPriority &priority : this->priority_remeshes_)
-		{
-			if (priority.chunk_x == chunk.chunk_x
-				&& priority.chunk_z == chunk.chunk_z)
-			{
-				priority_owned = true;
-				break ;
-			}
-		}
 		if (capture_owned
-			|| priority_owned
-			|| this->generation_pipeline_.has_remesh_for_chunk(
-				chunk.chunk_x, chunk.chunk_z)
 			|| this->generation_pipeline_.has_request_or_result(
 				chunk.pending_mesh_request_id))
 			continue ;
@@ -1250,7 +1244,6 @@ void WorldChunkStreamer::mark_neighbor_remeshes(int32_t chunk_x,
 				if (source_arrival && (arrived_source == nullptr
 					|| !arrived_source->initialized))
 				{
-					target->set_border_mesh_publication_pending(true);
 					this->mark_remesh_dirty(*target, FT_FALSE);
 					target->clear_light_dependency();
 					face_index += 1;
@@ -1375,6 +1368,7 @@ void WorldChunkStreamer::mark_neighbor_remeshes(int32_t chunk_x,
 			<= target->incremental_light_protection_until_frame)
 		{
 			this->mark_remesh_dirty(*target, FT_FALSE);
+			face_index += 1;
 			continue ;
 		}
 		for (int32_t first = 0; first < GAME_VOXEL_CHUNK_HEIGHT; ++first)
@@ -1461,12 +1455,78 @@ void WorldChunkStreamer::mark_neighbor_remeshes(int32_t chunk_x,
 
 void WorldChunkStreamer::mark_light_remesh_pending(WorldChunk &chunk) noexcept
 {
-	/* A border source may be newer than this chunk while this chunk still has
-	 * a valid light buffer that must remain drawable.  Advance the request
-	 * revision without invalidating light_input_version or the published light
-	 * values; the completed dependent result will carry this revision. */
-	chunk.light_revision += 1U;
-	chunk.mesh_dirty = true;
+	/* Preserve the last drawable buffer and invalidate its input revision.
+	 * If a border seed is lost to cancellation, the retry still needs a solve. */
+	this->mark_remesh_dirty(chunk, FT_TRUE);
+}
+
+void WorldChunkStreamer::invalidate_boundary_receivers(
+	const WorldGenerationPipeline::Result &result) noexcept
+{
+	if (result.changed_light_faces == 0U)
+		return ;
+	for (std::size_t face = 0; face < result.boundary_read_states.size(); ++face)
+	{
+		const uint8_t bit = static_cast<uint8_t>(1U << face);
+		if ((result.changed_light_faces & bit) == 0U)
+			continue ;
+		const auto &offset = WorldGenerationPipeline::BOUNDARY_NEIGHBORS[face];
+		WorldChunk *target = this->world_.find_chunk_mutable(
+			result.chunk_x + offset[0], result.chunk_z + offset[1]);
+		if (target == nullptr || !target->initialized)
+			continue ;
+		const auto captured = result.boundary_read_states[face].lock();
+		bool relight = (result.neighbor_relight_faces & bit) != 0U;
+		bool remesh = (result.neighbor_remesh_faces & bit) != 0U;
+		if (captured == nullptr || captured != target->read_state)
+		{
+			/* Another edit can replace the read state without changing how this
+			 * face receives light. Recheck small changes against the live snapshot
+			 * before replacing that edit's bounded frontier with a full solve. */
+			const auto &changes = result.boundary_light_changes[face];
+			if (changes.complete && changes.count != 0U && target->read_state != nullptr
+				&& target->read_state->initialized != FT_FALSE)
+			{
+				uint8_t effect = 0U;
+				for (std::size_t index = 0U; index < changes.count; ++index)
+					effect |= changes.cells[index].effect_on(*target->read_state);
+				relight = (effect & WorldGenerationPipeline::BoundaryLightChange::RELIGHT) != 0U;
+				remesh = (effect & WorldGenerationPipeline::BoundaryLightChange::REMESH) != 0U;
+			}
+			else
+				relight = true;
+		}
+		if (!relight && !remesh)
+			continue ;
+		this->mark_remesh_dirty(*target, relight ? FT_TRUE : FT_FALSE);
+		if (target->pending_mesh_request_id != 0U)
+		{
+			if (target->remesh_cancellation_token != nullptr)
+				target->remesh_cancellation_token->fetch_add(1U, std::memory_order_acq_rel);
+			target->clear_pending_remesh_request();
+		}
+		if (!relight)
+			continue ;
+		/* The changed set can span an entire face. Solve from the authoritative
+		 * voxel halo so a neighboring copy of the removed light cannot feed back
+		 * into the result. Keep the previous drawable mesh until publication. */
+		target->clear_light_dependency();
+		for (RemeshPriority &priority : this->priority_remeshes_)
+		{
+			if (priority.chunk_x == target->chunk_x && priority.chunk_z == target->chunk_z)
+			{
+				priority.requires_full_light = true;
+				priority.geometry_only = false;
+				priority.incremental_additive_light = FT_FALSE;
+				priority.incremental_removal_light = FT_FALSE;
+				priority.incremental_light_seeds.clear();
+				priority.voxel_revision = target->voxel_revision;
+				priority.content_version = target->content_version;
+				priority.light_input_version = target->light_input_version;
+				break ;
+			}
+		}
+	}
 }
 
 void WorldChunkStreamer::mark_edit_remeshes(int32_t chunk_x,
@@ -1477,13 +1537,7 @@ void WorldChunkStreamer::mark_edit_remeshes(int32_t chunk_x,
 
 	chunk = this->world_.find_chunk_mutable(chunk_x, chunk_z);
 	if (chunk != nullptr)
-	{
-		chunk->set_border_mesh_publication_pending(local_x == 0
-			|| local_x == GAME_VOXEL_CHUNK_WIDTH - 1
-			|| local_z == 0
-			|| local_z == GAME_VOXEL_CHUNK_DEPTH - 1);
 		this->mark_remesh_dirty(*chunk, FT_FALSE);
-	}
 	if (local_x == 0)
 	{
 		chunk = this->world_.find_chunk_mutable(chunk_x - 1, chunk_z);
@@ -1568,11 +1622,10 @@ void WorldChunkStreamer::prioritize_chunk_remesh_from_origin(int32_t chunk_x,
 	bool interactive) noexcept
 {
 	bool existing;
+	bool coalesced_single_cell_edit = false;
+	bool reverted_to_light_baseline = false;
 	RemeshPriority promoted;
 	std::deque<RemeshPriority>::iterator insert_position;
-
-	if (interactive)
-		this->generation_pipeline_.cancel_active_background_remeshes();
 
 	existing = false;
 	for (auto iterator = this->priority_remeshes_.begin();
@@ -1606,6 +1659,94 @@ void WorldChunkStreamer::prioritize_chunk_remesh_from_origin(int32_t chunk_x,
 		WorldChunk *target = this->world_.find_chunk_mutable(chunk_x, chunk_z);
 		if (target != nullptr && target->initialized)
 		{
+			/* An opaque neighbor need not solve its own light just because it
+			 * gained a face. The face must sample the newly opened cell after
+			 * the source's light has been published. */
+			if (geometry_only
+				&& (chunk_x != origin_chunk_x || chunk_z != origin_chunk_z)
+				&& voxel_get_block_metadata(incremental_old_block_id)
+					.occludes_faces != FT_FALSE
+				&& voxel_get_block_metadata(incremental_new_block_id)
+					.occludes_faces == FT_FALSE)
+				target->set_light_dependency(origin_chunk_x, origin_chunk_z);
+			/* An immediate submission can finish before the scheduler sees
+			 * its queue entry. Its seeds are already included in the baseline. */
+			if (existing && target->light_buffer_is_valid()
+				&& target->light_version == promoted.content_version
+				&& target->computed_light_input_version
+					== promoted.light_input_version)
+			{
+				promoted.incremental_light_seeds.clear();
+				promoted.incremental_additive_light = FT_FALSE;
+				promoted.incremental_removal_light = FT_FALSE;
+				promoted.requires_full_light = false;
+				promoted.single_cell_baseline_input_version =
+					world_light_version::INVALID_VERSION;
+			}
+			/* A consecutive chain of edits to the same cell may alternate
+			 * between its original block and new states. Keep the original
+			 * publication as the base until another lighting input changes. */
+			const bool local_edit = incremental_external_source == FT_FALSE
+				&& origin_chunk_x == chunk_x && origin_chunk_z == chunk_z;
+			const bool follows_same_border_source =
+				existing && incremental_external_source != FT_FALSE
+				&& target->waits_for_neighbor_light
+				&& target->light_dependency_chunk_x == origin_chunk_x
+				&& target->light_dependency_chunk_z == origin_chunk_z
+				&& promoted.origin_chunk_x == origin_chunk_x
+				&& promoted.origin_chunk_z == origin_chunk_z;
+			const bool consecutive_content = local_edit
+				? !target->waits_for_neighbor_light
+					&& world_light_version::next(promoted.content_version)
+						== target->content_version
+					&& promoted.voxel_revision + 1U == target->voxel_revision
+				: follows_same_border_source
+					&& promoted.content_version == target->content_version
+					&& promoted.voxel_revision == target->voxel_revision;
+			const bool first_edit_from_baseline =
+				(local_edit ? world_light_version::next(target->light_version)
+					: target->light_version)
+					== promoted.content_version
+				&& world_light_version::next(target->computed_light_input_version)
+					== promoted.light_input_version;
+			const bool extends_coalesced_chain =
+				promoted.single_cell_baseline_input_version
+					!= world_light_version::INVALID_VERSION
+				&& promoted.single_cell_baseline_input_version
+					== target->computed_light_input_version;
+			if (existing && interactive && promoted.interactive
+				&& !promoted.requires_full_light
+				&& promoted.incremental_light_seeds.size() == 1U
+				&& target->light_buffer_is_valid() && consecutive_content
+				&& (first_edit_from_baseline || extends_coalesced_chain)
+				&& world_light_version::next(promoted.light_input_version)
+					== target->light_input_version)
+			{
+				const WorldGenerationPipeline::IncrementalLightSeed &prior =
+					promoted.incremental_light_seeds.front();
+				coalesced_single_cell_edit =
+					prior.external_source == incremental_external_source
+					&& prior.local_x == incremental_local_x
+					&& prior.local_y == incremental_local_y
+					&& prior.local_z == incremental_local_z
+					&& prior.new_block_id == incremental_old_block_id
+					&& prior.old_source_light == incremental_old_source_light
+					&& (prior.old_block_id == incremental_new_block_id
+						|| prior.old_block_id == prior.new_block_id);
+				if (coalesced_single_cell_edit)
+				{
+					reverted_to_light_baseline =
+						prior.old_block_id == incremental_new_block_id;
+					promoted.single_cell_baseline_input_version =
+						target->computed_light_input_version;
+				}
+			}
+			if (!coalesced_single_cell_edit
+				&& (promoted.voxel_revision != target->voxel_revision
+					|| promoted.content_version != target->content_version
+					|| promoted.light_input_version != target->light_input_version))
+				promoted.single_cell_baseline_input_version =
+					world_light_version::INVALID_VERSION;
 			promoted.voxel_revision = target->voxel_revision;
 			promoted.content_version = target->content_version;
 			promoted.light_input_version = target->light_input_version;
@@ -1628,8 +1769,8 @@ void WorldChunkStreamer::prioritize_chunk_remesh_from_origin(int32_t chunk_x,
 	promoted.geometry_only = geometry_only
 		&& incremental_additive_light == FT_FALSE
 		&& incremental_removal_light == FT_FALSE;
-	if (incremental_additive_light != FT_FALSE
-		|| incremental_removal_light != FT_FALSE)
+	if (!promoted.requires_full_light && (incremental_additive_light != FT_FALSE
+		|| incremental_removal_light != FT_FALSE))
 	{
 		WorldGenerationPipeline::IncrementalLightSeed seed;
 		bool duplicate = false;
@@ -1646,12 +1787,15 @@ void WorldChunkStreamer::prioritize_chunk_remesh_from_origin(int32_t chunk_x,
 		for (const WorldGenerationPipeline::IncrementalLightSeed &existing_seed
 			: promoted.incremental_light_seeds)
 		{
+			/* A block edit and incoming light are distinct inputs, even when
+			 * both enter the solver at the same boundary cell. */
+			if (existing_seed.external_source != seed.external_source)
+				continue ;
 			if (existing_seed.local_x == seed.local_x
 				&& existing_seed.local_y == seed.local_y
 				&& existing_seed.local_z == seed.local_z
 				&& (existing_seed.additive != seed.additive
 					|| existing_seed.removal != seed.removal
-					|| existing_seed.external_source != seed.external_source
 					|| existing_seed.old_block_id != seed.old_block_id
 					|| existing_seed.new_block_id != seed.new_block_id
 					|| existing_seed.old_source_light != seed.old_source_light))
@@ -1661,7 +1805,6 @@ void WorldChunkStreamer::prioritize_chunk_remesh_from_origin(int32_t chunk_x,
 			}
 			if (existing_seed.additive == seed.additive
 				&& existing_seed.removal == seed.removal
-				&& existing_seed.external_source == seed.external_source
 				&& existing_seed.local_x == seed.local_x
 				&& existing_seed.local_y == seed.local_y
 				&& existing_seed.local_z == seed.local_z
@@ -1673,7 +1816,17 @@ void WorldChunkStreamer::prioritize_chunk_remesh_from_origin(int32_t chunk_x,
 				break ;
 			}
 		}
-		if (conflicting_cell)
+		if (coalesced_single_cell_edit)
+		{
+			if (reverted_to_light_baseline)
+			{
+				seed.old_block_id = seed.new_block_id;
+				seed.additive = FT_FALSE;
+				seed.removal = FT_FALSE;
+			}
+			promoted.incremental_light_seeds.front() = seed;
+		}
+		else if (conflicting_cell)
 		{
 			/* A seed describes a transition from the captured old state to
 			 * the final state.  Two different transitions for one cell cannot
@@ -1683,6 +1836,7 @@ void WorldChunkStreamer::prioritize_chunk_remesh_from_origin(int32_t chunk_x,
 			promoted.incremental_light_seeds.clear();
 			promoted.incremental_additive_light = FT_FALSE;
 			promoted.incremental_removal_light = FT_FALSE;
+			promoted.requires_full_light = true;
 		}
 		else if (!duplicate)
 		{
@@ -1696,6 +1850,7 @@ void WorldChunkStreamer::prioritize_chunk_remesh_from_origin(int32_t chunk_x,
 				promoted.incremental_light_seeds.clear();
 				promoted.incremental_additive_light = FT_FALSE;
 				promoted.incremental_removal_light = FT_FALSE;
+				promoted.requires_full_light = true;
 			}
 		}
 		if (!promoted.incremental_light_seeds.empty())
@@ -1728,7 +1883,7 @@ void WorldChunkStreamer::prioritize_chunk_remesh_from_origin(int32_t chunk_x,
 		&& insert_position->interactive
 		&& insert_position->origin_distance <= promoted.origin_distance)
 		++insert_position;
-	this->priority_remeshes_.insert(insert_position, promoted);
+	this->priority_remeshes_.insert(insert_position, std::move(promoted));
 	if (this->priority_remeshes_.size() > this->remesh_queue_peak_)
 		this->remesh_queue_peak_ = this->priority_remeshes_.size();
 	this->priority_remesh_pending_ = !this->priority_remeshes_.empty();
@@ -1874,7 +2029,6 @@ void WorldChunkStreamer::enqueue_background_remesh(int32_t chunk_x,
 void WorldChunkStreamer::promote_starved_remeshes() noexcept
 {
 	static const uint64_t STARVATION_FRAME_LIMIT = 120U;
-	bool promoted_any = false;
 
 	for (RemeshPriority &priority : this->priority_remeshes_)
 	{
@@ -1883,31 +2037,19 @@ void WorldChunkStreamer::promote_starved_remeshes() noexcept
 			|| this->stream_frame_ - priority.queued_frame
 			< STARVATION_FRAME_LIMIT)
 			continue ;
+		WorldChunk *chunk = this->world_.find_chunk_mutable(
+			priority.chunk_x, priority.chunk_z);
+		if (chunk != nullptr && (!chunk->mesh_dirty
+			|| chunk->pending_mesh_request_id != 0U))
+			continue ;
 		priority.interactive = true;
 		priority.origin_chunk_x = this->world_.center_chunk_x;
 		priority.origin_chunk_z = this->world_.center_chunk_z;
 		priority.origin_distance = static_cast<uint32_t>(
 			std::abs(priority.chunk_x - this->world_.center_chunk_x)
 			+ std::abs(priority.chunk_z - this->world_.center_chunk_z));
-		{
-			WorldChunk *chunk = this->world_.find_chunk_mutable(
-				priority.chunk_x, priority.chunk_z);
-			if (chunk != nullptr && chunk->initialized)
-			{
-				priority.voxel_revision = chunk->voxel_revision;
-				priority.content_version = chunk->content_version;
-				priority.light_input_version = chunk->light_input_version;
-			}
-		}
 		this->remesh_starvation_promotions_ += 1U;
-		promoted_any = true;
 	}
-	/* A promoted entry is now allowed to use the interactive lane.  Release
-	 * the two bounded remesh slots from disposable background slices so stale
-	 * work cannot keep the promoted entry waiting.  Generation requests retain
-	 * their separate reservation and are not cancelled here. */
-	if (promoted_any)
-		this->generation_pipeline_.cancel_active_background_remeshes();
 	return ;
 }
 

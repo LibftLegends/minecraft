@@ -210,6 +210,14 @@ bool ApplicationWindow::was_mouse_clicked() const
 	return (false);
 }
 
+uint32_t ApplicationWindow::primary_press_count() const noexcept
+{
+	if (this->gpu_window)
+		return (this->gpu_window->primary_press_count());
+	return (ft_dumb_control_was_pressed(FT_DUMB_CONTROL_MOUSE_PRIMARY) == FT_TRUE
+		? 1U : 0U);
+}
+
 void ApplicationWindow::set_cursor_visible(bool visible)
 {
 	if (this->gpu_window)

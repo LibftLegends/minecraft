@@ -5,6 +5,7 @@ SRC = \
     src/app/ApplicationPhaseController.cpp \
     src/app/GameSession.cpp \
     src/app/GameSessionPersistence.cpp \
+    src/app/GameSessionSaveWorker.cpp \
     src/app/GameSessionEntityState.cpp \
     src/transactions/GameTransactionJournal.cpp \
     src/transactions/WorldItemPickupTransaction.cpp \

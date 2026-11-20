@@ -1000,8 +1000,9 @@ namespace
 				chunk_z, frame, edit_id);
 			if (error_code != FT_ERR_SUCCESS)
 				return (error_code);
-			if (chunk->light_buffer_is_valid() && chunk->light_is_current()
-				&& light_neighborhood_is_current(world, chunk_x, chunk_z))
+			const bool light_current =
+				light_neighborhood_is_current(world, chunk_x, chunk_z);
+			if (light_current)
 			{
 				error_code = harness.mark_light_ready(edit_id, frame,
 					elapsed_milliseconds(started));
@@ -1009,7 +1010,7 @@ namespace
 					return (error_code);
 			}
 			if (chunk->mesh_revision > before_mesh
-				&& chunk->light_buffer_is_valid() && chunk->light_is_current()
+				&& light_current
 				&& chunk->voxel_revision >= before_voxel)
 			{
 				const World::StreamDiagnostics after_diagnostics =
@@ -1576,10 +1577,15 @@ namespace
 		if (accepted_count == 0U)
 			return (FT_ERR_FULL);
 		/* Make the final intended state explicit after the burst. */
-		error_code = world.delete_block_at(6, world_y, 6);
-		if (error_code != FT_ERR_SUCCESS
-			&& !is_expected_backpressure_error(error_code))
-			return (error_code);
+		if (!world.block_id_at(6, world_y, 6, &existing_block_id))
+			return (FT_ERR_NOT_FOUND);
+		if (existing_block_id != GAME_VOXEL_AIR_BLOCK)
+		{
+			error_code = world.delete_block_at(6, world_y, 6);
+			if (error_code != FT_ERR_SUCCESS
+				&& !is_expected_backpressure_error(error_code))
+				return (error_code);
+		}
 
 		const uint64_t start_frame = frame;
 		while (frame - start_frame <= LIGHT_HARNESS_MAX_EDIT_FRAMES * 4U)
@@ -1599,17 +1605,16 @@ namespace
 			chunk = world.find_chunk(0, 0);
 			if (chunk == nullptr || !chunk->initialized)
 				return (FT_ERR_NOT_FOUND);
+			diagnostics = world.stream_diagnostics();
 			if (chunk->light_buffer_is_valid() && chunk->light_is_current()
 				&& chunk->mesh_revision > before_mesh
 				&& chunk->pending_mesh_request_id == 0U
+				&& diagnostics.remesh_priority_queue_depth == 0U
+				&& diagnostics.interactive_remesh_queue_depth == 0U
 				&& world.block_id_at(6, world_y, 6,
 					&existing_block_id)
 				&& existing_block_id == GAME_VOXEL_AIR_BLOCK)
 			{
-				diagnostics = world.stream_diagnostics();
-				if (diagnostics.remesh_priority_queue_depth != 0U
-					|| diagnostics.interactive_remesh_queue_depth != 0U)
-					return (FT_ERR_INTERNAL);
 				error_code = compare_light_to_oracle(world, 0, 0,
 					"queue-pressure final state");
 				if (error_code != FT_ERR_SUCCESS)
@@ -1774,7 +1779,25 @@ namespace
 			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		}
 		if (!mesh_marked[0] || !mesh_marked[1])
+		{
+			for (int32_t chunk_x = 0; chunk_x < 2; ++chunk_x)
+			{
+				const WorldChunk *chunk = world.find_chunk(chunk_x, 0);
+				if (chunk == nullptr)
+					continue ;
+				std::fprintf(stderr,
+					"lighting-harness: paired border timeout chunk=(%d,0) "
+					"pending=" FT_UINT64_DECIMAL_FORMAT " voxel="
+					FT_UINT64_DECIMAL_FORMAT " mesh=" FT_UINT64_DECIMAL_FORMAT
+					" input=%u computed=%u waiting=%d dependency=(%d,%d)\n",
+					chunk_x, chunk->pending_mesh_request_id, chunk->voxel_revision,
+					chunk->mesh_revision, static_cast<unsigned int>(chunk->light_input_version),
+					static_cast<unsigned int>(chunk->computed_light_input_version),
+					chunk->waits_for_neighbor_light ? 1 : 0,
+					chunk->light_dependency_chunk_x, chunk->light_dependency_chunk_z);
+			}
 			return (FT_ERR_TIMEOUT);
+		}
 		/* Restore the baseline through the normal edit path.  These deletes are
 		 * intentionally after the paired publication so the report contains the
 		 * simultaneous case independently of cleanup latency. */
@@ -2185,6 +2208,22 @@ bool LightingObservationHarness::revision_is_older(uint64_t current,
 		&& static_cast<int64_t>(current - previous) < 0);
 }
 
+bool LightingObservationHarness::is_current_geometry_preview(
+	const LightingFrameObservation &previous,
+	const LightingFrameObservation &current) noexcept
+{
+	return (previous.light_buffer_valid && current.interactive_mesh
+		&& current.mesh_voxel_revision == current.voxel_revision
+		&& current.mesh_dirty && current.remesh_pending
+		&& current.pending_mesh_request_voxel_revision == current.voxel_revision
+		&& current.pending_mesh_request_content_version == current.content_version
+		&& current.pending_mesh_request_light_input_version
+			== current.light_input_version
+		&& current.light_version == previous.light_version
+		&& current.computed_light_input_version
+			== previous.computed_light_input_version);
+}
+
 int32_t LightingObservationHarness::publication_transition_error(
 	const LightingFrameObservation &previous,
 	const LightingFrameObservation &current) noexcept
@@ -2201,8 +2240,9 @@ int32_t LightingObservationHarness::publication_transition_error(
 		&& current.nonzero_light_vertices == 0U)
 		return (FT_ERR_INTERNAL);
 	if (current.mesh_revision > previous.mesh_revision
-		&& (!current.light_buffer_valid || !current.light_current
-			|| !current.light_ready_for_render))
+		&& (!current.light_buffer_valid || !current.light_ready_for_render
+			|| (!current.light_current
+				&& !is_current_geometry_preview(previous, current))))
 		return (FT_ERR_INTERNAL);
 	return (FT_ERR_SUCCESS);
 }
@@ -2238,6 +2278,8 @@ int32_t LightingObservationHarness::observe(const World &world,
 	observation.computed_light_input_version =
 		chunk->computed_light_input_version;
 	observation.mesh_revision = chunk->mesh_revision;
+	observation.mesh_voxel_revision =
+		chunk->last_mesh_publication_voxel_revision;
 	observation.pending_mesh_request_id = chunk->pending_mesh_request_id;
 	observation.pending_mesh_request_voxel_revision =
 		chunk->pending_mesh_request_voxel_revision;
@@ -2251,6 +2293,8 @@ int32_t LightingObservationHarness::observe(const World &world,
 	observation.light_current = chunk->light_is_current();
 	observation.mesh_dirty = chunk->mesh_dirty;
 	observation.remesh_pending = chunk->pending_mesh_request_id != 0U;
+	observation.interactive_mesh =
+		chunk->last_mesh_publication_interactive != FT_FALSE;
 	diagnostics = world.stream_diagnostics();
 	/* The public diagnostics expose the priority queue depth and historical
 	 * queue peak.  Keep those names distinct so a report cannot mistake a peak
@@ -2649,14 +2693,12 @@ int32_t LightingObservationHarness::validate_publication_invariants() const
 				current.light_ready_for_render ? 1 : 0);
 			return (FT_ERR_INTERNAL);
 		}
-		/* This is the fake GPU adapter's publication rule: a newer mesh
-		 * identity may not replace the previous one until the matching
-		 * light payload is valid, current, and explicitly render-ready.
-		 * Keeping an older valid mesh while work is pending is allowed;
-		 * publishing a newer stale/zero-light mesh is not. */
+		/* A preview can advance the geometry while the previously published
+		 * light field stays unchanged and its matching solve is pending. */
 		if (current.mesh_revision > previous.mesh_revision
-			&& (!current.light_buffer_valid || !current.light_current
-				|| !current.light_ready_for_render))
+			&& (!current.light_buffer_valid || !current.light_ready_for_render
+				|| (!current.light_current
+					&& !is_current_geometry_preview(previous, current))))
 		{
 			std::fprintf(stderr,
 				"lighting-harness: fake-gpu publication failed frame=" FT_UINT64_DECIMAL_FORMAT " "

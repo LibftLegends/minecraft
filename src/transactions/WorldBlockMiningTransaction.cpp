@@ -1,9 +1,13 @@
 #include "WorldBlockMiningTransaction.hpp"
+#include "../../src/diagnostics/RuntimeAnalytics.hpp"
 #include "../../Libft/Modules/Game/game_inventory.hpp"
 #include "../../Libft/Modules/Game/game_character.hpp"
 
 #include "../coordinates/WorldCoordinates.hpp"
 #include "../../Libft/Modules/Errno/errno.hpp"
+#include "../../Libft/Modules/Basic/limits.hpp"
+#include <chrono>
+#include <cstdio>
 #include <vector>
 #include <algorithm>
 #include <climits>
@@ -45,11 +49,40 @@ namespace
 			| (static_cast<uint64_t>(read_u32(bytes, offset + 4U)) << 32U));
 	}
 	static int32_t checkpoint(const char *path,
-		const GameSessionSnapshotWriter *writer) noexcept
+		const GameSessionSnapshotWriter *writer,
+		const char *phase = "recovery", bool defer_write = false,
+		uint64_t prepare_request_id = 0U) noexcept
 	{
 		if (path == nullptr || path[0] == '\0' || writer == nullptr)
 			return (FT_ERR_INVALID_ARGUMENT);
-		return (writer->save());
+#if defined(LIBFT_ENABLE_ANALYTICS)
+		const auto started = std::chrono::steady_clock::now();
+		const int32_t scope_error = RuntimeAnalytics::begin_scope(
+			RuntimeAnalyticsScope::MINING_CHECKPOINT);
+#else
+		(void)phase;
+#endif
+		int32_t result;
+		if (prepare_request_id != 0U)
+			result = writer->save_mining_prepare(prepare_request_id);
+		else
+			result = defer_write ? writer->save_deferred() : writer->save();
+#if defined(LIBFT_ENABLE_ANALYTICS)
+		if (scope_error == FT_ERR_SUCCESS)
+		{
+			const int32_t end_error = RuntimeAnalytics::end_scope();
+			if (end_error != FT_ERR_SUCCESS)
+				std::fprintf(stderr, "Analytics: mining checkpoint scope end failed (%d)\n",
+					end_error);
+		}
+		const uint64_t elapsed_us = static_cast<uint64_t>(
+			std::chrono::duration_cast<std::chrono::microseconds>(
+				std::chrono::steady_clock::now() - started).count());
+		if (elapsed_us >= 2000U)
+			std::fprintf(stderr, "[Analytics][Mining] checkpoint=%s duration_us="
+				FT_UINT64_DECIMAL_FORMAT " status=%d\n", phase, elapsed_us, result);
+#endif
+		return (result);
 	}
 	static int32_t encode(uint64_t request_id, uint64_t owner_id,
 		uint64_t tick, int32_t x, int32_t y, int32_t z, uint32_t original,
@@ -204,7 +237,8 @@ namespace
 	}
 	static int32_t apply(const GameTransactionJournal::Record &record,
 		World &world, MinecraftItemCatalog &catalog, WorldItemStore &items,
-		game_inventory *inventory, game_character *character)
+		game_inventory *inventory, game_character *character,
+		WorldTerrainChunkStore::PreparedEdit *terrain = nullptr)
 	{
 		const int32_t x = static_cast<int32_t>(read_u32(record.payload, 16U));
 		const int32_t y = static_cast<int32_t>(read_u32(record.payload, 20U));
@@ -244,7 +278,7 @@ namespace
 			if (chunk == nullptr)
 				return (FT_ERR_NOT_FOUND);
 			const int32_t result = world.replace_block_state_at(x, y, z,
-				original, replacement, chunk->voxel_revision);
+				original, replacement, chunk->voxel_revision, terrain);
 			if (result != FT_ERR_SUCCESS)
 				return (result);
 			world_changed = true;
@@ -426,9 +460,11 @@ int32_t WorldBlockMiningTransaction::execute(const char *snapshot_path,
 	uint32_t drop_count, const GameSessionSnapshotWriter *snapshot_writer,
 	game_inventory *inventory, int32_t tool_slot, int32_t tool_item_id,
 	uint64_t tool_instance_id, uint64_t expected_inventory_revision,
-	game_character *character)
+	game_character *character, uint64_t *pending_request_id)
 	noexcept
 {
+	if (pending_request_id != nullptr && *pending_request_id != 0U)
+		return (FT_ERR_THREAD_BUSY);
 	std::vector<uint8_t> payload;
 	std::vector<uint8_t> journal_before;
 	GameTransactionJournal::Record existing = {};
@@ -463,7 +499,8 @@ int32_t WorldBlockMiningTransaction::execute(const char *snapshot_path,
 		if (result != FT_ERR_SUCCESS)
 			return (result);
 	}
-	result = checkpoint(snapshot_path, snapshot_writer);
+	result = checkpoint(snapshot_path, snapshot_writer, "prepare", false,
+		pending_request_id != nullptr ? request_id : 0U);
 	if (result != FT_ERR_SUCCESS)
 	{
 		const int32_t rollback_result = journal.deserialize(
@@ -471,30 +508,47 @@ int32_t WorldBlockMiningTransaction::execute(const char *snapshot_path,
 		return (rollback_result == FT_ERR_SUCCESS
 			? result : FT_ERR_INVALID_STATE);
 	}
-	GameTransactionJournal::Record prepared_record = {};
-	prepared_record.sequence = sequence;
-	prepared_record.scope_id = MINING_SCOPE;
-	prepared_record.request_id = request_id;
-	prepared_record.transaction_type = MINING_TYPE;
-	prepared_record.state = GameTransactionJournal::PREPARED;
-	try
+	if (pending_request_id != nullptr)
 	{
-		prepared_record.payload = payload;
+		*pending_request_id = request_id;
+		return (FT_ERR_SUCCESS);
 	}
-	catch (...)
+	return (complete_prepared(snapshot_path, world, catalog, items, journal,
+		request_id, snapshot_writer, inventory, character, false));
+}
+
+int32_t WorldBlockMiningTransaction::complete_prepared(const char *snapshot_path,
+	World &world, MinecraftItemCatalog &catalog, WorldItemStore &items,
+	GameTransactionJournal &journal, uint64_t request_id,
+	const GameSessionSnapshotWriter *snapshot_writer, game_inventory *inventory,
+	game_character *character, bool check_target,
+	WorldTerrainChunkStore::PreparedEdit *terrain) noexcept
+{
+	GameTransactionJournal::Record record = {};
+	int32_t result = journal.find(MINING_SCOPE, request_id, &record);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	if (record.state != GameTransactionJournal::PREPARED
+		|| validate(record) != FT_ERR_SUCCESS)
+		return (FT_ERR_INVALID_STATE);
+	if (check_target)
 	{
-		const int32_t journal_rollback_result = journal.deserialize(
-			journal_before.data(), journal_before.size());
-		const int32_t checkpoint_rollback_result =
-			journal_rollback_result == FT_ERR_SUCCESS
-			? checkpoint(snapshot_path, snapshot_writer)
-			: journal_rollback_result;
-		return (checkpoint_rollback_result == FT_ERR_SUCCESS
-			? FT_ERR_NO_MEMORY : FT_ERR_INVALID_STATE);
+		/* A live edit should not award a second drop if another authority
+		 * changed the target while the save worker was finishing. Recovery
+		 * can separately reconcile an already-applied terrain write. */
+		uint32_t current = 0U;
+		if (!world.block_id_at(static_cast<int32_t>(read_u32(record.payload, 16U)),
+				static_cast<int32_t>(read_u32(record.payload, 20U)),
+				static_cast<int32_t>(read_u32(record.payload, 24U)), &current)
+			|| current != read_u32(record.payload, 28U))
+		{
+			result = journal.mark_aborted(MINING_SCOPE, request_id);
+			if (result == FT_ERR_SUCCESS)
+				result = checkpoint(snapshot_path, snapshot_writer, "abort", true);
+			return (result);
+		}
 	}
-	result = apply(existing.state == GameTransactionJournal::PREPARED
-		? existing : prepared_record, world, catalog, items, inventory,
-		character);
+	result = apply(record, world, catalog, items, inventory, character, terrain);
 	if (result != FT_ERR_SUCCESS)
 	{
 		/* Keep the prepared intent durable. If a participant could not roll back,
@@ -506,8 +560,26 @@ int32_t WorldBlockMiningTransaction::execute(const char *snapshot_path,
 	if (result == FT_ERR_SUCCESS)
 		result = journal.prune_terminal_scope(MINING_SCOPE, request_id);
 	if (result == FT_ERR_SUCCESS)
-		result = checkpoint(snapshot_path, snapshot_writer);
+		result = checkpoint(snapshot_path, snapshot_writer, "commit", true);
 	return (result);
+}
+
+int32_t WorldBlockMiningTransaction::capture_prepared_terrain(const World &world,
+	const GameTransactionJournal &journal, uint64_t request_id,
+	std::unique_ptr<WorldTerrainChunkStore::PreparedEdit> &terrain) noexcept
+{
+	GameTransactionJournal::Record record = {};
+	const int32_t result = journal.find(MINING_SCOPE, request_id, &record);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	if (record.state != GameTransactionJournal::PREPARED || validate(record) != FT_ERR_SUCCESS)
+		return (FT_ERR_INVALID_STATE);
+	return (world.capture_block_state_write(
+		static_cast<int32_t>(read_u32(record.payload, 16U)),
+		static_cast<int32_t>(read_u32(record.payload, 20U)),
+		static_cast<int32_t>(read_u32(record.payload, 24U)),
+		read_u32(record.payload, 28U), read_u32(record.payload, 32U),
+		read_u64(record.payload, 36U), terrain));
 }
 
 int32_t WorldBlockMiningTransaction::recover_pending(const char *snapshot_path,

@@ -747,7 +747,7 @@ int32_t RegenerationCardSession::restore_snapshot(const uint8_t *bytes,
 					|| !reader.u32(&cached.option_id) || cached.option_id == 0U
 					|| !reader.u64(&cached.authoritative_epoch)
 					|| cached.authoritative_epoch == 0U
-					|| !read_action_result(reader, &cached.result)
+					|| !read_action_result(reader, &cached.result, true)
 					|| cached.result.request_id != request_id
 					|| cached.result.command_sequence == 0U
 					|| cached.result.command_sequence >= next_command_sequence

@@ -33,6 +33,7 @@ class WorldChunkGenerationWorker
 		const std::vector<WorldGenerationPipeline::GenerationFeaturePlan>
 			&feature_plans,
 		const WorldGenerationPipeline::WorldChunkSnapshot *source_snapshot,
+		const std::string &terrain_chunk_path, bool &loaded_from_terrain_store,
 		uint64_t *generation_duration_nanoseconds,
 		uint64_t *mesh_duration_nanoseconds) noexcept;
 	static std::unique_ptr<WorldGenerationPipeline::Result> finish_generation_result(std::unique_ptr<WorldGenerationPipeline::Result> result,

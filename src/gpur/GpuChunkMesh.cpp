@@ -60,11 +60,13 @@ void GpuChunkMesh::upload_geometry(const chunk_mesh &mesh,
 		vertex_bytes > 0U
 			? static_cast<const void *>(mesh.vertices.begin()) : nullptr,
 		GL_STATIC_DRAW);
+	glBindVertexArray(_solid_vao);
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _solid_ebo);
 	glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(solid_bytes),
 		solid_bytes > 0U
 			? static_cast<const void *>(solid_indices.begin()) : nullptr,
 		GL_STATIC_DRAW);
+	glBindVertexArray(_water_vao);
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _water_ebo);
 	glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(water_bytes),
 		water_bytes > 0U

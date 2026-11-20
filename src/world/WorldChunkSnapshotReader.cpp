@@ -1,32 +1,5 @@
 #include "../../src/world/WorldChunkSnapshotReader.hpp"
 
-namespace
-{
-	static void apply_snapshot_sky_fallback(
-		const WorldGenerationPipeline::WorldChunkSnapshot &snapshot,
-		int32_t world_x, int32_t world_y, int32_t world_z,
-		uint8_t *packed_light) noexcept
-	{
-		if (packed_light == nullptr || *packed_light != 0U
-			|| world_y < 0 || world_y >= GAME_VOXEL_CHUNK_HEIGHT)
-			return ;
-		for (int32_t y = world_y; y < GAME_VOXEL_CHUNK_HEIGHT; ++y)
-		{
-			uint32_t block_id = GAME_VOXEL_AIR_BLOCK;
-			const voxel_block_metadata *metadata;
-			if (WorldChunkSnapshotReader::lookup_snapshot_block(
-				const_cast<WorldGenerationPipeline::WorldChunkSnapshot *>(&snapshot),
-				world_x, y, world_z, &block_id) != FT_ERR_SUCCESS)
-				return ;
-			metadata = &voxel_get_block_metadata(block_id);
-			if (metadata->light_attenuation >= 15U
-				|| metadata->transparent == FT_FALSE)
-				return ;
-		}
-		*packed_light = voxel_light_pack(15U, 0U);
-	}
-}
-
 WorldChunkSnapshotReader::WorldChunkSnapshotReader()
 {
 }
@@ -196,8 +169,6 @@ int32_t WorldChunkSnapshotReader::lookup_snapshot_light(void *user_data,
 		if (snapshot->existing_light.size() <= index)
 			return (FT_ERR_INVALID_OPERATION);
 		*packed_light = snapshot->existing_light[index];
-		apply_snapshot_sky_fallback(*snapshot, world_x, world_y, world_z,
-			packed_light);
 		return (FT_ERR_SUCCESS);
 	}
 	const std::size_t offset_index = static_cast<std::size_t>(halo_local_z)
@@ -211,8 +182,6 @@ int32_t WorldChunkSnapshotReader::lookup_snapshot_light(void *user_data,
 	if (snapshot->lighting_existing_light.size() <= index)
 		return (FT_ERR_INVALID_OPERATION);
 	*packed_light = snapshot->lighting_existing_light[index];
-	apply_snapshot_sky_fallback(*snapshot, world_x, world_y, world_z,
-		packed_light);
 	return (FT_ERR_SUCCESS);
 }
 
