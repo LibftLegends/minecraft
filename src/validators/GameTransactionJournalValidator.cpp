@@ -27,7 +27,7 @@ GameTransactionJournalValidator &GameTransactionJournalValidator::operator=(
 
 int GameTransactionJournalValidator::validate() const
 {
-	const char *snapshot_path = "game_transaction_journal_validator.tmp";
+	const char *snapshot_path = "build_logs/game_transaction_journal_validator.tmp";
 	const uint8_t first_payload[] = {0x11U, 0x22U, 0x33U};
 	const uint8_t changed_payload[] = {0x11U, 0x22U, 0x34U};
 	GameTransactionJournal journal;

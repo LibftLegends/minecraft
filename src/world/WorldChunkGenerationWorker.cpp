@@ -1303,51 +1303,240 @@ namespace
 		return (FT_ERR_SUCCESS);
 	}
 
-	int32_t build_preview_mesh_light(
-		const WorldGenerationPipeline::WorldChunkSnapshot &snapshot,
-		voxel_light_chunk &mesh_light) noexcept
+	int32_t initialize_light_from_snapshot(voxel_light_chunk &light,
+		const std::vector<uint8_t> &samples) noexcept
 	{
-		int32_t error_code;
-		std::size_t index;
-
-		if (snapshot.existing_light.size() < static_cast<std::size_t>(
+		if (samples.size() < static_cast<std::size_t>(
 			GAME_VOXEL_CHUNK_WIDTH) * GAME_VOXEL_CHUNK_HEIGHT
 			* GAME_VOXEL_CHUNK_DEPTH)
 			return (FT_ERR_INVALID_ARGUMENT);
-		error_code = mesh_light.initialize();
+		int32_t error_code = light.initialize();
 		if (error_code != FT_ERR_SUCCESS)
 			return (error_code);
-		index = 0U;
+		/* Most sections are entirely dark or open sky. Start each section
+		 * with one of its own values and only write the exceptions. */
+		uint8_t section_values[GAME_VOXEL_CHUNK_SECTION_COUNT];
+		for (uint8_t section = 0U; section < GAME_VOXEL_CHUNK_SECTION_COUNT;
+			++section)
+		{
+			const int32_t y = section * GAME_VOXEL_SECTION_EDGE;
+			section_values[section] = samples[WorldChunkReadState::light_offset(0, y, 0)];
+			error_code = light.get_section(section).fill(section_values[section]);
+			if (error_code != FT_ERR_SUCCESS)
+				return (error_code);
+		}
+		std::size_t index = 0U;
 		for (int32_t local_z = 0;
 			local_z < GAME_VOXEL_CHUNK_DEPTH; ++local_z)
 		{
 			for (int32_t local_y = 0;
 				local_y < GAME_VOXEL_CHUNK_HEIGHT; ++local_y)
 			{
+				const uint8_t section_value =
+					section_values[local_y / GAME_VOXEL_SECTION_EDGE];
 				for (int32_t local_x = 0;
-					local_x < GAME_VOXEL_CHUNK_WIDTH; ++local_x)
+					local_x < GAME_VOXEL_CHUNK_WIDTH; ++local_x, ++index)
 				{
-					const uint8_t light_value = snapshot.existing_light[index];
-					error_code = mesh_light.set(local_x, local_y, local_z,
-						light_value);
+					if (samples[index] == section_value)
+						continue ;
+					error_code = light.set(local_x, local_y, local_z, samples[index]);
 					if (error_code != FT_ERR_SUCCESS)
 						return (error_code);
-					index += 1U;
 				}
 			}
 		}
 		return (FT_ERR_SUCCESS);
 	}
 
+	chunk_mesh_bounds occupied_section_bounds(const game_voxel_chunk &chunk) noexcept
+	{
+		chunk_mesh_bounds bounds;
+		chunk_mesh_bounds_set_full(bounds);
+		/* Only owning voxels need scanning. Face visibility and light still
+		 * sample across these bounds, including into adjacent chunks. */
+		int32_t first_section = GAME_VOXEL_CHUNK_SECTION_COUNT;
+		int32_t last_section = 0;
+		for (uint8_t section_index = 0; section_index < GAME_VOXEL_CHUNK_SECTION_COUNT;
+			++section_index)
+		{
+			const auto &section = chunk.get_section(section_index);
+			if (section.is_uniform() != FT_FALSE
+				&& section.get_uniform_block() == GAME_VOXEL_AIR_BLOCK)
+				continue ;
+			first_section = std::min(first_section, static_cast<int32_t>(section_index));
+			last_section = section_index;
+		}
+		if (first_section == GAME_VOXEL_CHUNK_SECTION_COUNT)
+			bounds.maximum_y = 1;
+		else
+		{
+			bounds.minimum_y = first_section * GAME_VOXEL_SECTION_EDGE;
+			bounds.maximum_y = (last_section + 1) * GAME_VOXEL_SECTION_EDGE;
+		}
+		return (bounds);
+	}
+
+	int32_t build_snapshot_mesh(chunk_mesh &mesh, const game_voxel_chunk &chunk,
+		const WorldGenerationPipeline::Request &request,
+		const voxel_light_chunk &light, voxel_light_packed_lookup_fn lookup_light,
+		void *light_context) noexcept
+	{
+		chunk_mesh_bounds bounds = occupied_section_bounds(chunk);
+		const auto &blocks = request.snapshot->blocks;
+		if (blocks.size() == WorldChunkReadState::LIGHT_SAMPLE_COUNT)
+		{
+			/* Avoid scanning empty layers at the ends of occupied sections. */
+			const auto layer_has_block = [&blocks](int32_t y) noexcept
+			{
+				for (int32_t z = 0; z < GAME_VOXEL_CHUNK_DEPTH; ++z)
+				{
+					const uint32_t *row = blocks.data() + WorldChunkReadState::light_offset(0, y, z);
+					if (std::any_of(row, row + GAME_VOXEL_CHUNK_WIDTH,
+						[](uint32_t block) { return (block != GAME_VOXEL_AIR_BLOCK); }))
+						return (true);
+				}
+				return (false);
+			};
+			while (bounds.minimum_y + 1 < bounds.maximum_y && !layer_has_block(bounds.minimum_y))
+				++bounds.minimum_y;
+			while (bounds.maximum_y > bounds.minimum_y + 1 && !layer_has_block(bounds.maximum_y - 1))
+				--bounds.maximum_y;
+		}
+		return (chunk_mesh_generate_from_chunk_with_neighbors_and_light_lookup_in_bounds(
+			mesh, chunk, request.chunk_x, request.chunk_z,
+			&WorldChunkSnapshotReader::lookup_snapshot_mesh_block, request.snapshot.get(), &light,
+			lookup_light, light_context, bounds));
+	}
+
+	int32_t build_preview_mesh_light(
+		WorldGenerationPipeline::WorldChunkSnapshot &snapshot,
+		const std::vector<WorldGenerationPipeline::IncrementalLightSeed> &seeds,
+		voxel_light_chunk &mesh_light) noexcept
+	{
+		int32_t error_code = initialize_light_from_snapshot(mesh_light,
+			snapshot.existing_light);
+		if (error_code != FT_ERR_SUCCESS)
+			return (error_code);
+		/* A face exposed by a deletion samples the old solid cell, which
+		 * generally stored no light. Seed the opening from its lit neighbours
+		 * for the preview. The authoritative solver still owns the final field. */
+		using LightSeed = WorldGenerationPipeline::IncrementalLightSeed;
+		const auto is_opening = [&snapshot](const LightSeed &seed) noexcept
+		{
+			return (seed.external_source == FT_FALSE && seed.new_block_id == GAME_VOXEL_AIR_BLOCK
+				&& seed.old_block_id != GAME_VOXEL_AIR_BLOCK
+				&& voxel_block_emitted_light_level(seed.old_block_id) == 0U
+				&& seed.local_x >= 0 && seed.local_x < GAME_VOXEL_CHUNK_WIDTH
+				&& seed.local_y >= 0 && seed.local_y < GAME_VOXEL_CHUNK_HEIGHT
+				&& seed.local_z >= 0 && seed.local_z < GAME_VOXEL_CHUNK_DEPTH
+				&& snapshot.blocks[WorldChunkReadState::light_offset(seed.local_x,
+					seed.local_y, seed.local_z)] == GAME_VOXEL_AIR_BLOCK);
+		};
+		const auto light_opening = [&](const LightSeed &seed, bool &changed) noexcept -> int32_t
+		{
+			const uint8_t previous = mesh_light.get(seed.local_x, seed.local_y, seed.local_z);
+			uint8_t sky = voxel_light_sky(previous);
+			uint8_t block = voxel_light_block(previous);
+			constexpr int32_t neighbours[6][3] = {{0, 1, 0}, {0, -1, 0},
+				{-1, 0, 0}, {1, 0, 0}, {0, 0, -1}, {0, 0, 1}};
+			for (const auto &offset : neighbours)
+			{
+				const int32_t x = seed.local_x + offset[0];
+				const int32_t y = seed.local_y + offset[1];
+				const int32_t z = seed.local_z + offset[2];
+				if (y < 0)
+					continue ;
+				uint8_t sample = voxel_light_pack(15U, 0U);
+				if (y < GAME_VOXEL_CHUNK_HEIGHT)
+				{
+					if (x >= 0 && x < GAME_VOXEL_CHUNK_WIDTH && z >= 0 && z < GAME_VOXEL_CHUNK_DEPTH)
+						sample = mesh_light.get(x, y, z);
+					else if (WorldChunkSnapshotReader::lookup_snapshot_light(&snapshot,
+						snapshot.chunk_x * GAME_VOXEL_CHUNK_WIDTH + x, y,
+						snapshot.chunk_z * GAME_VOXEL_CHUNK_DEPTH + z, &sample) != FT_ERR_SUCCESS)
+						continue ;
+				}
+				const uint8_t source_sky = voxel_light_sky(sample);
+				const uint8_t source_block = voxel_light_block(sample);
+				if (offset[1] == 1 && source_sky == 15U)
+					sky = 15U;
+				else if (source_sky > sky + 1U)
+					sky = static_cast<uint8_t>(source_sky - 1U);
+				if (source_block > block + 1U)
+					block = static_cast<uint8_t>(source_block - 1U);
+			}
+			const uint8_t packed = voxel_light_pack(sky, block);
+			if (packed == previous)
+				return (FT_ERR_SUCCESS);
+			changed = true;
+			return (mesh_light.set(seed.local_x, seed.local_y, seed.local_z, packed));
+		};
+		bool changed = false;
+		if (seeds.size() <= 1U)
+		{
+			if (!seeds.empty() && is_opening(seeds.front()))
+				return (light_opening(seeds.front(), changed));
+			return (FT_ERR_SUCCESS);
+		}
+		std::vector<const LightSeed *> openings;
+		try
+		{
+			for (const LightSeed &seed : seeds)
+				if (is_opening(seed))
+					openings.push_back(&seed);
+		}
+		catch (const std::bad_alloc &)
+		{
+			return (FT_ERR_NO_MEMORY);
+		}
+		/* Direct sun can travel down any number of open cells in one pass.
+		 * Other light loses a level per step, so fifteen passes are sufficient. */
+		std::sort(openings.begin(), openings.end(), [](const LightSeed *left, const LightSeed *right)
+		{
+			return (left->local_y > right->local_y);
+		});
+		for (int32_t pass = 0; pass < 15; ++pass)
+		{
+			changed = false;
+			for (const LightSeed *opening : openings)
+			{
+				error_code = light_opening(*opening, changed);
+				if (error_code != FT_ERR_SUCCESS)
+					return (error_code);
+			}
+			if (!changed || openings.size() <= 1U)
+				break ;
+		}
+		return (FT_ERR_SUCCESS);
+	}
+
+
+	bool stream_request_cancelled(const WorldGenerationPipeline::Request &request,
+		const std::atomic<uint64_t> &stream_epoch) noexcept
+	{
+		return (request.operation == WorldGenerationPipeline::WorldGenerationOperation::STREAM
+			&& stream_epoch.load(std::memory_order_relaxed) != request.cancellation_epoch);
+	}
+
+	struct GeneratedChunkLightInput
+	{
+		const game_voxel_chunk &chunk;
+		const WorldGenerationPipeline::Request &request;
+		const std::atomic<uint64_t> &stream_epoch;
+	};
 
 	int32_t lookup_local_light_block(void *user_data, int32_t world_x,
 		int32_t world_y, int32_t world_z, uint32_t *block_id) noexcept
 	{
-		const auto *chunk = static_cast<const game_voxel_chunk *>(user_data);
-		if (chunk == nullptr || block_id == nullptr)
+		const auto *input = static_cast<const GeneratedChunkLightInput *>(user_data);
+		if (input == nullptr || block_id == nullptr)
 			return (FT_ERR_INVALID_ARGUMENT);
 		if (world_y < 0 || world_y >= GAME_VOXEL_CHUNK_HEIGHT)
 			return (FT_ERR_OUT_OF_RANGE);
+		/* The local light builder visits each column from top to bottom. */
+		if (world_y == GAME_VOXEL_CHUNK_HEIGHT - 1
+			&& stream_request_cancelled(input->request, input->stream_epoch))
+			return (FT_ERR_INVALID_STATE);
 		world_x %= GAME_VOXEL_CHUNK_WIDTH;
 		world_z %= GAME_VOXEL_CHUNK_DEPTH;
 		if (world_x < 0)
@@ -1361,7 +1550,7 @@ namespace
 			+ world_z * GAME_VOXEL_CHUNK_WIDTH
 			+ (world_y % GAME_VOXEL_SECTION_EDGE) * GAME_VOXEL_SECTION_EDGE
 				* GAME_VOXEL_SECTION_EDGE);
-		*block_id = chunk->get_section(section).get_block(index);
+		*block_id = input->chunk.get_section(section).get_block(index);
 		return (FT_ERR_SUCCESS);
 	}
 
@@ -1443,6 +1632,47 @@ namespace
 				&& (snapshot.blocked_light_faces & 8U) != 0U));
 	}
 
+	bool is_isolated_skylit_opening(
+		const WorldGenerationPipeline::WorldChunkSnapshot &snapshot,
+		const WorldGenerationPipeline::IncrementalLightSeed &seed,
+		incremental_light_scratch &scratch) noexcept
+	{
+		const int32_t x = seed.local_x;
+		const int32_t y = seed.local_y;
+		const int32_t z = seed.local_z;
+		if (seed.external_source != FT_FALSE || seed.new_block_id != GAME_VOXEL_AIR_BLOCK
+			|| x <= 0 || x >= GAME_VOXEL_CHUNK_WIDTH - 1 || y <= 0
+			|| y >= GAME_VOXEL_CHUNK_HEIGHT - 1 || z <= 0 || z >= GAME_VOXEL_CHUNK_DEPTH - 1
+			|| snapshot.blocks.size() != WorldChunkReadState::LIGHT_SAMPLE_COUNT
+			|| snapshot.existing_light.size() != WorldChunkReadState::LIGHT_SAMPLE_COUNT)
+			return (false);
+		const auto &old = voxel_get_block_metadata(seed.old_block_id);
+		const auto changed = WorldChunkReadState::light_offset(x, y, z);
+		if ((old.light_attenuation < 15U && old.occludes_faces == FT_FALSE)
+			|| voxel_block_emitted_light_level(seed.old_block_id) != 0U
+			|| snapshot.blocks[changed] != GAME_VOXEL_AIR_BLOCK
+			|| snapshot.existing_light[changed] != 0U
+			|| snapshot.existing_light[WorldChunkReadState::light_offset(x, y + 1, z)] != voxel_light_pack(15U, 0U))
+			return (false);
+		constexpr int32_t offsets[6][3] = {{-1, 0, 0}, {1, 0, 0},
+			{0, 0, -1}, {0, 0, 1}, {0, 1, 0}, {0, -1, 0}};
+		for (const auto &offset : offsets)
+		{
+			const auto index = WorldChunkReadState::light_offset(x + offset[0], y + offset[1], z + offset[2]);
+			const uint32_t neighbour = snapshot.blocks[index];
+			const uint8_t light = snapshot.existing_light[index];
+			if (voxel_light_block(light) != 0U || voxel_block_emitted_light_level(neighbour) != 0U)
+				return (false);
+			const auto &metadata = voxel_get_block_metadata(neighbour);
+			if (metadata.light_attenuation < 15U && metadata.occludes_faces == FT_FALSE
+				&& (offset[1] < 0 || voxel_light_sky(light) < 14U))
+				return (false);
+		}
+		/* The opening receives direct sun. Every other cell already has at
+		 * least as much light as the opening could contribute, or blocks it. */
+		return (snapshot_column_has_direct_sky(snapshot, scratch, x, y, z));
+	}
+
 	int32_t build_incremental_additive_light(voxel_light_chunk &light,
 		const WorldGenerationPipeline::WorldChunkSnapshot &snapshot,
 		incremental_light_scratch &scratch,
@@ -1457,7 +1687,6 @@ namespace
 		ft_bool *complete) noexcept
 	{
 		std::size_t index;
-		int32_t local_z;
 		uint32_t processed_this_call;
 
 		if (processed == nullptr || changed_x < 0
@@ -1476,31 +1705,10 @@ namespace
 		{
 			if (preserve_existing == FT_FALSE)
 			{
-				if (light.initialize(0U) != FT_ERR_SUCCESS)
-					return (FT_ERR_NO_MEMORY);
-				local_z = 0;
-				while (local_z < GAME_VOXEL_CHUNK_DEPTH)
-				{
-					int32_t local_y = 0;
-					while (local_y < GAME_VOXEL_CHUNK_HEIGHT)
-					{
-						int32_t local_x = 0;
-						while (local_x < GAME_VOXEL_CHUNK_WIDTH)
-						{
-							index = (static_cast<std::size_t>(local_z)
-								* static_cast<std::size_t>(GAME_VOXEL_CHUNK_HEIGHT)
-								+ static_cast<std::size_t>(local_y))
-								* static_cast<std::size_t>(GAME_VOXEL_CHUNK_WIDTH)
-								+ static_cast<std::size_t>(local_x);
-							if (light.set(local_x, local_y, local_z,
-								snapshot.existing_light[index]) != FT_ERR_SUCCESS)
-								return (FT_ERR_NO_MEMORY);
-							local_x += 1;
-						}
-						local_y += 1;
-					}
-					local_z += 1;
-				}
+				const int32_t result = initialize_light_from_snapshot(light,
+					snapshot.existing_light);
+				if (result != FT_ERR_SUCCESS)
+					return (result);
 			}
 			if (snapshot_column_has_direct_sky(snapshot, scratch,
 			changed_x, changed_y, changed_z))
@@ -1819,7 +2027,6 @@ namespace
 		uint64_t previous_nodes, ft_bool *complete) noexcept
 	{
 		std::size_t index;
-		int32_t local_z;
 
 		if (processed == nullptr || removal_queue_index == nullptr
 			|| addition_queue_index == nullptr || state_initialized == nullptr
@@ -1837,32 +2044,10 @@ namespace
 		*complete = FT_FALSE;
 		if (*state_initialized == FT_FALSE && preserve_existing == FT_FALSE)
 		{
-			if (light.initialize(0U) != FT_ERR_SUCCESS)
-				return (FT_ERR_NO_MEMORY);
-			local_z = 0;
-			while (local_z < GAME_VOXEL_CHUNK_DEPTH)
-			{
-				int32_t local_y = 0;
-				while (local_y < GAME_VOXEL_CHUNK_HEIGHT)
-				{
-					int32_t local_x = 0;
-					while (local_x < GAME_VOXEL_CHUNK_WIDTH)
-					{
-						const std::size_t source_index =
-							(static_cast<std::size_t>(local_z)
-							* static_cast<std::size_t>(GAME_VOXEL_CHUNK_HEIGHT)
-							+ static_cast<std::size_t>(local_y))
-							* static_cast<std::size_t>(GAME_VOXEL_CHUNK_WIDTH)
-							+ static_cast<std::size_t>(local_x);
-						if (light.set(local_x, local_y, local_z,
-							snapshot.existing_light[source_index]) != FT_ERR_SUCCESS)
-							return (FT_ERR_NO_MEMORY);
-						local_x += 1;
-					}
-					local_y += 1;
-				}
-				local_z += 1;
-			}
+			const int32_t result = initialize_light_from_snapshot(light,
+				snapshot.existing_light);
+			if (result != FT_ERR_SUCCESS)
+				return (result);
 		}
 		if (*state_initialized == FT_FALSE)
 		{
@@ -2310,19 +2495,16 @@ WorldChunkGenerationWorker &WorldChunkGenerationWorker::operator=(const WorldChu
 	return (*this);
 }
 
-int32_t WorldChunkGenerationWorker::initialize_chunk_for_generation(WorldChunk &chunk,
-	int32_t chunk_x, int32_t chunk_z, const char *seed,
-	voxel_generation_config &config, uint32_t stage_mask,
-	std::vector<WorldGenerationPipeline::WorldDeferredBlockEdit> &deferred_edits,
-	const std::vector<WorldGenerationPipeline::GenerationFeaturePlan>
-		&feature_plans,
-	const WorldGenerationPipeline::WorldChunkSnapshot *source_snapshot,
-	const std::string &terrain_chunk_path, bool &loaded_from_terrain_store,
-	uint64_t *generation_duration_nanoseconds,
-	uint64_t *mesh_duration_nanoseconds) noexcept
+int32_t WorldChunkGenerationWorker::initialize_chunk_for_generation(
+	WorldGenerationPipeline::Result &result, const WorldGenerationPipeline::Request &request,
+	const std::atomic<uint64_t> &stream_epoch) noexcept
 {
 	int32_t error_code;
 	std::chrono::steady_clock::time_point phase_start;
+	WorldChunk &chunk = *result.chunk;
+	const int32_t chunk_x = request.chunk_x;
+	const int32_t chunk_z = request.chunk_z;
+	const auto *source_snapshot = request.snapshot.get();
 
 	chunk.chunk_x = chunk_x;
 	chunk.chunk_z = chunk_z;
@@ -2355,34 +2537,38 @@ int32_t WorldChunkGenerationWorker::initialize_chunk_for_generation(WorldChunk &
 	if (source_snapshot != nullptr)
 		std::fprintf(stderr,
 			"[WorldRevision] worker generate chunk=(%d,%d) stages=%u\n",
-			chunk_x, chunk_z, stage_mask);
+			chunk_x, chunk_z, request.stage_mask);
 	#endif
-	error_code = WorldTerrainChunkStore::load_stream_chunk(terrain_chunk_path,
+	error_code = WorldTerrainChunkStore::load_stream_chunk(request.terrain_chunk_path,
 		chunk_x, chunk_z, chunk.chunk);
-	loaded_from_terrain_store = error_code == FT_ERR_SUCCESS;
-	if (error_code == FT_ERR_NOT_FOUND)
+	result.loaded_from_terrain_store = error_code == FT_ERR_SUCCESS;
+	if (stream_request_cancelled(request, stream_epoch))
+		error_code = FT_ERR_INVALID_STATE;
+	else if (error_code == FT_ERR_NOT_FOUND)
 	{
 		error_code = voxel_generate_chunk_with_stage_mask(chunk.chunk,
-			chunk.world_x, chunk.world_z, seed, config, stage_mask);
-		if (error_code == FT_ERR_SUCCESS && !feature_plans.empty())
-			error_code = WorldChunkGenerationWorker::apply_feature_plans(chunk,
-				feature_plans);
+			chunk.world_x, chunk.world_z, request.seed.c_str(), request.config, request.stage_mask);
+		if (stream_request_cancelled(request, stream_epoch))
+			error_code = FT_ERR_INVALID_STATE;
+		else if (error_code == FT_ERR_SUCCESS && !request.feature_plans.empty())
+			error_code = WorldChunkGenerationWorker::apply_feature_plans(chunk, request.feature_plans);
 	}
-	if (generation_duration_nanoseconds != nullptr)
-		*generation_duration_nanoseconds = static_cast<uint64_t>(
+	result.generation_duration_nanoseconds = static_cast<uint64_t>(
 			std::chrono::duration_cast<std::chrono::nanoseconds>(
 				std::chrono::steady_clock::now() - phase_start).count());
 	phase_start = std::chrono::steady_clock::now();
 	if (error_code == FT_ERR_SUCCESS)
 	{
+		GeneratedChunkLightInput input{chunk.chunk, request, stream_epoch};
 		error_code = voxel_light_build_chunk_local(chunk.light, chunk.world_x,
-			chunk.world_z, lookup_local_light_block, &chunk.chunk);
-		if (error_code == FT_ERR_SUCCESS)
-			error_code = chunk_mesh_generate_from_chunk_with_light(chunk.mesh,
-				chunk.chunk, chunk.light);
+			chunk.world_z, lookup_local_light_block, &input);
+		if (stream_request_cancelled(request, stream_epoch))
+			error_code = FT_ERR_INVALID_STATE;
+		else if (error_code == FT_ERR_SUCCESS)
+			error_code = chunk_mesh_generate_from_chunk_with_light_in_bounds(chunk.mesh,
+				chunk.chunk, chunk.light, occupied_section_bounds(chunk.chunk));
 	}
-	if (mesh_duration_nanoseconds != nullptr)
-		*mesh_duration_nanoseconds = static_cast<uint64_t>(
+	result.mesh_duration_nanoseconds = static_cast<uint64_t>(
 			std::chrono::duration_cast<std::chrono::nanoseconds>(
 				std::chrono::steady_clock::now() - phase_start).count());
 	if (error_code != FT_ERR_SUCCESS)
@@ -2406,11 +2592,11 @@ int32_t WorldChunkGenerationWorker::initialize_chunk_for_generation(WorldChunk &
 			chunk_x, chunk_z);
 	#endif
 	chunk.initialized = true;
-	(void)deferred_edits;
 	return (FT_ERR_SUCCESS);
 }
 
-std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::process_generation(WorldGenerationPipeline::Request &request) noexcept
+std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::process_generation(
+	WorldGenerationPipeline::Request &request, const std::atomic<uint64_t> &stream_epoch) noexcept
 {
 	std::unique_ptr<WorldGenerationPipeline::Result> result(new (std::nothrow) WorldGenerationPipeline::Result());
 
@@ -2435,19 +2621,21 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 	result->light_scanned_cells = 0U;
 	result->light_propagated_cells = 0U;
 	result->light_queue_peak = 0U;
+	if (stream_request_cancelled(request, stream_epoch))
+	{
+		result->error_code = FT_ERR_INVALID_STATE;
+		return (result);
+	}
 	result->chunk.reset(new (std::nothrow) WorldChunk());
 	if (result->chunk == nullptr)
 	{
 		result->error_code = FT_ERR_NO_MEMORY;
 		return (result);
 	}
-	result->error_code = WorldChunkGenerationWorker::initialize_chunk_for_generation(*result->chunk,
-			request.chunk_x, request.chunk_z, request.seed.c_str(),
-			request.config, request.stage_mask, request.deferred_edits,
-			request.feature_plans,
-			request.snapshot.get(), request.terrain_chunk_path,
-			result->loaded_from_terrain_store, &result->generation_duration_nanoseconds,
-			&result->mesh_duration_nanoseconds);
+	result->error_code = WorldChunkGenerationWorker::initialize_chunk_for_generation(*result,
+		request, stream_epoch);
+	if (stream_request_cancelled(request, stream_epoch))
+		result->error_code = FT_ERR_INVALID_STATE;
 	if (result->error_code != FT_ERR_SUCCESS)
 	{
 		result->chunk.reset();
@@ -2477,7 +2665,12 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 		? std::max<uint64_t>(1U, chunk.chunk.get_revision()) : 1U;
 	chunk.light_revision = 1U;
 	result->error_code = chunk.publish_read_state();
-	if (result->error_code == FT_ERR_SUCCESS && !result->loaded_from_terrain_store
+	if (stream_request_cancelled(request, stream_epoch))
+	{
+		result->error_code = FT_ERR_INVALID_STATE;
+		result->chunk.reset();
+	}
+	else if (result->error_code == FT_ERR_SUCCESS && !result->loaded_from_terrain_store
 		&& !request.terrain_chunk_path.empty())
 	{
 		result->error_code = result->staged_terrain_chunk.prepare(
@@ -2578,6 +2771,12 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 		result->error_code = FT_ERR_NO_MEMORY;
 		return (result);
 	}
+	if (request.snapshot->geometry_preview_only
+		&& request.snapshot->existing_light_valid == FT_FALSE)
+	{
+		result->error_code = FT_ERR_INVALID_STATE;
+		return (result);
+	}
 	if (request.snapshot->existing_light_valid == FT_FALSE)
 	{
 	#if defined(DEBUG)
@@ -2620,7 +2819,9 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 	 * preview. A quick solve can publish a single lit mesh. A slow solve still
 	 * exposes the edit early while the remaining lighting work yields. */
 	const bool geometry_final = request.remesh_geometry_only != FT_FALSE;
-	const bool reuse_light_after_reversal = request.incremental_light_seeds.size() == 1U
+	const bool geometry_preview_only = request.snapshot->geometry_preview_only;
+	const bool reuse_light_after_reversal = !geometry_preview_only
+		&& request.incremental_light_seeds.size() == 1U
 		&& request.incremental_light_seeds.front().additive == FT_FALSE
 		&& request.incremental_light_seeds.front().removal == FT_FALSE
 		&& request.incremental_light_seeds.front().old_block_id
@@ -2651,12 +2852,10 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 		error_code = chunk_mesh_initialize(*result->mesh);
 		if (error_code == FT_ERR_SUCCESS)
 			error_code = build_preview_mesh_light(*request.snapshot,
-				snapshot_light);
+				request.incremental_light_seeds, snapshot_light);
 		if (error_code == FT_ERR_SUCCESS)
-			error_code = chunk_mesh_generate_from_chunk_with_neighbors_and_light_lookup(
-				*result->mesh, *request.remesh_target, request.chunk_x,
-				request.chunk_z, &WorldChunkSnapshotReader::lookup_snapshot_mesh_block,
-				request.snapshot.get(), &snapshot_light,
+			error_code = build_snapshot_mesh(*result->mesh, *request.remesh_target,
+				request, snapshot_light,
 				&WorldChunkSnapshotReader::lookup_snapshot_light,
 				request.snapshot.get());
 		if (error_code != FT_ERR_SUCCESS)
@@ -2677,12 +2876,15 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 		result->stage_mask = WorldGenerationPipeline::Result::STAGE_GEOMETRY_ONLY;
 		if (geometry_final)
 			result->stage_mask |= WorldGenerationPipeline::Result::STAGE_GEOMETRY_FINAL;
+		else if (geometry_preview_only)
+			result->stage_mask |= WorldGenerationPipeline::Result::STAGE_GEOMETRY_WAIT_FOR_LIGHT;
 		else
 			request.remesh_geometry_published = FT_TRUE;
-		request.remesh_in_progress = geometry_final ? FT_FALSE : FT_TRUE;
+		request.remesh_in_progress = geometry_final || geometry_preview_only
+			? FT_FALSE : FT_TRUE;
 		return ;
 	};
-	if (geometry_final || reuse_light_after_reversal
+	if (geometry_final || geometry_preview_only || reuse_light_after_reversal
 		|| (geometry_preview && request.incremental_light_seeds.empty()))
 	{
 		build_cached_mesh();
@@ -2755,7 +2957,19 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 					&& request.incremental_additive_state_initialized == FT_FALSE)
 				? FT_FALSE : FT_TRUE;
 
-			if (seed.removal == FT_FALSE)
+			if (seed.removal != FT_FALSE && preserve_existing == FT_FALSE
+				&& request.incremental_light_seeds.size() == 1U
+				&& is_isolated_skylit_opening(*request.snapshot, seed, request.incremental_light_scratch))
+			{
+				error_code = initialize_light_from_snapshot(*request.remesh_light,
+					request.snapshot->existing_light);
+				if (error_code == FT_ERR_SUCCESS)
+					error_code = write_incremental_light(*request.remesh_light, request.incremental_light_scratch,
+						seed.local_x, seed.local_y, seed.local_z, voxel_light_pack(15U, 0U));
+				seed_processed = 1U;
+				seed_complete = FT_TRUE;
+			}
+			else if (seed.removal == FT_FALSE)
 				error_code = build_incremental_additive_light(
 					*request.remesh_light, *request.snapshot,
 					request.incremental_light_scratch, request.chunk_x,
@@ -2843,13 +3057,9 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 			result->error_code = FT_ERR_NO_MEMORY;
 			return (result);
 		}
-		result->error_code =
-			chunk_mesh_generate_from_chunk_with_neighbors_and_light_lookup(
-				*result->mesh, *request.remesh_target, request.chunk_x,
-				request.chunk_z, &WorldChunkSnapshotReader::lookup_snapshot_mesh_block,
-				request.snapshot.get(), result->light.get(),
-				&WorldChunkSnapshotReader::lookup_snapshot_light,
-				request.snapshot.get());
+		result->error_code = build_snapshot_mesh(*result->mesh, *request.remesh_target,
+			request, *result->light, &WorldChunkSnapshotReader::lookup_snapshot_light,
+			request.snapshot.get());
 		request.remesh_target.reset();
 		request.remesh_in_progress = FT_FALSE;
 		if (result->error_code != FT_ERR_SUCCESS)
@@ -2972,11 +3182,8 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldChunkGenerationWorker::pro
 	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
 	mesh_start = std::chrono::steady_clock::now();
 	#endif
-	result->error_code =
-		chunk_mesh_generate_from_chunk_with_neighbors_and_light_lookup(
-		*result->mesh, *request.remesh_target, request.chunk_x, request.chunk_z,
-		&WorldChunkSnapshotReader::lookup_snapshot_mesh_block, request.snapshot.get(),
-		result->light.get(), &voxel_light_build_operation_lookup,
+	result->error_code = build_snapshot_mesh(*result->mesh, *request.remesh_target,
+		request, *result->light, &voxel_light_build_operation_lookup,
 		request.remesh_light_operation.get());
 	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
 	{

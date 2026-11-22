@@ -330,7 +330,7 @@ namespace
 	}
 	static int32_t game_session_validate_equipped_catalog(
 		const game_character &character,
-		const MinecraftItemCatalog &catalog) noexcept
+		const MinecraftItemCatalog &catalog, std::vector<uint64_t> &instance_ids) noexcept
 	{
 		struct SlotBinding
 		{
@@ -378,6 +378,14 @@ namespace
 				delete item;
 				if (result != FT_ERR_SUCCESS)
 					return (result);
+				try
+				{
+					instance_ids.push_back(snapshot.instance_id);
+				}
+				catch (const std::bad_alloc &)
+				{
+					return (FT_ERR_NO_MEMORY);
+				}
 			}
 			else
 			{
@@ -1817,6 +1825,9 @@ GameSession::~GameSession()
 {
 	if (this->active_)
 		(void)stop();
+	/* A terrain publication borrows the world's store. Drain it before
+	 * member destruction, including when the final session save fails. */
+	(void)this->save_worker_.collect(true);
 }
 
 GameSession &GameSession::operator=(const GameSession &other)
@@ -1835,6 +1846,7 @@ void GameSession::reset_session_state()
 	boost_enabled_ = false;
 	selected_block_id_ = VOXEL_GENERATOR_DIRT_BLOCK;
 	pending_primary_presses_ = 0U;
+	remesh_only_frames_ = 0U;
 	pending_secondary_press_ = false;
 	fps_accumulator_ = 0.0;
 	fps_frame_count_ = 0U;
@@ -1905,8 +1917,8 @@ int GameSession::start_with_world_id_internal(const std::string &seed,
 				this->character_id_, sizeof(this->character_id_));
 			if (random_result != FT_ERR_SUCCESS)
 				return (random_result);
-			for (uint8_t byte : this->character_id_)
-				if (byte != 0U)
+			for (uint8_t identity_byte : this->character_id_)
+				if (identity_byte != 0U)
 				{
 					identity_created = true;
 					break ;
@@ -2576,6 +2588,7 @@ int GameSession::start_with_world_id_internal(const std::string &seed,
     revision_preview_cache_.clear();
     selected_block_id_ = VOXEL_GENERATOR_DIRT_BLOCK;
     pending_primary_presses_ = 0U;
+    remesh_only_frames_ = 0U;
     pending_secondary_press_ = false;
     fps_accumulator_ = 0.0;
     fps_frame_count_ = 0U;
@@ -2711,8 +2724,8 @@ int32_t GameSession::create_and_start_catalog_world(
 	if (result != FT_ERR_SUCCESS)
 		return (result);
 	bool character_id_nonzero = false;
-	for (uint8_t byte : character_id)
-		if (byte != 0U)
+	for (uint8_t identity_byte : character_id)
+		if (identity_byte != 0U)
 			character_id_nonzero = true;
 	for (uint32_t index = 0U; index < sizeof(request_id_bytes); ++index)
 		request_id |= static_cast<uint64_t>(request_id_bytes[index])
@@ -4563,7 +4576,7 @@ int32_t GameSession::save_session_snapshot(bool enforce_join_admission,
 		const int32_t encode_scope = RuntimeAnalytics::begin_scope(
 			RuntimeAnalyticsScope::SESSION_SNAPSHOT_ENCODE);
 		result = GameSessionPersistence::
-			save_file_with_revision_server_checkpoint_and_host_config(
+			save_validated_session_snapshot(
 				this->world_item_save_path_, this->player_character_,
 				this->world_items_, this->recipe_catalog_, this->transaction_journal_,
 				card_session_bytes, regeneration_rules_bytes, chunk_instability_bytes,
@@ -4575,6 +4588,8 @@ int32_t GameSession::save_session_snapshot(bool enforce_join_admission,
 	}
 	if (result == FT_ERR_SUCCESS && defer_write)
 	{
+		if (terrain != nullptr)
+			(void)this->world_.reserve_prepared_block_write(*terrain);
 		result = this->save_worker_.submit(this->world_item_save_path_,
 			serialized_snapshot, std::move(terrain));
 		if (result == FT_ERR_NO_MEMORY)
@@ -4585,10 +4600,39 @@ int32_t GameSession::save_session_snapshot(bool enforce_join_admission,
 }
 
 int32_t GameSession::advance_save_checkpoint(bool wait, bool *pending,
-	bool *preparing) noexcept
+	bool *freeze_gameplay, bool defer_mining_result) noexcept
 {
 	std::lock_guard<std::recursive_mutex> session_lock(
 		this->item_instance_transaction_mutex_);
+	if (!wait && defer_mining_result && this->pending_mining_result_checkpoint_)
+	{
+		/* Give a queued mining press one chance to carry the previous result
+		 * in its prepare snapshot. Its earlier PREPARED record remains durable. */
+		if (pending != nullptr)
+			*pending = false;
+		if (freeze_gameplay != nullptr)
+			*freeze_gameplay = false;
+		return (FT_ERR_SUCCESS);
+	}
+	if (std::exchange(this->pending_mining_result_checkpoint_, false))
+	{
+		/* The prepare record stays durable while the applied edit gets a frame
+		 * to render. Capture the final state before gameplay mutations resume. */
+		const int32_t scope_error = RuntimeAnalytics::begin_scope(
+			RuntimeAnalyticsScope::MINING_CHECKPOINT);
+		const int32_t result = this->save_session_snapshot(false, true);
+		if (scope_error == FT_ERR_SUCCESS)
+			(void)RuntimeAnalytics::end_scope();
+		if (result != FT_ERR_SUCCESS)
+			return (result);
+		if (wait)
+			return (this->save_worker_.collect(true));
+		if (pending != nullptr)
+			*pending = true;
+		if (freeze_gameplay != nullptr)
+			*freeze_gameplay = true;
+		return (FT_ERR_SUCCESS);
+	}
 	std::unique_ptr<WorldTerrainChunkStore::PreparedEdit> terrain;
 	bool disk_pending = false;
 	int32_t result = this->save_worker_.collect(wait, &disk_pending, &terrain);
@@ -4597,8 +4641,11 @@ int32_t GameSession::advance_save_checkpoint(bool wait, bool *pending,
 		? this->pending_pickup_prepare_ : this->pending_mining_prepare_;
 	if (pending != nullptr)
 		*pending = disk_pending;
-	if (preparing != nullptr)
-		*preparing = disk_pending && prepared_request != 0U;
+	if (freeze_gameplay != nullptr)
+		/* Simulation can issue its own synchronous save. While the worker
+		 * owns a checkpoint that save would wait on disk on the frame thread.
+		 * The caller can still move the camera and publish edited meshes. */
+		*freeze_gameplay = disk_pending;
 	if (disk_pending || prepared_request == 0U)
 		return (result);
 	const uint64_t request_id = std::exchange(prepared_request, 0U);
@@ -4607,12 +4654,14 @@ int32_t GameSession::advance_save_checkpoint(bool wait, bool *pending,
 		: WorldBlockMiningTransaction::journal_scope();
 	if (result != FT_ERR_SUCCESS)
 	{
+		/* Publication follows a durable prepare. Leave that intent available
+		 * for recovery if the terrain write reports a failure. */
+		if (terrain != nullptr && terrain->has_reservation())
+			return (result);
 		const int32_t abort_result = this->transaction_journal_.mark_aborted(scope,
 			request_id);
 		return (abort_result == FT_ERR_SUCCESS ? result : abort_result);
 	}
-	const GameSessionSnapshotWriter writer = {&GameSession::save_snapshot_callback,
-		this, &GameSession::save_authorized_edit_result_callback};
 	const int32_t scope_error = RuntimeAnalytics::begin_scope(
 		pickup ? RuntimeAnalyticsScope::GROUND_ITEM_PICKUP
 			: RuntimeAnalyticsScope::BLOCK_INTERACTION);
@@ -4638,11 +4687,27 @@ int32_t GameSession::advance_save_checkpoint(bool wait, bool *pending,
 				pickup_status);
 	}
 	else
-		result = WorldBlockMiningTransaction::complete_prepared(
-			this->world_item_save_path_, this->world_, this->item_catalog_,
-			this->world_items_, this->transaction_journal_, request_id, &writer,
-			&this->player_character_.get_inventory(), &this->player_character_,
-			true, terrain.get());
+	{
+		/* A second break can finish its disk write before this frame has
+		 * drained the first break's mesh. Publish ready geometry while its
+		 * request still matches the live chunk. */
+		if (!wait && terrain != nullptr)
+		{
+			const WorldChunk *chunk = this->world_.find_chunk(terrain->chunk_x, terrain->chunk_z);
+			if (chunk != nullptr && chunk->owns_current_interactive_remesh()
+				&& chunk->last_mesh_publication_voxel_revision != chunk->voxel_revision)
+				result = this->world_.publish_pending_remeshes();
+		}
+		const GameSessionSnapshotWriter writer = {&GameSession::save_snapshot_callback,
+			this, wait ? &GameSession::save_authorized_edit_result_callback
+				: &GameSession::queue_mining_result_checkpoint_callback};
+		if (result == FT_ERR_SUCCESS)
+			result = WorldBlockMiningTransaction::complete_prepared(
+				this->world_item_save_path_, this->world_, this->item_catalog_,
+				this->world_items_, this->transaction_journal_, request_id, &writer,
+				&this->player_character_.get_inventory(), &this->player_character_,
+				true, terrain.get());
+	}
 	if (scope_error == FT_ERR_SUCCESS)
 		(void)RuntimeAnalytics::end_scope();
 	if (result != FT_ERR_SUCCESS)
@@ -4652,6 +4717,8 @@ int32_t GameSession::advance_save_checkpoint(bool wait, bool *pending,
 	/* Allow one durable action phase per frame. */
 	if (pending != nullptr)
 		*pending = true;
+	if (freeze_gameplay != nullptr)
+		*freeze_gameplay = true;
 	return (FT_ERR_SUCCESS);
 }
 
@@ -4668,12 +4735,17 @@ int32_t GameSession::save_mining_checkpoint_callback(void *context,
 	if (context == nullptr)
 		return (FT_ERR_INVALID_ARGUMENT);
 	auto &session = *static_cast<GameSession *>(context);
+	std::lock_guard<std::recursive_mutex> lock(session.item_instance_transaction_mutex_);
 	std::unique_ptr<WorldTerrainChunkStore::PreparedEdit> terrain;
 	const int32_t result = WorldBlockMiningTransaction::capture_prepared_terrain(
 		session.world_, session.transaction_journal_, request_id, terrain);
 	if (result != FT_ERR_SUCCESS)
 		return (result);
-	return (session.save_session_snapshot(true, true, std::move(terrain)));
+	const bool previous_result = std::exchange(session.pending_mining_result_checkpoint_, false);
+	const int32_t save_result = session.save_session_snapshot(true, true, std::move(terrain));
+	if (save_result != FT_ERR_SUCCESS)
+		session.pending_mining_result_checkpoint_ = previous_result;
+	return (save_result);
 }
 
 int32_t GameSession::save_pickup_checkpoint_callback(void *context) noexcept
@@ -4681,6 +4753,14 @@ int32_t GameSession::save_pickup_checkpoint_callback(void *context) noexcept
 	if (context == nullptr)
 		return (FT_ERR_INVALID_ARGUMENT);
 	return (static_cast<GameSession *>(context)->save_session_snapshot(true, true));
+}
+
+int32_t GameSession::queue_mining_result_checkpoint_callback(void *context) noexcept
+{
+	if (context == nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
+	static_cast<GameSession *>(context)->pending_mining_result_checkpoint_ = true;
+	return (FT_ERR_SUCCESS);
 }
 
 int32_t GameSession::save_authorized_edit_result_callback(void *context) noexcept
@@ -8199,18 +8279,12 @@ int32_t GameSession::validate_physical_item_identity_uniqueness() const noexcept
 {
 	std::vector<uint64_t> card_instance_ids;
 	game_inventory_snapshot inventory_snapshot = {};
-	uint64_t ignored_maximum_instance_id = 0U;
 	int32_t result = this->regeneration_cards_.copy_physical_item_instance_ids(
 		card_instance_ids);
 	if (result != FT_ERR_SUCCESS)
 		return (result);
 	result = game_session_validate_equipped_catalog(this->player_character_,
-		this->item_catalog_);
-	if (result != FT_ERR_SUCCESS)
-		return (result);
-	result = game_session_collect_equipped_instance_ids(
-		this->player_character_, card_instance_ids,
-		&ignored_maximum_instance_id);
+		this->item_catalog_, card_instance_ids);
 	if (result != FT_ERR_SUCCESS)
 		return (result);
 	result = this->player_character_.get_inventory().get_snapshot(
@@ -8220,13 +8294,8 @@ int32_t GameSession::validate_physical_item_identity_uniqueness() const noexcept
 			inventory_snapshot);
 	if (result != FT_ERR_SUCCESS)
 		return (result);
-	result = this->world_items_.validate_item_instance_policy(
-		this->item_catalog_);
-	if (result != FT_ERR_SUCCESS)
-		return (result);
-	return (this->world_items_.validate_instance_id_uniqueness(
-		this->player_character_.get_inventory(), &this->world_entities_,
-		card_instance_ids));
+	return (this->world_items_.validate_snapshot_items(inventory_snapshot,
+		this->world_entities_, card_instance_ids, this->item_catalog_));
 }
 
 int32_t GameSession::research_card_recipe(uint64_t authenticated_actor_id,
@@ -12196,8 +12265,40 @@ GameSession::Action GameSession::tick_world(double delta_seconds,
 	if (analytics_error != FT_ERR_SUCCESS)
 		std::fprintf(stderr, "Analytics: interaction scope end failed (%d)\n",
 			analytics_error);
+	if (primary_pressed && !prepare_started)
+	{
+		std::lock_guard<std::recursive_mutex> lock(this->item_instance_transaction_mutex_);
+		if (this->pending_mining_result_checkpoint_)
+		{
+			/* An empty swing or failed prepare leaves the previous break's
+			 * result to be saved on its own before more simulation runs. */
+			error_code_ = this->advance_save_checkpoint(false);
+			if (error_code_ != FT_ERR_SUCCESS)
+				return (Action::FAILED);
+			prepare_started = true;
+		}
+	}
+	/* Pickups can capture a checkpoint. Give that work the same frame as a
+	 * mining prepare, with remesh publication and without a terrain commit. */
+	if (!checkpoint_pending && !primary_pressed && !secondary_pressed)
+	{
+		const int32_t pickup_scope = RuntimeAnalytics::begin_scope(
+			RuntimeAnalyticsScope::GROUND_ITEM_PICKUP);
+		const int32_t pickup_error = this->pickup_nearby_ground_items();
+		if (pickup_scope == FT_ERR_SUCCESS)
+			(void)RuntimeAnalytics::end_scope();
+		if (pickup_error != FT_ERR_SUCCESS)
+			std::fprintf(stderr, "[Session] ground-item pickup failed error=%d\n",
+				pickup_error);
+		else
+			prepare_started = this->pending_pickup_prepare_ != 0U;
+	}
 	if (prepare_started)
-		return (Action::CONTINUE);
+	{
+		this->remesh_only_frames_ += 1U;
+		error_code_ = this->world_.publish_pending_remeshes();
+		return (error_code_ == FT_ERR_SUCCESS ? Action::CONTINUE : Action::FAILED);
+	}
 	active_render_distance_ = std::min(active_render_distance_,
 			Settings::instance().render_distance());
 	gen = strategy.generation_budget_for_frame(performance_frame_ms_,
@@ -12210,6 +12311,7 @@ GameSession::Action GameSession::tick_world(double delta_seconds,
 	{
 		std::lock_guard<std::recursive_mutex> session_lock(
 			this->item_instance_transaction_mutex_);
+		this->remesh_only_frames_ = 0U;
 		error_code_ = world_.update_around(
 			static_cast<double>(player_character_.get_x()),
 			static_cast<double>(player_character_.get_z()), gen,
@@ -12243,17 +12345,6 @@ GameSession::Action GameSession::tick_world(double delta_seconds,
 	error_code_ = this->resume_requested_regeneration();
 	if (error_code_ != FT_ERR_SUCCESS)
 		return (Action::FAILED);
-	if (!checkpoint_pending && !primary_pressed && !secondary_pressed)
-	{
-		const int32_t pickup_scope = RuntimeAnalytics::begin_scope(
-			RuntimeAnalyticsScope::GROUND_ITEM_PICKUP);
-		const int32_t pickup_error = this->pickup_nearby_ground_items();
-		if (pickup_scope == FT_ERR_SUCCESS)
-			(void)RuntimeAnalytics::end_scope();
-		if (pickup_error != FT_ERR_SUCCESS)
-			std::fprintf(stderr, "[Session] ground-item pickup failed error=%d\n",
-				pickup_error);
-	}
 	return (Action::CONTINUE);
 }
 
@@ -12276,10 +12367,14 @@ int32_t GameSession::try_place_selected_inventory_block() noexcept
 	const int32_t trapdoor_result = this->try_toggle_target_trapdoor();
 	if (trapdoor_result != FT_ERR_NOT_FOUND)
 		return (trapdoor_result);
-	const int32_t till_result = this->try_till_selected_soil();
+	game_inventory_snapshot inventory_snapshot = {};
+	int32_t result = this->player_character_.get_inventory().get_snapshot(
+		inventory_snapshot);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	const int32_t till_result = this->try_till_selected_soil(inventory_snapshot);
 	if (till_result != FT_ERR_NOT_FOUND)
 		return (till_result);
-	game_inventory_snapshot inventory_snapshot = {};
 	MinecraftBlockItemRule block_rule = {};
 	uint32_t resolved_block_id = GAME_VOXEL_AIR_BLOCK;
 	double direction_x;
@@ -12293,7 +12388,6 @@ int32_t GameSession::try_place_selected_inventory_block() noexcept
 	int32_t place_z;
 	uint32_t hit_block_id = GAME_VOXEL_AIR_BLOCK;
 	uint64_t request_id = 0U;
-	int32_t result;
 
 	if (this->selected_block_id_ == GAME_VOXEL_AIR_BLOCK)
 		return (FT_ERR_INVALID_ARGUMENT);
@@ -12307,10 +12401,6 @@ int32_t GameSession::try_place_selected_inventory_block() noexcept
 			&resolved_block_id) != FT_ERR_SUCCESS
 		|| resolved_block_id != this->selected_block_id_)
 		return (FT_ERR_PERMISSION_DENIED);
-	result = this->player_character_.get_inventory().get_snapshot(
-		inventory_snapshot);
-	if (result != FT_ERR_SUCCESS)
-		return (result);
 	const auto item = std::find_if(inventory_snapshot.items.begin(),
 		inventory_snapshot.items.end(), [&block_rule](
 			const game_inventory_item_snapshot &candidate)
@@ -12385,9 +12475,9 @@ int32_t GameSession::try_toggle_target_trapdoor() noexcept
 		hit_block_id, replacement_block_id, chunk->voxel_revision));
 }
 
-int32_t GameSession::try_till_selected_soil() noexcept
+int32_t GameSession::try_till_selected_soil(
+	const game_inventory_snapshot &inventory_snapshot) noexcept
 {
-	game_inventory_snapshot inventory_snapshot = {};
 	uint32_t hit_block_id = GAME_VOXEL_AIR_BLOCK;
 	int32_t hit_x;
 	int32_t hit_y;
@@ -12395,10 +12485,7 @@ int32_t GameSession::try_till_selected_soil() noexcept
 	int32_t place_x;
 	int32_t place_y;
 	int32_t place_z;
-	int32_t result = this->player_character_.get_inventory().get_snapshot(
-		inventory_snapshot);
-	if (result != FT_ERR_SUCCESS)
-		return (result);
+	int32_t result;
 	auto hoe = std::find_if(inventory_snapshot.items.begin(),
 		inventory_snapshot.items.end(), [](
 			const game_inventory_item_snapshot &item)
@@ -12477,10 +12564,16 @@ GameSession::Action GameSession::update(double delta_seconds,
 
 	if (!active_)
 		return (Action::FAILED);
+	/* Leave a terrain streaming frame after a run of checkpoint frames. */
+	constexpr uint32_t max_consecutive_remesh_only_frames = 8U;
+	const bool reserve_stream_frame = this->remesh_only_frames_ >= max_consecutive_remesh_only_frames;
+	const uint32_t observed_primary_presses = window.primary_press_count();
+	const bool queued_mining_press = !reserve_stream_frame
+		&& (this->pending_primary_presses_ != 0U || observed_primary_presses != 0U);
 	bool checkpoint_pending = false;
-	bool prepare_pending = false;
+	bool freeze_gameplay = false;
 	const int32_t checkpoint_result = this->advance_save_checkpoint(false,
-		&checkpoint_pending, &prepare_pending);
+		&checkpoint_pending, &freeze_gameplay, queued_mining_press);
 	if (checkpoint_result != FT_ERR_SUCCESS)
 	{
 		error_code_ = checkpoint_result;
@@ -12488,7 +12581,7 @@ GameSession::Action GameSession::update(double delta_seconds,
 			checkpoint_result);
 		return (Action::FAILED);
 	}
-	if (!prepare_pending && this->world_loom_start_committed_
+	if (!freeze_gameplay && this->world_loom_start_committed_
 		&& this->world_.world_revision().pending
 		&& !this->world_.world_revision().regenerating)
 	{
@@ -12525,22 +12618,27 @@ GameSession::Action GameSession::update(double delta_seconds,
 		this->pending_secondary_press_ = false;
 		return (nav);
 	}
+	const bool can_dispatch = !checkpoint_pending && !reserve_stream_frame;
 	const bool primary_pressed = take_primary_press(this->pending_primary_presses_,
-		window.primary_press_count(), !checkpoint_pending);
+		observed_primary_presses, can_dispatch);
 	this->pending_secondary_press_ = this->pending_secondary_press_
 		|| ft_dumb_control_was_pressed(FT_DUMB_CONTROL_MOUSE_SECONDARY) == FT_TRUE;
-	if (prepare_pending)
+	if (freeze_gameplay)
 	{
-		/* Prepare freezes gameplay mutations to the saved participants. Keep
-		 * moving and drawing while the worker establishes the recovery point. */
+		/* Finish meshes for edits already applied while the checkpoint worker
+		 * saves the next action. Remesh publication leaves the saved voxels intact. */
+		this->remesh_only_frames_ += 1U;
+		error_code_ = this->world_.publish_pending_remeshes();
+		if (error_code_ != FT_ERR_SUCCESS)
+			return (Action::FAILED);
 		this->update_camera_movement(delta_seconds);
 		this->tick_fps_counter(delta_seconds, strategy);
 		return (Action::CONTINUE);
 	}
-	const bool secondary_pressed = !checkpoint_pending && !primary_pressed
+	const bool secondary_pressed = can_dispatch && !primary_pressed
 		&& std::exchange(this->pending_secondary_press_, false);
 	world_result = tick_world(delta_seconds, strategy, primary_pressed,
-		secondary_pressed, checkpoint_pending);
+		secondary_pressed, checkpoint_pending || reserve_stream_frame);
 	if (world_result != Action::CONTINUE)
 		return (world_result);
 	tick_fps_counter(delta_seconds, strategy);
@@ -13303,7 +13401,8 @@ int32_t GameSession::pickup_nearby_ground_items() noexcept
 		&GameSession::save_pickup_checkpoint_callback, this};
 	int32_t error_code;
 
-	if (this->pending_pickup_prepare_ != 0U || this->pending_mining_prepare_ != 0U)
+	if (this->pending_pickup_prepare_ != 0U || this->pending_mining_prepare_ != 0U
+		|| this->pending_mining_result_checkpoint_)
 		return (FT_ERR_SUCCESS);
 	error_code = this->world_items_.query_nearby(this->camera_.x,
 		this->camera_.y, this->camera_.z, PICKUP_QUERY_RADIUS,

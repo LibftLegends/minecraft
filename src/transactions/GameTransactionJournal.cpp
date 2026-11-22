@@ -10,16 +10,19 @@
 
 namespace
 {
-	static void append_u32(std::vector<uint8_t> &bytes, uint32_t value)
+	static constexpr std::size_t JOURNAL_FIXED_BYTES = 28U;
+	static constexpr std::size_t RECORD_HEADER_BYTES = 33U;
+
+	static void write_u32(uint8_t *&cursor, uint32_t value) noexcept
 	{
 		for (uint32_t shift = 0U; shift < 32U; shift += 8U)
-			bytes.push_back(static_cast<uint8_t>(value >> shift));
+			*cursor++ = static_cast<uint8_t>(value >> shift);
 	}
 
-	static void append_u64(std::vector<uint8_t> &bytes, uint64_t value)
+	static void write_u64(uint8_t *&cursor, uint64_t value) noexcept
 	{
 		for (uint32_t shift = 0U; shift < 64U; shift += 8U)
-			bytes.push_back(static_cast<uint8_t>(value >> shift));
+			*cursor++ = static_cast<uint8_t>(value >> shift);
 	}
 
 	static uint64_t checksum(const uint8_t *bytes,
@@ -180,11 +183,11 @@ int32_t GameTransactionJournal::prepare(uint64_t scope_id,
 	std::size_t payload_bytes = 0U;
 	for (const Record &record : this->records_)
 		payload_bytes += record.payload.size();
-	const std::size_t record_headers = (this->records_.size() + 1U) * 33U;
-	if (record_headers > MAXIMUM_SNAPSHOT_BYTES - 24U
-		|| payload_size > MAXIMUM_SNAPSHOT_BYTES - 24U - record_headers
-		|| payload_bytes > MAXIMUM_SNAPSHOT_BYTES - 24U - record_headers
-			- payload_size)
+	const std::size_t metadata_size = JOURNAL_FIXED_BYTES
+		+ (this->records_.size() + 1U) * RECORD_HEADER_BYTES;
+	if (metadata_size > MAXIMUM_SNAPSHOT_BYTES
+		|| payload_size > MAXIMUM_SNAPSHOT_BYTES - metadata_size
+		|| payload_bytes > MAXIMUM_SNAPSHOT_BYTES - metadata_size - payload_size)
 		return (FT_ERR_OUT_OF_RANGE);
 	if (this->records_.size() >= MAXIMUM_RECORDS)
 		return (FT_ERR_FULL);
@@ -208,6 +211,21 @@ int32_t GameTransactionJournal::prepare(uint64_t scope_id,
 		return (FT_ERR_NO_MEMORY);
 	}
 	*sequence_out = this->next_sequence_++;
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t GameTransactionJournal::rollback_last_prepare(uint64_t scope_id,
+	uint64_t request_id, uint64_t sequence) noexcept
+{
+	if (!this->initialized_ || this->records_.empty()
+		|| sequence == 0U || sequence != this->next_sequence_ - 1U)
+		return (FT_ERR_INVALID_STATE);
+	const Record &record = this->records_.back();
+	if (record.scope_id != scope_id || record.request_id != request_id
+		|| record.sequence != sequence || record.state != PREPARED)
+		return (FT_ERR_INVALID_STATE);
+	this->records_.pop_back();
+	this->next_sequence_ = sequence;
 	return (FT_ERR_SUCCESS);
 }
 
@@ -414,31 +432,38 @@ int32_t GameTransactionJournal::serialize(
 {
 	if (!this->initialized_)
 		return (FT_ERR_INVALID_OPERATION);
+	std::size_t size = JOURNAL_FIXED_BYTES + this->records_.size() * RECORD_HEADER_BYTES;
+	if (size > MAXIMUM_SNAPSHOT_BYTES)
+		return (FT_ERR_OUT_OF_RANGE);
+	for (const Record &record : this->records_)
+	{
+		if (record.payload.size() > MAXIMUM_SNAPSHOT_BYTES - size)
+			return (FT_ERR_OUT_OF_RANGE);
+		size += record.payload.size();
+	}
 	try
 	{
-		std::vector<uint8_t> bytes;
-		bytes.reserve(24U + this->records_.size() * 40U);
-		bytes.push_back('G');
-		bytes.push_back('T');
-		bytes.push_back('J');
-		bytes.push_back('1');
-		append_u32(bytes, FORMAT_VERSION);
-		append_u32(bytes, static_cast<uint32_t>(this->records_.size()));
-		append_u64(bytes, this->next_sequence_);
+		std::vector<uint8_t> bytes(size);
+		std::memcpy(bytes.data(), "GTJ1", 4U);
+		uint8_t *cursor = bytes.data() + 4U;
+		write_u32(cursor, FORMAT_VERSION);
+		write_u32(cursor, static_cast<uint32_t>(this->records_.size()));
+		write_u64(cursor, this->next_sequence_);
 		for (const Record &record : this->records_)
 		{
-			append_u64(bytes, record.sequence);
-			append_u64(bytes, record.scope_id);
-			append_u64(bytes, record.request_id);
-			append_u32(bytes, record.transaction_type);
-			bytes.push_back(static_cast<uint8_t>(record.state));
-			append_u32(bytes, static_cast<uint32_t>(record.payload.size()));
-			bytes.insert(bytes.end(), record.payload.begin(),
-				record.payload.end());
-			if (bytes.size() + sizeof(uint64_t) > MAXIMUM_SNAPSHOT_BYTES)
-				return (FT_ERR_OUT_OF_RANGE);
+			write_u64(cursor, record.sequence);
+			write_u64(cursor, record.scope_id);
+			write_u64(cursor, record.request_id);
+			write_u32(cursor, record.transaction_type);
+			*cursor++ = static_cast<uint8_t>(record.state);
+			write_u32(cursor, static_cast<uint32_t>(record.payload.size()));
+			if (!record.payload.empty())
+			{
+				std::memcpy(cursor, record.payload.data(), record.payload.size());
+				cursor += record.payload.size();
+			}
 		}
-		append_u64(bytes, checksum(bytes.data(), bytes.size()));
+		write_u64(cursor, checksum(bytes.data(), size - sizeof(uint64_t)));
 		bytes_out.swap(bytes);
 	}
 	catch (const std::bad_alloc &)
@@ -462,7 +487,7 @@ int32_t GameTransactionJournal::deserialize(const uint8_t *bytes,
 
 	if (!this->initialized_)
 		return (FT_ERR_INVALID_OPERATION);
-	if (bytes == nullptr || byte_count < 28U
+	if (bytes == nullptr || byte_count < JOURNAL_FIXED_BYTES
 		|| byte_count > MAXIMUM_SNAPSHOT_BYTES
 		|| bytes[0] != 'G' || bytes[1] != 'T' || bytes[2] != 'J'
 		|| bytes[3] != '1')

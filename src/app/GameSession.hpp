@@ -810,7 +810,8 @@ class GameSession
 	};
 	int32_t try_place_selected_inventory_block() noexcept;
 	int32_t try_toggle_target_trapdoor() noexcept;
-	int32_t try_till_selected_soil() noexcept;
+	int32_t try_till_selected_soil(
+		const game_inventory_snapshot &inventory_snapshot) noexcept;
 	int32_t attack_entity_internal(uint64_t actor_id, uint64_t request_id,
 		uint32_t target_entity_id, uint64_t expected_entity_revision,
 		MinecraftCombatActionResult *result_out) noexcept;
@@ -834,6 +835,7 @@ class GameSession
 	mutable std::recursive_mutex item_instance_transaction_mutex_;
 	GameSessionSaveWorker save_worker_;
 	uint64_t pending_mining_prepare_ = 0U;
+	bool pending_mining_result_checkpoint_ = false;
 	uint64_t pending_pickup_prepare_ = 0U;
 	uint64_t pending_pickup_entity_ = 0U;
 	uint64_t full_pickup_inventory_revision_ = 0U;
@@ -939,6 +941,7 @@ class GameSession
     uint64_t fps_frame_count_;
     uint32_t selected_block_id_;
     uint32_t pending_primary_presses_ = 0U;
+    uint32_t remesh_only_frames_ = 0U;
     bool pending_secondary_press_ = false;
     bool boost_enabled_;
     bool active_;
@@ -1002,9 +1005,10 @@ class GameSession
 		bool defer_write = false,
 		std::unique_ptr<WorldTerrainChunkStore::PreparedEdit> terrain = nullptr) noexcept;
 	int32_t advance_save_checkpoint(bool wait, bool *pending = nullptr,
-		bool *preparing = nullptr) noexcept;
+		bool *freeze_gameplay = nullptr, bool defer_mining_result = false) noexcept;
 	static int32_t save_snapshot_callback(void *context) noexcept;
 	static int32_t save_mining_checkpoint_callback(void *context, uint64_t request_id) noexcept;
+	static int32_t queue_mining_result_checkpoint_callback(void *context) noexcept;
 	static int32_t save_pickup_checkpoint_callback(void *context) noexcept;
 	static int32_t save_authorized_edit_result_callback(void *context) noexcept;
 	static int32_t revision_start_commit_callback(uint64_t actor_id,

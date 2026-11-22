@@ -1,5 +1,7 @@
 #include "../../src/edits/WorldBlockEditor.hpp"
+#include "../../src/diagnostics/RuntimeAnalytics.hpp"
 #include "../../src/world/World.hpp"
+#include "WorldBlockLighting.hpp"
 
 WorldBlockEditor::WorldBlockEditor()
 {
@@ -76,7 +78,10 @@ int32_t WorldBlockEditor::replace_block_state(World &world, int32_t world_x,
 		&& prepared->replacement == replacement_block_id
 		&& prepared->base->voxel_revision == chunk->voxel_revision
 		&& prepared->base->block_sections == chunk->read_state->block_sections
-		&& prepared->terrain_revision == chunk->chunk.get_revision();
+		&& (prepared->published || prepared->terrain_revision == chunk->chunk.get_revision());
+	const bool already_published = prepared != nullptr && prepared->published;
+	if (already_published && !prepared_matches)
+		return (FT_ERR_INVALID_STATE);
 	existing_light = chunk->light.get(local_x, world_y, local_z);
 	std::shared_ptr<WorldChunkReadState> prepared_read_state;
 	error_code = chunk->prepare_read_state_after_block_edit(local_x, world_y,
@@ -87,14 +92,18 @@ int32_t WorldBlockEditor::replace_block_state(World &world, int32_t world_x,
 		replacement_block_id);
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
-	if (world.terrain_chunk_store().is_initialized())
+	if (!already_published && world.terrain_chunk_store().is_initialized())
 	{
+		const int32_t scope_error = RuntimeAnalytics::begin_scope(
+			RuntimeAnalyticsScope::WORLD_STREAM_SAVE);
 		if (prepared_matches)
 			error_code = world.terrain_chunk_store().commit_staged_chunk(chunk_x,
 				chunk_z, prepared->file, true);
 		else
 			error_code = world.terrain_chunk_store().save_chunk(chunk_x, chunk_z,
 				chunk->chunk);
+		if (scope_error == FT_ERR_SUCCESS)
+			(void)RuntimeAnalytics::end_scope();
 		if (error_code != FT_ERR_SUCCESS)
 		{
 			const int32_t restore_block_result = chunk->chunk.write_block(
@@ -104,7 +113,11 @@ int32_t WorldBlockEditor::replace_block_state(World &world, int32_t world_x,
 			return (error_code);
 		}
 	}
-	chunk->mark_content_changed();
+	const bool lighting_changed = world_block_lighting::inputs_differ(
+		current_block_id, replacement_block_id);
+	if (already_published)
+		world.terrain_chunk_store().release_prepared_edit(*prepared);
+	chunk->mark_content_changed(lighting_changed);
 	chunk->commit_prepared_read_state(prepared_read_state);
 	world.chunk_streamer.mark_remesh_dirty(*chunk);
 	chunk->cancel_remesh_work();
@@ -119,15 +132,15 @@ int32_t WorldBlockEditor::replace_block_state(World &world, int32_t world_x,
 		(void)chunk->chunk.record_dirty_edit(edit);
 	}
 	world.chunk_streamer.mark_edit_remeshes(chunk_x, chunk_z, local_x,
-		world_y, local_z);
-	if (voxel_block_emitted_light_level(current_block_id)
-		> voxel_block_emitted_light_level(replacement_block_id))
-		incremental_removal_light = FT_TRUE;
-	else if (voxel_block_emitted_light_level(current_block_id)
-		< voxel_block_emitted_light_level(replacement_block_id))
-		incremental_additive_light = FT_TRUE;
-	else if (replacement_block_id == GAME_VOXEL_AIR_BLOCK)
-		incremental_additive_light = FT_TRUE;
+		world_y, local_z, lighting_changed);
+	if (lighting_changed)
+	{
+		if (voxel_block_emitted_light_level(current_block_id)
+			< voxel_block_emitted_light_level(replacement_block_id))
+			incremental_additive_light = FT_TRUE;
+		else
+			incremental_removal_light = FT_TRUE;
+	}
 	world.chunk_streamer.prioritize_edit_border_remeshes(chunk_x, chunk_z,
 		local_x, world_y, local_z, incremental_additive_light,
 		incremental_removal_light, current_block_id, replacement_block_id,

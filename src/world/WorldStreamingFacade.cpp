@@ -1,4 +1,5 @@
 #include "../../src/world/World.hpp"
+#include "../../src/edits/WorldBlockLighting.hpp"
 #include "../../src/coordinates/WorldCoordinates.hpp"
 #include "../../src/diagnostics/RuntimeAnalytics.hpp"
 #include "../../Libft/Modules/Basic/limits.hpp"
@@ -245,6 +246,12 @@ WorldChunk *World::find_chunk_mutable(int32_t chunk_x, int32_t chunk_z)
 				chunk_z)));
 }
 
+int32_t World::publish_pending_remeshes() noexcept
+{
+	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
+	return (this->chunk_streamer.update_pending_remeshes());
+}
+
 int32_t World::update_around(double camera_x, double camera_z,
 	int32_t generation_budget)
 {
@@ -262,6 +269,9 @@ int32_t World::update_around(double camera_x, double camera_z,
 	std::vector<int32_t> evicted_chunk_z;
 	std::vector<std::unique_ptr<WorldChunk>> retired_chunks;
 	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
+	/* Keep the live participant loaded until its durable edit is applied. */
+	if (this->terrain_chunk_store_.has_reserved_edit())
+		return (this->chunk_streamer.update_pending_remeshes());
 #if defined(LIBFT_ENABLE_ANALYTICS)
 	int32_t loaded_before_recenter;
 	int32_t loaded_after_recenter;
@@ -500,6 +510,8 @@ int32_t World::delete_block_at(int32_t world_x, int32_t world_y,
 	int32_t world_z)
 {
 	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
+	if (this->terrain_chunk_store_.has_reserved_edit())
+		return (FT_ERR_THREAD_BUSY);
 	if (world_y < 0 || world_y >= GAME_VOXEL_CHUNK_HEIGHT)
 		return (FT_ERR_INVALID_ARGUMENT);
 	const FluidCellOverride edit = {world_x, world_y, world_z, GAME_VOXEL_AIR_BLOCK};
@@ -520,6 +532,8 @@ int32_t World::place_block_at(int32_t world_x, int32_t world_y, int32_t world_z,
 	uint32_t block_id)
 {
 	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
+	if (this->terrain_chunk_store_.has_reserved_edit())
+		return (FT_ERR_THREAD_BUSY);
 	if (world_y < 0 || world_y >= GAME_VOXEL_CHUNK_HEIGHT)
 		return (FT_ERR_INVALID_ARGUMENT);
 	const FluidCellOverride edit = {world_x, world_y, world_z, block_id};
@@ -555,6 +569,9 @@ int32_t World::replace_block_state_at(int32_t world_x, int32_t world_y,
 	WorldTerrainChunkStore::PreparedEdit *prepared)
 {
 	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
+	if (this->terrain_chunk_store_.has_reserved_edit()
+		&& (prepared == nullptr || !prepared->published || !prepared->has_reservation()))
+		return (FT_ERR_THREAD_BUSY);
 	if (world_y < 0 || world_y >= GAME_VOXEL_CHUNK_HEIGHT)
 		return (FT_ERR_INVALID_ARGUMENT);
 	const FluidCellOverride edit = {world_x, world_y, world_z, replacement_block_id};
@@ -570,6 +587,129 @@ int32_t World::replace_block_state_at(int32_t world_x, int32_t world_y,
 	if (result == FT_ERR_SUCCESS)
 		commit_fluid_override(this->fluid_cell_overrides_, edit, index, existing);
 	return (result);
+}
+
+int32_t World::replace_chunk_block_states(int32_t chunk_x, int32_t chunk_z,
+	uint64_t expected_voxel_revision, const WorldChunkBlockEdit *edits,
+	std::size_t count)
+{
+	if (edits == nullptr || count == 0U || count > MAX_CHUNK_BLOCK_EDITS
+		|| expected_voxel_revision == 0U)
+		return (FT_ERR_INVALID_ARGUMENT);
+	std::unique_lock<std::shared_mutex> lock(this->world_data_mutex_);
+	if (this->terrain_chunk_store_.has_reserved_edit())
+		return (FT_ERR_THREAD_BUSY);
+	WorldChunk *chunk = this->find_chunk_mutable(chunk_x, chunk_z);
+	if (chunk == nullptr || !chunk->initialized)
+		return (FT_ERR_NOT_FOUND);
+	if (chunk->voxel_revision != expected_voxel_revision)
+		return (FT_ERR_INVALID_STATE);
+	bool lighting_changed = false;
+	for (std::size_t index = 0U; index < count; ++index)
+	{
+		const WorldChunkBlockEdit &edit = edits[index];
+		if (edit.local_x < 0 || edit.local_x >= GAME_VOXEL_CHUNK_WIDTH
+			|| edit.local_y < 0 || edit.local_y >= GAME_VOXEL_CHUNK_HEIGHT
+			|| edit.local_z < 0 || edit.local_z >= GAME_VOXEL_CHUNK_DEPTH
+			|| edit.expected_block_id == edit.replacement_block_id
+			|| voxel_block_is_known(edit.expected_block_id) != FT_TRUE
+			|| voxel_block_is_known(edit.replacement_block_id) != FT_TRUE
+			|| voxel_block_is_flowing_fluid(edit.expected_block_id) == FT_TRUE
+			|| voxel_block_is_flowing_fluid(edit.replacement_block_id) == FT_TRUE)
+			return (FT_ERR_INVALID_ARGUMENT);
+		if (std::any_of(edits, edits + index, [&edit](const WorldChunkBlockEdit &other)
+			{
+				return (edit.local_x == other.local_x && edit.local_y == other.local_y
+					&& edit.local_z == other.local_z);
+			}))
+			return (FT_ERR_INVALID_ARGUMENT);
+		uint32_t current_block = GAME_VOXEL_AIR_BLOCK;
+		const int32_t result = chunk->chunk.read_block(edit.local_x, edit.local_y,
+			edit.local_z, &current_block);
+		if (result != FT_ERR_SUCCESS)
+			return (result);
+		if (current_block != edit.expected_block_id)
+			return (FT_ERR_INVALID_STATE);
+		lighting_changed |= world_block_lighting::inputs_differ(current_block,
+			edit.replacement_block_id);
+	}
+
+	std::shared_ptr<WorldChunkReadState> read_state;
+	int32_t result = chunk->prepare_read_state_after_block_edits(edits, count, read_state);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	std::vector<FluidCellOverride> overrides;
+	try
+	{
+		overrides = this->fluid_cell_overrides_;
+	}
+	catch (const std::bad_alloc &)
+	{
+		return (FT_ERR_NO_MEMORY);
+	}
+	game_voxel_chunk replacement;
+	result = replacement.initialize(chunk->chunk);
+	for (std::size_t index = 0U; index < count && result == FT_ERR_SUCCESS; ++index)
+	{
+		const WorldChunkBlockEdit &edit = edits[index];
+		const FluidCellOverride cell = {chunk->world_x + edit.local_x, edit.local_y,
+			chunk->world_z + edit.local_z, edit.replacement_block_id};
+		std::size_t position;
+		bool existing;
+		result = prepare_fluid_override(overrides, cell, position, existing);
+		if (result != FT_ERR_SUCCESS)
+			return (result);
+		commit_fluid_override(overrides, cell, position, existing);
+		const game_block_edit_op operation = {cell.world_x, cell.world_y, cell.world_z,
+			cell.block_id, this->current_tick};
+		result = replacement.apply_block_edit(edit.local_x, edit.local_y, edit.local_z,
+			operation);
+	}
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	game_voxel_chunk rollback;
+	const bool persistent = this->terrain_chunk_store_.is_initialized();
+	if (persistent)
+		result = rollback.initialize(chunk->chunk);
+	if (result == FT_ERR_SUCCESS)
+		result = chunk->chunk.move(replacement);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	if (persistent)
+	{
+		const int32_t scope = RuntimeAnalytics::begin_scope(RuntimeAnalyticsScope::WORLD_STREAM_SAVE);
+		result = this->terrain_chunk_store_.save_chunk(chunk_x, chunk_z, chunk->chunk);
+		if (scope == FT_ERR_SUCCESS)
+			(void)RuntimeAnalytics::end_scope();
+		if (result != FT_ERR_SUCCESS)
+			return (chunk->chunk.move(rollback) == FT_ERR_SUCCESS ? result : FT_ERR_INVALID_STATE);
+	}
+	this->fluid_cell_overrides_.swap(overrides);
+	chunk->mark_content_changed(lighting_changed);
+	/* Libft advances its authoritative terrain revision for each cell. Keep
+	 * the same revision step while publishing the final content only once. */
+	chunk->voxel_revision += count - 1U;
+	chunk->commit_prepared_read_state(read_state);
+	this->chunk_streamer.mark_remesh_dirty(*chunk);
+	chunk->cancel_remesh_work();
+	for (std::size_t index = 0U; index < count; ++index)
+	{
+		const WorldChunkBlockEdit &edit = edits[index];
+		const bool light_changed = world_block_lighting::inputs_differ(edit.expected_block_id,
+			edit.replacement_block_id);
+		const bool additive = voxel_block_emitted_light_level(edit.expected_block_id)
+			< voxel_block_emitted_light_level(edit.replacement_block_id);
+		this->chunk_streamer.mark_edit_remeshes(chunk_x, chunk_z, edit.local_x,
+			edit.local_y, edit.local_z, light_changed);
+		this->chunk_streamer.prioritize_edit_border_remeshes(chunk_x, chunk_z, edit.local_x,
+			edit.local_y, edit.local_z, light_changed && additive ? FT_TRUE : FT_FALSE,
+			light_changed && !additive ? FT_TRUE : FT_FALSE, edit.expected_block_id,
+			edit.replacement_block_id, chunk->light.get(edit.local_x, edit.local_y, edit.local_z));
+	}
+	/* The streamer can retry submission from the dirty interactive entry. The
+	 * edits and terrain file are already committed at this point. */
+	(void)this->chunk_streamer.queue_chunk_remesh(*chunk);
+	return (FT_ERR_SUCCESS);
 }
 
 int32_t World::capture_block_state_write(int32_t world_x, int32_t world_y,
@@ -614,6 +754,18 @@ int32_t World::capture_block_state_write(int32_t world_x, int32_t world_y,
 	if (result == FT_ERR_SUCCESS && !edit->destination.empty())
 		out = std::move(edit);
 	return (result);
+}
+
+int32_t World::reserve_prepared_block_write(WorldTerrainChunkStore::PreparedEdit &edit) noexcept
+{
+	std::unique_lock<std::shared_mutex> lock(this->world_data_mutex_);
+	const WorldChunk *chunk = this->find_chunk(edit.chunk_x, edit.chunk_z);
+	if (chunk == nullptr || !chunk->initialized || chunk->read_state == nullptr
+		|| edit.base == nullptr || edit.base->voxel_revision != chunk->voxel_revision
+		|| edit.base->block_sections != chunk->read_state->block_sections
+		|| edit.terrain_revision != chunk->chunk.get_revision())
+		return (FT_ERR_INVALID_STATE);
+	return (this->terrain_chunk_store_.reserve_prepared_edit(edit));
 }
 
 int32_t World::till_farmland_at(int32_t world_x, int32_t world_y,
@@ -971,6 +1123,8 @@ int32_t World::apply_authoritative_block_change(
 	};
 #endif
 	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
+	if (this->terrain_chunk_store_.has_reserved_edit())
+		return (FT_ERR_THREAD_BUSY);
 #if defined(LIBFT_ENABLE_ANALYTICS)
 	const auto lock_acquired = Clock::now();
 	uint64_t rollback_us = 0U;
@@ -1009,6 +1163,9 @@ int32_t World::apply_authoritative_block_change(
 		return (FT_ERR_PERMISSION_DENIED);
 	existing_light = world_chunk->light.get(request.local_x, request.local_y,
 		request.local_z);
+	const bool lighting_changed = world_block_lighting::inputs_differ(existing_block_id,
+		request.requested_block_id);
+	const bool light_was_current = world_chunk->light_is_current();
 	previous_revision = world_chunk->chunk.get_revision();
 	std::shared_ptr<WorldChunkReadState> prepared_read_state;
 	error_code = world_chunk->prepare_read_state_after_block_edit(
@@ -1060,7 +1217,10 @@ int32_t World::apply_authoritative_block_change(
 	world_chunk->voxel_revision = current_revision;
 	world_chunk->content_version = world_light_version::next(
 		world_chunk->content_version);
-	world_chunk->mark_light_input_changed();
+	if (lighting_changed)
+		world_chunk->mark_light_input_changed();
+	else if (light_was_current)
+		world_chunk->light_version = world_chunk->content_version;
 	world_chunk->commit_prepared_read_state(prepared_read_state);
 	this->chunk_streamer.mark_remesh_dirty(*world_chunk);
 	(void)this->invalidate_loom_station_if_block_changed(
@@ -1088,10 +1248,10 @@ int32_t World::apply_authoritative_block_change(
 	this->chunk_streamer.mark_edit_remeshes(request.chunk_x,
 		request.chunk_z, static_cast<int32_t>(request.local_x),
 		static_cast<int32_t>(request.local_y),
-		static_cast<int32_t>(request.local_z));
+		static_cast<int32_t>(request.local_z), lighting_changed);
 	incremental_additive_light = FT_FALSE;
 	incremental_removal_light = FT_FALSE;
-	if (request.requested_block_id == GAME_VOXEL_AIR_BLOCK)
+	if (lighting_changed && request.requested_block_id == GAME_VOXEL_AIR_BLOCK)
 	{
 		if (voxel_block_emitted_light_level(existing_block_id) == 0U)
 			incremental_additive_light = FT_TRUE;
@@ -1104,7 +1264,7 @@ int32_t World::apply_authoritative_block_change(
 			 * contribution. */
 			incremental_removal_light = FT_TRUE;
 	}
-	else
+	else if (lighting_changed)
 		incremental_removal_light = FT_TRUE;
 	this->chunk_streamer.prioritize_edit_border_remeshes(request.chunk_x,
 		request.chunk_z, static_cast<int32_t>(request.local_x),
@@ -1148,12 +1308,16 @@ void World::advance_tick()
 int32_t World::undo_last_edit()
 {
 	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
+	if (this->terrain_chunk_store_.has_reserved_edit())
+		return (FT_ERR_THREAD_BUSY);
 	return (this->edit_history.undo(*this));
 }
 
 int32_t World::redo_last_edit()
 {
 	std::unique_lock<std::shared_mutex> write_lock(this->world_data_mutex_);
+	if (this->terrain_chunk_store_.has_reserved_edit())
+		return (FT_ERR_THREAD_BUSY);
 	return (this->edit_history.redo(*this));
 }
 

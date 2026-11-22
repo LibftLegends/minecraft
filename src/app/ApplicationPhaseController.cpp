@@ -111,8 +111,17 @@ ApplicationPhaseController::Phase ApplicationPhaseController::tick_in_game(Appli
 				"[Application] session failed; returning to main menu error=%d\n",
 				session.error_code());
 	#endif
-		if (session.stop() != FT_ERR_SUCCESS)
-			return (Phase::IN_GAME);
+		const int32_t stop_error = session.stop();
+		if (stop_error != FT_ERR_SUCCESS)
+		{
+			/* Keep the unsaved session, but stop retrying its failing update
+			 * and checkpoint on every frame. Give the player menu controls. */
+			std::fprintf(stderr, "[Application] unable to save/stop session error=%d; "
+				"opening pause menu with session retained\n", stop_error);
+			menu.show_in_game_settings();
+			window.set_cursor_visible(true);
+			return (Phase::IN_GAME_SETTINGS);
+		}
 		menu.show_main_menu();
 		window.set_cursor_visible(true);
 		return (Phase::MAIN_MENU);
@@ -134,8 +143,14 @@ ApplicationPhaseController::Phase ApplicationPhaseController::tick_in_game_setti
 	}
 	if (menu.wants_main_menu())
 	{
-		if (session.stop() != FT_ERR_SUCCESS)
+		const int32_t stop_error = session.stop();
+		if (stop_error != FT_ERR_SUCCESS)
+		{
+			std::fprintf(stderr, "[Application] unable to save/stop session error=%d; "
+				"session retained\n", stop_error);
+			menu.clear_flags();
 			return (Phase::IN_GAME_SETTINGS);
+		}
 		menu.show_main_menu();
 		menu.clear_flags();
 		window.set_cursor_visible(true);

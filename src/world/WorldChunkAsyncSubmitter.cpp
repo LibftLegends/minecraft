@@ -235,28 +235,31 @@ int32_t WorldChunkAsyncSubmitter::submit_dirty_remeshes(
 	}
 	if (streamer.priority_remesh_pending_)
 	{
-		WorldChunk *ready = nullptr;
 		int32_t inspected = 0;
-		for (auto entry = streamer.priority_remeshes_.begin();
-			entry != streamer.priority_remeshes_.end() && inspected < scan_budget;)
+		/* A lighting dependency can block the first entry. Try another ready
+		 * chunk within this frame's scan budget before waiting another frame. */
+		for (int32_t attempt = 0; attempt < 3 && inspected < scan_budget; ++attempt)
 		{
-			WorldChunk *chunk = streamer.world_.find_chunk_mutable(
-				entry->chunk_x, entry->chunk_z);
-			inspected += 1;
-			if (chunk == nullptr || !chunk->mesh_dirty)
-				entry = streamer.priority_remeshes_.erase(entry);
-			else if (chunk->pending_mesh_request_id != 0U)
-				++entry;
-			else
+			WorldChunk *ready = nullptr;
+			for (auto entry = streamer.priority_remeshes_.begin();
+				entry != streamer.priority_remeshes_.end() && inspected < scan_budget;)
 			{
-				ready = chunk;
-				break ;
+				WorldChunk *chunk = streamer.world_.find_chunk_mutable(
+					entry->chunk_x, entry->chunk_z);
+				inspected += 1;
+				if (chunk == nullptr || !chunk->mesh_dirty)
+					entry = streamer.priority_remeshes_.erase(entry);
+				else if (chunk->pending_mesh_request_id != 0U)
+					++entry;
+				else
+				{
+					ready = chunk;
+					break ;
+				}
 			}
-		}
-		/* Keep edit seeds until publication. A cancelled or stale request
-		 * does not advance the published light baseline. */
-		if (ready != nullptr)
-		{
+			if (ready == nullptr)
+				break ;
+			/* Keep the seeds until the matching result publishes its light. */
 			error_code = streamer.queue_chunk_remesh(*ready);
 			if (error_code == FT_ERR_SUCCESS && ready->pending_mesh_request_id != 0U)
 			{
@@ -265,22 +268,17 @@ int32_t WorldChunkAsyncSubmitter::submit_dirty_remeshes(
 			}
 			if (error_code != FT_ERR_SUCCESS && error_code != FT_ERR_FULL)
 				return (error_code);
-			if (error_code == FT_ERR_FULL)
+			if (error_code != FT_ERR_FULL)
+				break ;
+			const auto blocked = std::find_if(streamer.priority_remeshes_.begin(),
+				streamer.priority_remeshes_.end(), [ready](const auto &entry)
 			{
-				/* Submission can promote a dependency. Locate this entry again
-				 * before allowing another ready chunk to take its place. */
-				for (auto entry = streamer.priority_remeshes_.begin();
-					entry != streamer.priority_remeshes_.end(); ++entry)
-				{
-					if (entry->chunk_x == ready->chunk_x
-						&& entry->chunk_z == ready->chunk_z)
-					{
-						std::rotate(entry, std::next(entry),
-							streamer.priority_remeshes_.end());
-						break ;
-					}
-				}
-			}
+				return (entry.chunk_x == ready->chunk_x && entry.chunk_z == ready->chunk_z);
+			});
+			if (blocked == streamer.priority_remeshes_.end()
+				|| std::next(blocked) == streamer.priority_remeshes_.end())
+				break ;
+			std::rotate(blocked, std::next(blocked), streamer.priority_remeshes_.end());
 		}
 		streamer.priority_remesh_pending_ = !streamer.priority_remeshes_.empty();
 		if (streamer.priority_remesh_pending_)

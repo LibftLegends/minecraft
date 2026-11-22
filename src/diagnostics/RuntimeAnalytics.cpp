@@ -5,6 +5,7 @@
 # include "../../Libft/Modules/Analytics/analytics.hpp"
 # include "../../Libft/Modules/Basic/class_nullptr.hpp"
 # include <cstdio>
+# include <filesystem>
 
 namespace
 {
@@ -75,11 +76,15 @@ int32_t RuntimeAnalytics::initialize(ft_bool start_exporter,
         return (FT_ERR_ALREADY_INITIALISED);
     if (enable_recording == FT_FALSE)
         return (FT_ERR_SUCCESS);
+    std::error_code directory_error;
+    std::filesystem::create_directories("build_logs", directory_error);
+    if (directory_error)
+        return (FT_ERR_IO);
     error_code = analytics_default_session_config(&configuration);
     if (error_code != FT_ERR_SUCCESS)
         return (error_code);
-    configuration.output_path = "minecraft_analytics.jsonl";
-    configuration.world_output_path = "minecraft_world_analytics.jsonl";
+    configuration.output_path = "build_logs/minecraft_analytics.jsonl";
+    configuration.world_output_path = "build_logs/minecraft_world_analytics.jsonl";
     configuration.output_format = analytics_output_format::JSONL;
     /* Keep frame/region accounting continuous, but sample expensive trace
      * serialization. Detailed traces remain available on selected frames. */
@@ -184,7 +189,7 @@ int32_t RuntimeAnalytics::end_frame() noexcept
         error_code = g_session.get_export_error();
     slow_finalize = finalize_end >= finalize_start
         && finalize_end - finalize_start >= 1000000U ? FT_TRUE : FT_FALSE;
-    if (slow_finalize != FT_FALSE)
+	if (slow_finalize != FT_FALSE && g_frame_number % 120U == 0U)
     {
         dropped_scopes = g_session.get_dropped_scope_count();
         dropped_traces = g_session.get_dropped_trace_count();

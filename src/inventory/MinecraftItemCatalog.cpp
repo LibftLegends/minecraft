@@ -9,6 +9,11 @@
 #include <cstdio>
 #include <utility>
 
+namespace
+{
+	constexpr int32_t BUILTIN_BLOCK_ITEM_STACK_LIMIT = 64;
+}
+
 MinecraftItemCatalog::MinecraftItemCatalog() : definitions_(),
 	builtin_rules_(), runtime_rules_(), content_rules_(), equipment_rules_(),
 	item_tag_rules_(),
@@ -168,7 +173,7 @@ int32_t MinecraftItemCatalog::register_builtin_block_items() noexcept
 
 		if (rule.policy == MINECRAFT_BLOCK_ACQUISITION_SELF_ITEM
 			|| rule.policy == MINECRAFT_BLOCK_ACQUISITION_ADMIN_ONLY)
-			error_code = this->register_item(rule.item_id, 64);
+			error_code = this->register_item(rule.item_id, BUILTIN_BLOCK_ITEM_STACK_LIMIT);
 		++block_id;
 	}
 	return (error_code);
@@ -1444,19 +1449,24 @@ int32_t MinecraftItemCatalog::resolve_content_item_rule(int32_t item_id,
 			&& (block_rule.policy == MINECRAFT_BLOCK_ACQUISITION_SELF_ITEM
 				|| block_rule.policy == MINECRAFT_BLOCK_ACQUISITION_ADMIN_ONLY))
 		{
-			game_item_definition definition;
-
-			error_code = this->definitions_.fetch_item_definition(item_id,
-				definition);
-			if (error_code != FT_ERR_SUCCESS)
-				return (error_code);
+			/* Built-in block definitions are registered with this stack limit.
+			 * Ground-drop validation only needs the lightweight acquisition rule. */
+			int32_t max_stack = BUILTIN_BLOCK_ITEM_STACK_LIMIT;
+			if (block_id >= VOXEL_BUILTIN_BLOCK_COUNT)
+			{
+				game_item_definition definition;
+				error_code = this->definitions_.fetch_item_definition(item_id, definition);
+				if (error_code != FT_ERR_SUCCESS)
+					return (error_code);
+				max_stack = definition.get_max_stack();
+				(void)definition.destroy();
+			}
 			rule_out->item_id = item_id;
-			rule_out->max_stack = definition.get_max_stack();
+			rule_out->max_stack = max_stack;
 			rule_out->acquisition = block_rule.policy
 				== MINECRAFT_BLOCK_ACQUISITION_ADMIN_ONLY
 				? MINECRAFT_ITEM_ACQUISITION_RESTRICTED
 				: MINECRAFT_ITEM_ACQUISITION_WORLD;
-			(void)definition.destroy();
 			return (FT_ERR_SUCCESS);
 		}
 	}
@@ -1510,6 +1520,9 @@ int32_t MinecraftItemCatalog::validate_inventory_instance_policy(
 		if (required && (item.instance_id == 0U || item.stack_size != 1
 			|| item.max_stack != 1))
 			return (FT_ERR_INVALID_STATE);
+		if (item.item_id >= BLOCK_ITEM_ID_BASE
+			&& static_cast<uint32_t>(item.item_id - BLOCK_ITEM_ID_BASE) < VOXEL_BUILTIN_BLOCK_COUNT)
+			continue ;
 		MinecraftEquipmentRule equipment = {};
 		if (this->resolve_equipment_rule(item.item_id, &equipment)
 			== FT_ERR_SUCCESS)

@@ -43,6 +43,9 @@ class GameTransactionJournal
 		uint32_t transaction_type, const uint8_t *payload,
 		uint32_t payload_size, uint64_t *sequence_out,
 		bool *replayed_out) noexcept;
+	/* Undo a new prepare when its initial checkpoint failed. */
+	int32_t rollback_last_prepare(uint64_t scope_id, uint64_t request_id,
+		uint64_t sequence) noexcept;
 	int32_t mark_committed(uint64_t scope_id, uint64_t request_id) noexcept;
 	int32_t mark_aborted(uint64_t scope_id, uint64_t request_id) noexcept;
 	/* Explicit operator retry only: reopen a terminal aborted operation after

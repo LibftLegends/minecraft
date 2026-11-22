@@ -181,6 +181,7 @@ class WorldChunkStreamer
 		uint16_t light_dependency_mask;
 		ft_bool interactive;
 		bool geometry_only;
+		bool geometry_preview_only;
 		ft_bool incremental_additive_light;
 		ft_bool incremental_removal_light;
 		int32_t incremental_local_x;
@@ -251,6 +252,7 @@ class WorldChunkStreamer
 	void cancel_pending_remeshes() noexcept;
 	void invalidate_non_ready_candidates() noexcept;
 	void reset_candidates_after_regeneration() noexcept;
+	int32_t update_pending_remeshes() noexcept;
 	int32_t queue_chunk_remesh(WorldChunk &chunk,
 		ft_bool incremental_additive_light = FT_FALSE,
 		ft_bool incremental_removal_light = FT_FALSE,
@@ -270,6 +272,9 @@ class WorldChunkStreamer
 		bool incremental_edit = false, bool source_arrival = false) noexcept;
 	void mark_edit_remeshes(int32_t chunk_x, int32_t chunk_z,
 		int32_t local_x, int32_t local_y, int32_t local_z) noexcept;
+	void mark_edit_remeshes(int32_t chunk_x, int32_t chunk_z,
+		int32_t local_x, int32_t local_y, int32_t local_z,
+		bool light_input_changed) noexcept;
 	int32_t queue_neighbor_remeshes(int32_t chunk_x, int32_t chunk_z) noexcept;
 	void prioritize_chunk_remesh(int32_t chunk_x, int32_t chunk_z) noexcept;
 	void prioritize_chunk_remesh_from_origin(int32_t chunk_x,

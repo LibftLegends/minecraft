@@ -38,6 +38,113 @@ namespace
 			&& chunk.light_buffer_is_valid());
 	}
 
+	static bool has_pending_edit_geometry(const WorldChunk &chunk) noexcept
+	{
+		return (chunk.pending_mesh_request_id != 0U
+			&& chunk.pending_mesh_request_interactive != FT_FALSE
+			&& chunk.pending_mesh_request_voxel_revision == chunk.voxel_revision
+			&& chunk.pending_mesh_request_content_version == chunk.content_version
+			&& chunk.last_mesh_publication_voxel_revision != chunk.voxel_revision);
+	}
+
+	static bool uses_cached_preview_light(const WorldGenerationPipeline::Result &result) noexcept
+	{
+		using Result = WorldGenerationPipeline::Result;
+		return ((result.stage_mask & Result::STAGE_GEOMETRY_ONLY) != 0U
+			&& (result.stage_mask & Result::STAGE_GEOMETRY_FINAL) == 0U);
+	}
+
+	static void seed_border_opening_light(
+		WorldGenerationPipeline::WorldChunkSnapshot &snapshot,
+		const std::shared_ptr<const WorldChunkReadState> (&states)[9],
+		int32_t source_x, int32_t source_z, int32_t receiver_x, int32_t y,
+		int32_t receiver_z) noexcept
+	{
+		const int32_t x = receiver_x + (source_x - snapshot.chunk_x);
+		const int32_t z = receiver_z + (source_z - snapshot.chunk_z);
+		constexpr int32_t halo = WorldGenerationPipeline::LIGHT_SNAPSHOT_HALO;
+		constexpr int32_t edge = GAME_VOXEL_CHUNK_WIDTH + 2 * halo;
+		if (x < -1 || x > GAME_VOXEL_CHUNK_WIDTH
+			|| z < -1 || z > GAME_VOXEL_CHUNK_DEPTH
+			|| y < 0 || y >= GAME_VOXEL_CHUNK_HEIGHT)
+			return ;
+		const uint32_t column = snapshot.lighting_ring_offsets[
+			static_cast<std::size_t>(z + halo) * edge + x + halo];
+		if (column == UINT32_MAX)
+			return ;
+		const std::size_t opening = static_cast<std::size_t>(column) + y;
+		if (snapshot.lighting_blocks[opening] != GAME_VOXEL_AIR_BLOCK)
+			return ;
+		constexpr int32_t offsets[6][3] = {{0, 1, 0}, {0, -1, 0},
+			{-1, 0, 0}, {1, 0, 0}, {0, 0, -1}, {0, 0, 1}};
+		const int32_t world_x = snapshot.chunk_x * GAME_VOXEL_CHUNK_WIDTH + x;
+		const int32_t world_z = snapshot.chunk_z * GAME_VOXEL_CHUNK_DEPTH + z;
+		uint8_t sky = voxel_light_sky(snapshot.lighting_existing_light[opening]);
+		uint8_t block = voxel_light_block(snapshot.lighting_existing_light[opening]);
+		for (const auto &offset : offsets)
+		{
+			const int32_t sample_y = y + offset[1];
+			if (sample_y == GAME_VOXEL_CHUNK_HEIGHT)
+				sky = 15U;
+			if (sample_y < 0 || sample_y >= GAME_VOXEL_CHUNK_HEIGHT)
+				continue ;
+			uint8_t sample = 0U;
+			if (WorldChunkSnapshotReader::lookup_snapshot_light(&snapshot,
+					world_x + offset[0], sample_y, world_z + offset[2], &sample)
+				!= FT_ERR_SUCCESS)
+			{
+				/* A preview captures only the outermost row from each neighbour.
+				 * Sample the next row inward from the immutable source state. */
+				for (const auto &state : states)
+				{
+					if (state == nullptr || state->initialized == FT_FALSE
+						|| state->light_valid == FT_FALSE)
+						continue ;
+					const int32_t sample_x = world_x + offset[0] - state->world_x;
+					const int32_t sample_z = world_z + offset[2] - state->world_z;
+					if (sample_x < 0 || sample_x >= GAME_VOXEL_CHUNK_WIDTH
+						|| sample_z < 0 || sample_z >= GAME_VOXEL_CHUNK_DEPTH)
+						continue ;
+					sample = (*state->light)[WorldChunkReadState::light_offset(
+						sample_x, sample_y, sample_z)];
+					break ;
+				}
+			}
+			const uint8_t sample_sky = voxel_light_sky(sample);
+			const uint8_t sample_block = voxel_light_block(sample);
+			if (offset[1] == 1 && sample_sky == 15U)
+				sky = 15U;
+			else if (sample_sky > sky + 1U)
+				sky = static_cast<uint8_t>(sample_sky - 1U);
+			if (sample_block > block + 1U)
+				block = static_cast<uint8_t>(sample_block - 1U);
+		}
+		snapshot.lighting_existing_light[opening] = voxel_light_pack(sky, block);
+	}
+
+	static void seed_border_preview_light(
+		WorldGenerationPipeline::WorldChunkSnapshot &snapshot,
+		const std::shared_ptr<const WorldChunkReadState> (&states)[9],
+		int32_t source_x, int32_t source_z) noexcept
+	{
+		const int32_t dx = source_x - snapshot.chunk_x;
+		const int32_t dz = source_z - snapshot.chunk_z;
+		if (std::abs(dx) + std::abs(dz) != 1)
+			return ;
+		/* Several deletions can share one receiver preview. Seed the face
+		 * from the top down so a stacked opening preserves direct sunlight. */
+		const int32_t span = dx != 0 ? GAME_VOXEL_CHUNK_DEPTH : GAME_VOXEL_CHUNK_WIDTH;
+		for (int32_t y = GAME_VOXEL_CHUNK_HEIGHT - 1; y >= 0; --y)
+		{
+			for (int32_t along = 0; along < span; ++along)
+			{
+				const int32_t x = dx == 0 ? along : (dx < 0 ? 0 : GAME_VOXEL_CHUNK_WIDTH - 1);
+				const int32_t z = dz == 0 ? along : (dz < 0 ? 0 : GAME_VOXEL_CHUNK_DEPTH - 1);
+				seed_border_opening_light(snapshot, states, source_x, source_z, x, y, z);
+			}
+		}
+	}
+
 	/* A newly arrived neighbour only invalidates a published light field when
 	 * its shared face can actually add light to a transparent boundary cell.
 	 * The summaries are refreshed whenever a chunk publishes a read state, so
@@ -269,8 +376,8 @@ void WorldChunkStreamer::run_remesh_capture_worker() noexcept
 		task_cancelled = task.cancellation_token == nullptr
 			|| task.cancellation_token->load(std::memory_order_acquire)
 			!= task.cancellation_token_value;
-		stale_capture = task_cancelled || task.relevance_epoch
-			!= this->remesh_capture_relevance_epoch_.load();
+		stale_capture = task_cancelled || (task.interactive == FT_FALSE
+			&& task.relevance_epoch != this->remesh_capture_relevance_epoch_.load());
 		if (stale_capture)
 			this->stale_remesh_capture_count_ += 1U;
 	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
@@ -289,7 +396,8 @@ void WorldChunkStreamer::run_remesh_capture_worker() noexcept
 			capture_start = std::chrono::steady_clock::now();
 		const bool needs_full_lighting_halo = task.read_states[0] == nullptr
 			|| task.read_states[0]->light_valid == FT_FALSE
-			|| (!task.geometry_only && task.incremental_light_seeds.empty());
+			|| (!task.geometry_only && !task.geometry_preview_only
+				&& task.incremental_light_seeds.empty());
 		error_code = stale_capture ? FT_ERR_INVALID_STATE
 			: WorldChunkSnapshotCapture::capture_read_states(
 				task.read_states[0], task.read_states[1], task.read_states[2],
@@ -340,8 +448,8 @@ void WorldChunkStreamer::run_remesh_capture_worker() noexcept
 			&& (task.cancellation_token == nullptr
 				|| task.cancellation_token->load(std::memory_order_acquire)
 					!= task.cancellation_token_value
-				|| task.relevance_epoch
-					!= this->remesh_capture_relevance_epoch_.load()))
+				|| (task.interactive == FT_FALSE
+					&& task.relevance_epoch != this->remesh_capture_relevance_epoch_.load())))
 		{
 			error_code = FT_ERR_INVALID_STATE;
 			if (!stale_capture)
@@ -352,6 +460,12 @@ void WorldChunkStreamer::run_remesh_capture_worker() noexcept
 		}
 		if (error_code == FT_ERR_SUCCESS)
 		{
+			snapshot.geometry_preview_only = task.geometry_preview_only;
+			/* Patch the private preview only. The final light field is solved
+			 * independently against the current voxels. */
+			if (task.geometry_preview_only && task.dependency_valid != FT_FALSE)
+				seed_border_preview_light(snapshot, task.read_states,
+					task.dependency_chunk_x, task.dependency_chunk_z);
 			snapshot.dependency_valid = task.dependency_valid;
 			snapshot.dependency_chunk_x = task.dependency_chunk_x;
 			snapshot.dependency_chunk_z = task.dependency_chunk_z;
@@ -459,59 +573,25 @@ int32_t WorldChunkStreamer::seed_initial_stream(int32_t stream_radius,
 
 void WorldChunkStreamer::handle_recenter() noexcept
 {
-	std::deque<RemeshCaptureTask> cancelled_capture_tasks;
-	std::size_t cancelled_capture_count;
-	int32_t index;
-
-	/* Invalidate capture tasks before touching their queues.  A capture worker
-	 * may already be copying immutable read states when recenter begins; the
-	 * post-capture relevance check must observe the new epoch and reject that
-	 * task before it can submit an old request after pending markers were
-	 * cleared below. */
+	/* Stream candidates are relative to the camera. Interactive remeshes
+	 * belong to loaded chunks and can keep going across a chunk crossing. */
 	this->stream_relevance_epoch_ += 1U;
 	this->remesh_capture_relevance_epoch_.store(
 		this->stream_relevance_epoch_);
-	this->generation_pipeline_.cancel_queued();
-	{
-		std::lock_guard<std::mutex> lock(this->remesh_capture_mutex_);
-		cancelled_capture_tasks.swap(this->remesh_capture_tasks_);
-	}
-	cancelled_capture_count = cancelled_capture_tasks.size();
-	while (!cancelled_capture_tasks.empty())
-	{
-		WorldChunk *cancelled_chunk = this->world_.find_chunk_mutable(
-			cancelled_capture_tasks.front().chunk_x,
-			cancelled_capture_tasks.front().chunk_z);
-		if (cancelled_chunk != nullptr
-			&& cancelled_chunk->pending_mesh_request_id
-				== cancelled_capture_tasks.front().request_id)
-		{
-			cancelled_chunk->clear_pending_remesh_request();
-			cancelled_chunk->mesh_dirty = true;
-		}
-		cancelled_capture_tasks.pop_front();
-	}
-	if (cancelled_capture_count != 0U)
-		this->remesh_capture_in_flight_.fetch_sub(cancelled_capture_count);
-	/* Recentring cancels queued generation work, including remesh requests.
-	 * Clear the chunk-side ownership markers for those requests as well; if a
-	 * marker survives cancellation, the scheduler treats the chunk as already
-	 * in flight forever and no replacement mesh can be submitted. */
-	index = 0;
-	while (index < this->world_.chunk_count)
+	for (int32_t index = 0; index < this->world_.chunk_count; ++index)
 	{
 		WorldChunk &chunk = this->world_.chunks[index];
-		if (chunk.initialized && chunk.pending_mesh_request_id != 0U)
-		{
-			chunk.clear_pending_remesh_request();
-			chunk.mesh_dirty = true;
-			chunk.light_revision += 1U;
-			/* Let the bounded dirty scheduler resubmit this replacement.  An empty
-			 * priority record here can overwrite the immutable seed metadata of a
-			 * newer gameplay edit. */
-		}
-		index += 1;
+		if (!chunk.initialized || chunk.pending_mesh_request_id == 0U
+			|| chunk.owns_current_interactive_remesh() || has_pending_edit_geometry(chunk))
+			continue ;
+		/* A capture can already be entering the pipeline. Invalidate its
+		 * token so it cannot replace the next request for this chunk. */
+		if (chunk.remesh_cancellation_token != nullptr)
+			chunk.remesh_cancellation_token->fetch_add(1U, std::memory_order_acq_rel);
+		chunk.clear_pending_remesh_request();
+		chunk.mesh_dirty = true;
 	}
+	this->generation_pipeline_.cancel_queued(true);
 	this->remesh_priority_anchor_valid_ = true;
 	this->remesh_priority_anchor_x_ = this->world_.center_chunk_x;
 	this->remesh_priority_anchor_z_ = this->world_.center_chunk_z;
@@ -601,6 +681,18 @@ int32_t WorldChunkStreamer::dispatch_incremental_stream(int32_t stream_radius,
 			generation_budget, generated));
 }
 
+int32_t WorldChunkStreamer::update_pending_remeshes() noexcept
+{
+	this->stream_frame_++;
+	this->drain_remesh_capture_failures();
+	this->recover_orphaned_remesh_markers();
+	const int32_t result = WorldGenerationResultCommitter::drain(*this,
+		this->world_, true);
+	if (result != FT_ERR_SUCCESS)
+		return (result);
+	return (WorldChunkAsyncSubmitter::submit_dirty_remeshes(*this));
+}
+
 int32_t WorldChunkStreamer::update(int32_t generation_budget,
 	int32_t stream_radius, bool center_changed) noexcept
 {
@@ -613,7 +705,9 @@ int32_t WorldChunkStreamer::update(int32_t generation_budget,
 	this->recover_orphaned_remesh_markers();
 	if (center_changed)
 	{
-	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+		const int32_t recenter_scope = RuntimeAnalytics::begin_scope(
+			RuntimeAnalyticsScope::WORLD_STREAM_RECENTER);
+	#if defined(DEBUG)
 		std::fprintf(stderr,
 			"[WorldGen] recenter center=(%d,%d) previous=(%d,%d)\n",
 			this->world_.center_chunk_x, this->world_.center_chunk_z,
@@ -621,6 +715,8 @@ int32_t WorldChunkStreamer::update(int32_t generation_budget,
 			this->world_.chunk_index_center_z);
 	#endif
 		this->handle_recenter();
+		if (recenter_scope == FT_ERR_SUCCESS)
+			(void)RuntimeAnalytics::end_scope();
 	}
 	analytics_error = RuntimeAnalytics::begin_scope(
 		RuntimeAnalyticsScope::WORLD_STREAM_DRAIN);
@@ -640,7 +736,9 @@ int32_t WorldChunkStreamer::update(int32_t generation_budget,
 	 * startup-sized list forever. */
 	if (this->stream_candidates_radius_ != stream_radius)
 	{
-	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	/* The frame timings are recorded by analytics. Console writes can block
+	 * here when the process output is redirected or the console is busy. */
+	#if defined(DEBUG)
 		std::fprintf(stderr,
 			"[WorldGen] stream radius changed old=%d new=%d\n",
 			this->stream_candidates_radius_, stream_radius);
@@ -780,6 +878,8 @@ int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk,
 	const WorldChunk *light_dependency = nullptr;
 	bool explicit_incremental_metadata;
 	bool interactive_request;
+	bool geometry_preview_only = false;
+	bool border_delete_preview = false;
 
 	if (!chunk.initialized || !chunk.mesh_dirty
 		|| chunk.pending_mesh_request_id != 0U)
@@ -792,26 +892,27 @@ int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk,
 	 * here before any geometry-only decision is made; otherwise the edit can be
 	 * silently submitted to the full-light solver and the published light can
 	 * briefly regress to zero. */
-	matching_priority = nullptr;
-	for (const RemeshPriority &priority : this->priority_remeshes_)
+	const auto find_matching_priority = [&]() noexcept -> const RemeshPriority *
 	{
-		if (priority.chunk_x == chunk.chunk_x
-			&& priority.chunk_z == chunk.chunk_z)
+		for (const RemeshPriority &priority : this->priority_remeshes_)
 		{
-			matching_priority = &priority;
-			break ;
+			if (priority.chunk_x == chunk.chunk_x && priority.chunk_z == chunk.chunk_z)
+				return (&priority);
 		}
-	}
+		return (nullptr);
+	};
+	matching_priority = find_matching_priority();
 	explicit_incremental_metadata = incremental_additive_light != FT_FALSE
 		|| incremental_removal_light != FT_FALSE
 		|| (incremental_light_seeds != nullptr
 			&& !incremental_light_seeds->empty());
-	if (matching_priority != nullptr
+	const bool priority_seeds_selected = matching_priority != nullptr
 		&& (matching_priority->interactive
 			|| (!explicit_incremental_metadata
 				&& (matching_priority->incremental_additive_light != FT_FALSE
 					|| matching_priority->incremental_removal_light != FT_FALSE
-					|| !matching_priority->incremental_light_seeds.empty()))))
+					|| !matching_priority->incremental_light_seeds.empty())));
+	if (priority_seeds_selected)
 	{
 		incremental_additive_light =
 			matching_priority->incremental_additive_light;
@@ -826,14 +927,27 @@ int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk,
 			&matching_priority->incremental_light_seeds;
 		geometry_only = matching_priority->geometry_only;
 	}
+	const bool edit_needs_visible_mesh = (explicit_incremental_metadata
+		|| (matching_priority != nullptr && matching_priority->interactive))
+		&& chunk.last_mesh_publication_voxel_revision != chunk.voxel_revision
+		&& chunk.light_ready_for_render && chunk.light_buffer_is_valid();
 	if (chunk.waits_for_neighbor_light)
 	{
 		const WorldChunk *dependency = this->world_.find_chunk(
 			chunk.light_dependency_chunk_x, chunk.light_dependency_chunk_z);
-		if (dependency != nullptr
-			&& (dependency->pending_mesh_request_id != 0U
-				|| dependency->light_is_current() == false))
+		/* A source can still be rebuilding its mesh after its light is ready.
+		 * The receiver can use that published light immediately. */
+		if (dependency != nullptr && !dependency->light_is_current())
 		{
+			border_delete_preview = matching_priority != nullptr
+				&& matching_priority->geometry_only && matching_priority->interactive
+				&& matching_priority->origin_chunk_x == dependency->chunk_x
+				&& matching_priority->origin_chunk_z == dependency->chunk_z
+				&& incremental_new_block_id == GAME_VOXEL_AIR_BLOCK
+				&& voxel_block_occludes_faces(incremental_old_block_id) != FT_FALSE
+				&& chunk.last_mesh_publication_voxel_revision == chunk.voxel_revision
+				&& has_published_light_baseline(chunk)
+				&& has_published_light_baseline(*dependency);
 			const bool dependency_waits_back = dependency->waits_for_neighbor_light
 				&& dependency->light_dependency_chunk_x == chunk.chunk_x
 				&& dependency->light_dependency_chunk_z == chunk.chunk_z;
@@ -851,7 +965,7 @@ int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk,
 				if (chunk_has_lower_coordinate)
 				{
 					chunk.clear_light_dependency();
-					#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+					#if defined(DEBUG)
 					std::fprintf(stderr,
 						"[WorldGen] light dependency cycle broken winner="
 						"(%d,%d) blocked=(%d,%d)\n", chunk.chunk_x,
@@ -905,7 +1019,12 @@ int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk,
 				}
 			}
 			}
-		#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+			/* Promoting the dependency may have moved the target's deque entry. */
+			matching_priority = find_matching_priority();
+			if (priority_seeds_selected)
+				incremental_light_seeds = matching_priority != nullptr
+					? &matching_priority->incremental_light_seeds : nullptr;
+		#if defined(DEBUG)
 			if (this->stream_frame_ % 32U == 0U)
 				std::fprintf(stderr,
 					"[WorldGen] neighbour remesh waiting target=(%d,%d) "
@@ -922,26 +1041,55 @@ int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk,
 				 * light as its conservative boundary; the losing side is retried
 				 * after this result makes the source current. */
 			}
+			else if (border_delete_preview || edit_needs_visible_mesh)
+			{
+				/* The neighbour may take several slices to relight. The edit's
+				 * geometry can already use this chunk's last published light. */
+				geometry_preview_only = true;
+				if (border_delete_preview)
+					light_dependency = dependency;
+			}
 			else
 				return (FT_ERR_FULL);
 		}
-		if (dependency != nullptr && dependency->initialized
+		if (!geometry_preview_only && dependency != nullptr && dependency->initialized
 			&& dependency->light_is_current())
 			light_dependency = dependency;
+	}
+	const std::size_t occupied_remesh_slots =
+		this->generation_pipeline_.remesh_in_flight_count()
+		+ this->remesh_capture_in_flight_.load();
+	/* A long relight can retain both normal slots across several frames.
+	 * Give a newly edited voxel one extra slot for its first drawable mesh.
+	 * Its full lighting work goes back through the normal budget. */
+	if (occupied_remesh_slots >= WORLD_STREAM_MAX_REMESH_IN_FLIGHT
+		&& !geometry_preview_only && edit_needs_visible_mesh && !chunk.light_is_current())
+	{
+		geometry_preview_only = true;
+		light_dependency = nullptr;
 	}
 	/* Input versions decide whether this chunk needs a solve. A queued seed
 	 * can outlive the publication that already applied it, while another
 	 * border notification may only need to refresh exposed faces. */
-	geometry_only = chunk.light_is_current() && chunk.light_ready_for_render;
-	if (geometry_only)
+	geometry_only = !geometry_preview_only && chunk.light_is_current()
+		&& chunk.light_ready_for_render;
+	if (geometry_only || geometry_preview_only)
 	{
-		incremental_additive_light = FT_FALSE;
+		/* The standalone local preview needs all the queued openings, even
+		 * though it leaves the authoritative light solve for a later request. */
+		if (geometry_preview_only && !border_delete_preview
+			&& incremental_new_block_id == GAME_VOXEL_AIR_BLOCK
+			&& incremental_old_block_id != GAME_VOXEL_AIR_BLOCK)
+			incremental_additive_light = FT_TRUE;
+		else
+			incremental_additive_light = FT_FALSE;
 		incremental_removal_light = FT_FALSE;
-		incremental_light_seeds = nullptr;
+		if (geometry_only || border_delete_preview)
+			incremental_light_seeds = nullptr;
 	}
 	if (chunk.remesh_cancellation_token == nullptr)
 		return (FT_ERR_INVALID_STATE);
-	interactive_request = false;
+	interactive_request = geometry_preview_only;
 	/* The edit metadata is authoritative.  Do not rely only on the separate
 	 * priority deque: a recenter, cancellation, or queue rotation can make the
 	 * deque temporarily lag behind the direct edit submission. */
@@ -952,24 +1100,14 @@ int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk,
 		interactive_request = true;
 	if (matching_priority != nullptr && matching_priority->interactive)
 		interactive_request = true;
-	/* Keep one bounded remesh slot available for an interactive edit.  Without
-	 * this reservation, startup neighbour-arrival work can occupy both slots;
-	 * the edit then reports FT_ERR_FULL until background work finishes even
-	 * though it has higher scheduling priority.  The total remains bounded and
-	 * interactive work still cannot exceed the full limit. */
-	{
-		const std::size_t occupied_remesh_slots =
-			this->generation_pipeline_.remesh_in_flight_count()
-			+ this->remesh_capture_in_flight_.load();
-		const std::size_t background_limit =
-			WORLD_STREAM_MAX_REMESH_IN_FLIGHT > 1U
-			? WORLD_STREAM_MAX_REMESH_IN_FLIGHT - 1U : 0U;
-		if ((!interactive_request && occupied_remesh_slots >= background_limit)
-			|| (interactive_request
-				&& occupied_remesh_slots >= WORLD_STREAM_MAX_REMESH_IN_FLIGHT))
-			return (FT_ERR_FULL);
-	}
-#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	std::size_t remesh_limit = WORLD_STREAM_MAX_REMESH_IN_FLIGHT - 1U;
+	if (interactive_request)
+		remesh_limit = WORLD_STREAM_MAX_REMESH_IN_FLIGHT;
+	if (geometry_preview_only)
+		remesh_limit += 1U;
+	if (occupied_remesh_slots >= remesh_limit)
+		return (FT_ERR_FULL);
+#if defined(DEBUG)
 	if (!interactive_request && chunk.mesh_dirty
 		&& chunk.last_mesh_publication_voxel_revision != chunk.voxel_revision)
 	{
@@ -1013,6 +1151,7 @@ int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk,
 	task.light_dependency_mask = 0U;
 	task.interactive = interactive_request ? FT_TRUE : FT_FALSE;
 	task.geometry_only = geometry_only;
+	task.geometry_preview_only = geometry_preview_only;
 	task.incremental_additive_light = incremental_additive_light;
 	task.incremental_removal_light = incremental_removal_light;
 	task.incremental_local_x = incremental_local_x;
@@ -1104,6 +1243,7 @@ int32_t WorldChunkStreamer::queue_chunk_remesh(WorldChunk &chunk,
 		 * keeps the chunk marker transactional if queue allocation fails. */
 		chunk.set_pending_remesh_request(request_id,
 			interactive_request ? FT_TRUE : FT_FALSE);
+		chunk.pending_mesh_request_preview_only = geometry_preview_only;
 		this->remesh_capture_in_flight_.fetch_add(1U);
 		{
 			const std::size_t pending_remeshes =
@@ -1244,6 +1384,14 @@ void WorldChunkStreamer::mark_neighbor_remeshes(int32_t chunk_x,
 				if (source_arrival && (arrived_source == nullptr
 					|| !arrived_source->initialized))
 				{
+					/* Retained edits can survive a recenter, but a captured
+					 * border from an evicted neighbor cannot. */
+					if (target->pending_mesh_request_id != 0U)
+					{
+						if (target->remesh_cancellation_token != nullptr)
+							target->remesh_cancellation_token->fetch_add(1U, std::memory_order_acq_rel);
+						target->clear_pending_remesh_request();
+					}
 					this->mark_remesh_dirty(*target, FT_FALSE);
 					target->clear_light_dependency();
 					face_index += 1;
@@ -1498,8 +1646,27 @@ void WorldChunkStreamer::invalidate_boundary_receivers(
 		}
 		if (!relight && !remesh)
 			continue ;
+		bool preserve_preview = false;
+		if (relight && has_pending_edit_geometry(*target)
+			&& has_published_light_baseline(*target))
+		{
+			/* Preview-only work can finish on its existing light snapshot. A full
+			 * solve is kept only if it already produced a drawable preview. */
+			preserve_preview = target->pending_mesh_request_preview_only;
+			if (!preserve_preview)
+			{
+				std::lock_guard<std::mutex> lock(this->generation_pipeline_.results_mutex_);
+				preserve_preview = std::any_of(this->generation_pipeline_.results_.begin(),
+					this->generation_pipeline_.results_.end(), [target](const auto &ready)
+					{
+						return (ready != nullptr && ready->request_id == target->pending_mesh_request_id
+							&& ready->error_code == FT_ERR_SUCCESS && ready->mesh != nullptr
+							&& uses_cached_preview_light(*ready));
+					});
+			}
+		}
 		this->mark_remesh_dirty(*target, relight ? FT_TRUE : FT_FALSE);
-		if (target->pending_mesh_request_id != 0U)
+		if (target->pending_mesh_request_id != 0U && !preserve_preview)
 		{
 			if (target->remesh_cancellation_token != nullptr)
 				target->remesh_cancellation_token->fetch_add(1U, std::memory_order_acq_rel);
@@ -1533,6 +1700,13 @@ void WorldChunkStreamer::mark_edit_remeshes(int32_t chunk_x,
 	int32_t chunk_z, int32_t local_x, int32_t local_y,
 	int32_t local_z) noexcept
 {
+	this->mark_edit_remeshes(chunk_x, chunk_z, local_x, local_y, local_z, true);
+}
+
+void WorldChunkStreamer::mark_edit_remeshes(int32_t chunk_x,
+	int32_t chunk_z, int32_t local_x, int32_t local_y,
+	int32_t local_z, bool light_input_changed) noexcept
+{
 	WorldChunk *chunk;
 
 	chunk = this->world_.find_chunk_mutable(chunk_x, chunk_z);
@@ -1543,7 +1717,8 @@ void WorldChunkStreamer::mark_edit_remeshes(int32_t chunk_x,
 		chunk = this->world_.find_chunk_mutable(chunk_x - 1, chunk_z);
 		if (chunk != nullptr && chunk->initialized)
 		{
-			const bool light_needed = neighbor_edge_requires_remesh(chunk,
+			const bool light_needed = light_input_changed
+				&& neighbor_edge_requires_remesh(chunk,
 				GAME_VOXEL_CHUNK_WIDTH - 1, local_y, local_z);
 			/* The source edit may require a border-light remesh, but it must
 			 * not invalidate the neighbour's last valid light publication while
@@ -1561,7 +1736,8 @@ void WorldChunkStreamer::mark_edit_remeshes(int32_t chunk_x,
 		chunk = this->world_.find_chunk_mutable(chunk_x + 1, chunk_z);
 		if (chunk != nullptr && chunk->initialized)
 		{
-			const bool light_needed = neighbor_edge_requires_remesh(chunk, 0,
+			const bool light_needed = light_input_changed
+				&& neighbor_edge_requires_remesh(chunk, 0,
 				local_y, local_z);
 			if (light_needed)
 				this->mark_light_remesh_pending(*chunk);
@@ -1576,7 +1752,8 @@ void WorldChunkStreamer::mark_edit_remeshes(int32_t chunk_x,
 		chunk = this->world_.find_chunk_mutable(chunk_x, chunk_z - 1);
 		if (chunk != nullptr && chunk->initialized)
 		{
-			const bool light_needed = neighbor_edge_requires_remesh(chunk, local_x,
+			const bool light_needed = light_input_changed
+				&& neighbor_edge_requires_remesh(chunk, local_x,
 				local_y, GAME_VOXEL_CHUNK_DEPTH - 1);
 			if (light_needed)
 				this->mark_light_remesh_pending(*chunk);
@@ -1591,7 +1768,8 @@ void WorldChunkStreamer::mark_edit_remeshes(int32_t chunk_x,
 		chunk = this->world_.find_chunk_mutable(chunk_x, chunk_z + 1);
 		if (chunk != nullptr && chunk->initialized)
 		{
-			const bool light_needed = neighbor_edge_requires_remesh(chunk, local_x,
+			const bool light_needed = light_input_changed
+				&& neighbor_edge_requires_remesh(chunk, local_x,
 				local_y, 0);
 			if (light_needed)
 				this->mark_light_remesh_pending(*chunk);
@@ -1624,6 +1802,7 @@ void WorldChunkStreamer::prioritize_chunk_remesh_from_origin(int32_t chunk_x,
 	bool existing;
 	bool coalesced_single_cell_edit = false;
 	bool reverted_to_light_baseline = false;
+	bool keep_border_preview_coordinates = false;
 	RemeshPriority promoted;
 	std::deque<RemeshPriority>::iterator insert_position;
 
@@ -1659,6 +1838,21 @@ void WorldChunkStreamer::prioritize_chunk_remesh_from_origin(int32_t chunk_x,
 		WorldChunk *target = this->world_.find_chunk_mutable(chunk_x, chunk_z);
 		if (target != nullptr && target->initialized)
 		{
+			const bool border_geometry_changed = interactive
+				&& (chunk_x != origin_chunk_x || chunk_z != origin_chunk_z)
+				&& voxel_get_block_metadata(incremental_old_block_id).occludes_faces
+					!= voxel_get_block_metadata(incremental_new_block_id).occludes_faces;
+			keep_border_preview_coordinates = border_geometry_changed && geometry_only
+				&& target->last_mesh_publication_voxel_revision == target->voxel_revision;
+			/* A neighbour can retain its own voxel revision even when the
+			 * source edit invalidates its captured border geometry. */
+			if (border_geometry_changed && target->pending_mesh_request_id != 0U)
+			{
+				if (target->remesh_cancellation_token != nullptr)
+					target->remesh_cancellation_token->fetch_add(1U,
+						std::memory_order_acq_rel);
+				target->clear_pending_remesh_request();
+			}
 			/* An opaque neighbor need not solve its own light just because it
 			 * gained a face. The face must sample the newly opened cell after
 			 * the source's light has been published. */
@@ -1869,6 +2063,19 @@ void WorldChunkStreamer::prioritize_chunk_remesh_from_origin(int32_t chunk_x,
 	/* An explicit edit re-anchors an existing background notification.  The
 	 * queue then remains ordered by propagation distance, with stable FIFO
 	 * ordering for equal-distance cells. */
+	if (interactive && incremental_external_source == FT_FALSE
+		&& incremental_old_block_id != incremental_new_block_id
+		&& ((origin_chunk_x == chunk_x && origin_chunk_z == chunk_z)
+			|| keep_border_preview_coordinates))
+	{
+		/* A full relight may discard conflicting solver seeds. Keep the
+		 * most recent local edit for the visual preview. */
+		promoted.incremental_local_x = incremental_local_x;
+		promoted.incremental_local_y = incremental_local_y;
+		promoted.incremental_local_z = incremental_local_z;
+		promoted.incremental_old_block_id = incremental_old_block_id;
+		promoted.incremental_new_block_id = incremental_new_block_id;
+	}
 	promoted.origin_chunk_x = origin_chunk_x;
 	promoted.origin_chunk_z = origin_chunk_z;
 	promoted.origin_distance = static_cast<uint32_t>(
@@ -1921,8 +2128,33 @@ void WorldChunkStreamer::prioritize_edit_border_remeshes(int32_t chunk_x,
 	/* Face-sharing neighbours are promoted only for an edge edit.  Their
 	 * dependency gate keeps the source light current before the snapshot is
 	 * captured, so the worker can remove/re-add only the affected frontier. */
-	if (incremental_additive_light != FT_FALSE
-		|| incremental_removal_light != FT_FALSE)
+	const bool light_input_changed = incremental_additive_light != FT_FALSE
+		|| incremental_removal_light != FT_FALSE;
+	if (incremental_new_block_id == GAME_VOXEL_AIR_BLOCK
+		&& voxel_block_occludes_faces(incremental_old_block_id) != FT_FALSE)
+	{
+		WorldChunk *source = this->world_.find_chunk_mutable(chunk_x, chunk_z);
+		const bool edited_faces[4] = {local_x == 0, local_x == GAME_VOXEL_CHUNK_WIDTH - 1,
+			local_z == 0, local_z == GAME_VOXEL_CHUNK_DEPTH - 1};
+		if (source != nullptr)
+		{
+			for (std::size_t face = 0U; face < source->border_delete_dependencies.size(); ++face)
+			{
+				if (!edited_faces[face])
+					continue ;
+				const auto &offset = WorldGenerationPipeline::BOUNDARY_NEIGHBORS[face];
+				const WorldChunk *receiver = this->world_.find_chunk(chunk_x + offset[0], chunk_z + offset[1]);
+				const int32_t x = local_x - offset[0] * (GAME_VOXEL_CHUNK_WIDTH - 1);
+				const int32_t z = local_z - offset[1] * (GAME_VOXEL_CHUNK_DEPTH - 1);
+				if (receiver != nullptr && receiver->initialized && receiver->read_state != nullptr
+					&& voxel_block_occludes_faces(receiver->read_state->block_at(x, local_y, z)) != FT_FALSE)
+					source->border_delete_dependencies[face] = {source->voxel_revision, receiver->mesh_revision + 1U};
+			}
+		}
+	}
+	if (light_input_changed
+		|| voxel_get_block_metadata(incremental_old_block_id).occludes_faces
+			!= voxel_get_block_metadata(incremental_new_block_id).occludes_faces)
 	{
 		WorldChunk *chunk;
 		if (local_x == 0)
@@ -1930,8 +2162,9 @@ void WorldChunkStreamer::prioritize_edit_border_remeshes(int32_t chunk_x,
 			chunk = this->world_.find_chunk_mutable(chunk_x - 1, chunk_z);
 			if (chunk != nullptr && chunk->initialized)
 			{
-				const bool light_needed = neighbor_edge_requires_remesh(chunk,
-					GAME_VOXEL_CHUNK_WIDTH - 1, local_y, local_z);
+				const bool light_needed = light_input_changed
+					&& neighbor_edge_requires_remesh(chunk,
+						GAME_VOXEL_CHUNK_WIDTH - 1, local_y, local_z);
 				this->prioritize_chunk_remesh_from_origin(chunk_x - 1, chunk_z,
 					chunk_x, chunk_z, light_needed ? incremental_additive_light
 						: FT_FALSE, light_needed ? incremental_removal_light : FT_FALSE,
@@ -1946,8 +2179,8 @@ void WorldChunkStreamer::prioritize_edit_border_remeshes(int32_t chunk_x,
 			chunk = this->world_.find_chunk_mutable(chunk_x + 1, chunk_z);
 			if (chunk != nullptr && chunk->initialized)
 			{
-				const bool light_needed = neighbor_edge_requires_remesh(chunk, 0,
-					local_y, local_z);
+				const bool light_needed = light_input_changed
+					&& neighbor_edge_requires_remesh(chunk, 0, local_y, local_z);
 				this->prioritize_chunk_remesh_from_origin(chunk_x + 1, chunk_z,
 					chunk_x, chunk_z, light_needed ? incremental_additive_light
 						: FT_FALSE, light_needed ? incremental_removal_light : FT_FALSE, 0,
@@ -1961,8 +2194,9 @@ void WorldChunkStreamer::prioritize_edit_border_remeshes(int32_t chunk_x,
 			chunk = this->world_.find_chunk_mutable(chunk_x, chunk_z - 1);
 			if (chunk != nullptr && chunk->initialized)
 			{
-				const bool light_needed = neighbor_edge_requires_remesh(chunk,
-					local_x, local_y, GAME_VOXEL_CHUNK_DEPTH - 1);
+				const bool light_needed = light_input_changed
+					&& neighbor_edge_requires_remesh(chunk,
+						local_x, local_y, GAME_VOXEL_CHUNK_DEPTH - 1);
 				this->prioritize_chunk_remesh_from_origin(chunk_x, chunk_z - 1,
 					chunk_x, chunk_z, light_needed ? incremental_additive_light
 						: FT_FALSE, light_needed ? incremental_removal_light : FT_FALSE,
@@ -1978,8 +2212,8 @@ void WorldChunkStreamer::prioritize_edit_border_remeshes(int32_t chunk_x,
 			chunk = this->world_.find_chunk_mutable(chunk_x, chunk_z + 1);
 			if (chunk != nullptr && chunk->initialized)
 			{
-				const bool light_needed = neighbor_edge_requires_remesh(chunk, local_x,
-					local_y, 0);
+				const bool light_needed = light_input_changed
+					&& neighbor_edge_requires_remesh(chunk, local_x, local_y, 0);
 				this->prioritize_chunk_remesh_from_origin(chunk_x, chunk_z + 1,
 					chunk_x, chunk_z, light_needed ? incremental_additive_light
 						: FT_FALSE, light_needed ? incremental_removal_light : FT_FALSE,

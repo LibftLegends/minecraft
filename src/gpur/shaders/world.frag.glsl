@@ -26,8 +26,14 @@ void main()
     if (u_atlas_loaded == 1)
     {
         vec4 region = u_tile_uvs[bid * 6u + fid];
-        vec2 uv = region.xy + fract(v_uv_tile) * region.zw;
-        vec3 color = texture(u_atlas, uv).rgb;
+        // Mesh V rises from the bottom of a face; atlas rows start at the top.
+        vec2 tile_uv = vec2(fract(v_uv_tile.x), 1.0 - fract(v_uv_tile.y));
+        vec2 uv = region.xy + tile_uv * region.zw;
+        // Derivatives of fract() jump at each block boundary and select an
+        // excessively blurry mip. Derive the footprint before wrapping.
+        vec2 uv_scale = vec2(region.z, -region.w);
+        vec3 color = textureGrad(u_atlas, uv,
+            dFdx(v_uv_tile) * uv_scale, dFdy(v_uv_tile) * uv_scale).rgb;
         frag_color = vec4(color * v_shade * light, 1.0);
     }
     else

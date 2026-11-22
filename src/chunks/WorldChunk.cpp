@@ -225,6 +225,7 @@ int32_t WorldChunk::move(WorldChunk &other) noexcept
 	this->pending_mesh_request_id = other.pending_mesh_request_id;
 	this->pending_mesh_request_interactive =
 		other.pending_mesh_request_interactive;
+	this->pending_mesh_request_preview_only = other.pending_mesh_request_preview_only;
 	this->pending_mesh_request_voxel_revision =
 		other.pending_mesh_request_voxel_revision;
 	this->pending_mesh_request_content_version =
@@ -235,6 +236,8 @@ int32_t WorldChunk::move(WorldChunk &other) noexcept
 		other.last_mesh_publication_interactive;
 	this->last_mesh_publication_voxel_revision =
 		other.last_mesh_publication_voxel_revision;
+	this->border_delete_dependencies = other.border_delete_dependencies;
+	this->published_border_delete_dependencies = other.published_border_delete_dependencies;
 	this->last_light_remesh_incremental = other.last_light_remesh_incremental;
 	this->last_incremental_light_content_version =
 		other.last_incremental_light_content_version;
@@ -309,6 +312,8 @@ void WorldChunk::reset_coordinates()
 	this->clear_pending_remesh_request();
 	this->last_mesh_publication_interactive = FT_FALSE;
 	this->last_mesh_publication_voxel_revision = 0U;
+	this->border_delete_dependencies = {};
+	this->published_border_delete_dependencies = {};
 	this->last_light_remesh_incremental = FT_FALSE;
 	this->last_incremental_light_content_version = 0U;
 	this->last_incremental_light_voxel_revision = 0U;
@@ -359,6 +364,8 @@ void WorldChunk::destroy()
 	this->cancel_remesh_work();
 	this->last_mesh_publication_interactive = FT_FALSE;
 	this->last_mesh_publication_voxel_revision = 0U;
+	this->border_delete_dependencies = {};
+	this->published_border_delete_dependencies = {};
 	this->mesh_dirty = false;
 	this->clear_light_dependency();
 	ft_memset(this->boundary_source_light_max, 0,
@@ -368,11 +375,18 @@ void WorldChunk::destroy()
 	this->read_state.reset();
 }
 
+void WorldChunk::record_mesh_publication(uint64_t revision) noexcept
+{
+	this->last_mesh_publication_voxel_revision = revision;
+	this->published_border_delete_dependencies = this->border_delete_dependencies;
+}
+
 void WorldChunk::set_pending_remesh_request(uint64_t request_id,
 	ft_bool interactive) noexcept
 {
 	this->pending_mesh_request_id = request_id;
 	this->pending_mesh_request_interactive = interactive;
+	this->pending_mesh_request_preview_only = false;
 	this->pending_mesh_request_voxel_revision = this->voxel_revision;
 	this->pending_mesh_request_content_version = this->content_version;
 	this->pending_mesh_request_light_input_version =
@@ -383,6 +397,7 @@ void WorldChunk::clear_pending_remesh_request() noexcept
 {
 	this->pending_mesh_request_id = 0U;
 	this->pending_mesh_request_interactive = FT_FALSE;
+	this->pending_mesh_request_preview_only = false;
 	this->pending_mesh_request_voxel_revision = 0U;
 	this->pending_mesh_request_content_version = 0U;
 	this->pending_mesh_request_light_input_version = 0U;
@@ -512,13 +527,26 @@ int32_t WorldChunk::prepare_read_state_after_block_edit(int32_t local_x,
 	int32_t local_y, int32_t local_z, uint32_t block_id,
 	std::shared_ptr<WorldChunkReadState> &prepared_state) noexcept
 {
+	const WorldChunkBlockEdit edit = {local_x, local_y, local_z, 0U, block_id};
+	return (this->prepare_read_state_after_block_edits(&edit, 1U, prepared_state));
+}
+
+int32_t WorldChunk::prepare_read_state_after_block_edits(const WorldChunkBlockEdit *edits,
+	std::size_t count, std::shared_ptr<WorldChunkReadState> &prepared_state) noexcept
+{
 	prepared_state.reset();
 	if (!this->initialized)
 		return (FT_ERR_NOT_INITIALISED);
-	if (local_x < 0 || local_x >= GAME_VOXEL_CHUNK_WIDTH
-		|| local_y < 0 || local_y >= GAME_VOXEL_CHUNK_HEIGHT
-		|| local_z < 0 || local_z >= GAME_VOXEL_CHUNK_DEPTH)
+	if (edits == nullptr || count == 0U)
 		return (FT_ERR_INVALID_ARGUMENT);
+	for (std::size_t index = 0U; index < count; ++index)
+	{
+		const WorldChunkBlockEdit &edit = edits[index];
+		if (edit.local_x < 0 || edit.local_x >= GAME_VOXEL_CHUNK_WIDTH
+			|| edit.local_y < 0 || edit.local_y >= GAME_VOXEL_CHUNK_HEIGHT
+			|| edit.local_z < 0 || edit.local_z >= GAME_VOXEL_CHUNK_DEPTH)
+			return (FT_ERR_INVALID_ARGUMENT);
+	}
 	if (this->read_state == nullptr || this->read_state->initialized == FT_FALSE
 		|| this->read_state->chunk_x != this->chunk_x
 		|| this->read_state->chunk_z != this->chunk_z
@@ -532,20 +560,31 @@ int32_t WorldChunk::prepare_read_state_after_block_edit(int32_t local_x,
 	try
 	{
 		auto next_state = std::make_shared<WorldChunkReadState>(*this->read_state);
-		const int32_t section_index = local_y / SECTION_HEIGHT;
-		auto section = std::make_shared<WorldChunkReadState::BlockSection>(
-			*next_state->block_sections[section_index]);
-		(*section)[block_section_offset(local_x, local_y, local_z)] = block_id;
-		next_state->block_sections[section_index] = std::move(section);
+		std::array<std::shared_ptr<WorldChunkReadState::BlockSection>,
+			GAME_VOXEL_CHUNK_SECTION_COUNT> touched_sections;
 		next_state->edited_faces = 0U;
-		if (local_x == 0)
-			next_state->edited_faces |= 1U << 0U;
-		if (local_x == GAME_VOXEL_CHUNK_WIDTH - 1)
-			next_state->edited_faces |= 1U << 1U;
-		if (local_z == 0)
-			next_state->edited_faces |= 1U << 2U;
-		if (local_z == GAME_VOXEL_CHUNK_DEPTH - 1)
-			next_state->edited_faces |= 1U << 3U;
+		for (std::size_t index = 0U; index < count; ++index)
+		{
+			const WorldChunkBlockEdit &edit = edits[index];
+			const int32_t section_index = edit.local_y / SECTION_HEIGHT;
+			auto &section = touched_sections[section_index];
+			if (section == nullptr)
+			{
+				section = std::make_shared<WorldChunkReadState::BlockSection>(
+					*next_state->block_sections[section_index]);
+				next_state->block_sections[section_index] = section;
+			}
+			(*section)[block_section_offset(edit.local_x, edit.local_y, edit.local_z)] =
+				edit.replacement_block_id;
+			if (edit.local_x == 0)
+				next_state->edited_faces |= 1U << 0U;
+			if (edit.local_x == GAME_VOXEL_CHUNK_WIDTH - 1)
+				next_state->edited_faces |= 1U << 1U;
+			if (edit.local_z == 0)
+				next_state->edited_faces |= 1U << 2U;
+			if (edit.local_z == GAME_VOXEL_CHUNK_DEPTH - 1)
+				next_state->edited_faces |= 1U << 3U;
+		}
 		prepared_state = std::move(next_state);
 	}
 	catch (...)
@@ -599,9 +638,18 @@ int32_t WorldChunk::publish_read_state_after_block_edit(int32_t local_x,
 
 void WorldChunk::mark_content_changed() noexcept
 {
+	this->mark_content_changed(true);
+}
+
+void WorldChunk::mark_content_changed(bool light_input_changed) noexcept
+{
+	const bool light_was_current = this->light_is_current();
 	this->content_version = world_light_version::next(this->content_version);
 	this->voxel_revision += 1U;
-	this->mark_light_input_changed();
+	if (light_input_changed)
+		this->mark_light_input_changed();
+	else if (light_was_current)
+		this->light_version = this->content_version;
 	return ;
 }
 

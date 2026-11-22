@@ -60,12 +60,12 @@ CC := $(FT_VOX_CC)
 CFLAGS := $(FT_VOX_CFLAGS)
 
 .SECONDEXPANSION:
-FT_VOX_OBJECT_DIRECTORIES := $(sort $(dir $(OBJS) $(TEST_OBJS)))
+FT_VOX_OBJECT_DIRECTORIES := $(sort $(OBJ_DIR)/ $(OBJ_DIR_TEST)/ $(dir $(OBJS) $(TEST_OBJS)))
 
 $(FT_VOX_OBJECT_DIRECTORIES):
 	@-$(MKDIR) $@
 
-FT_VOX_BUILD_CONFIG_INPUTS := mk/compiler.mk mk/project.mk mk/libft.mk
+FT_VOX_BUILD_CONFIG_INPUTS := mk/compiler.mk mk/project.mk mk/libft.mk mk/directories.mk
 LIBFT_PARENT_GLOBAL_TARGET := $(LIBFT_FULL_LIB)
 LIBFT_PARENT_GLOBAL_DEBUG_TARGET := $(LIBFT_FULL_DEBUG_LIB)
 LIBFT_PARENT_SELECTED_ARCHIVES := $(LIBFT_GLOBAL_RELEASE_ARCHIVES) \
@@ -120,12 +120,12 @@ analytics:
 	@$(MAKE) --no-print-directory FT_VOX_ANALYTICS=1 \
 		LIBFT_ARCHIVE_SUFFIX=_analytics \
 		LIBFT_BUILD_OUTPUT_SUFFIX=_analytics \
-		TARGET=ft_vox_analytics$(EXE_EXT) internal-all
-	@test -f "ft_vox_analytics$(EXE_EXT)" && printf '\033[1;35m[MINECRAFT][Analytics] Ready: %s\033[0m\n' "ft_vox_analytics$(EXE_EXT)"
+		TARGET=$(NAME_ANALYTICS) internal-all
+	@test -f "$(NAME_ANALYTICS)" && printf '\033[1;35m[MINECRAFT][Analytics] Ready: %s\033[0m\n' "$(NAME_ANALYTICS)"
 
 validate-lighting-harness: normal analytics
 	@status=0; analytics_status=0; ./ft_vox$(EXE_EXT) --validate-lighting-harness || status=$$?; \
-	./ft_vox_analytics$(EXE_EXT) --validate-lighting-harness || \
+	./$(NAME_ANALYTICS) --validate-lighting-harness || \
 	analytics_status=$$?; \
 	if [ $$analytics_status -ne 0 ] && [ $$status -eq 0 ]; then \
 		status=$$analytics_status; \
@@ -133,7 +133,7 @@ validate-lighting-harness: normal analytics
 
 validate-lighting-stress: normal analytics
 	@status=0; analytics_status=0; ./ft_vox$(EXE_EXT) --validate-lighting-stress || status=$$?; \
-	./ft_vox_analytics$(EXE_EXT) --validate-lighting-stress || \
+	./$(NAME_ANALYTICS) --validate-lighting-stress || \
 	analytics_status=$$?; \
 	if [ $$analytics_status -ne 0 ] && [ $$status -eq 0 ]; then \
 		status=$$analytics_status; \
@@ -142,7 +142,7 @@ validate-lighting-stress: normal analytics
 validate-lighting-scheduled-stress: normal analytics
 	@status=0; analytics_status=0; ./ft_vox$(EXE_EXT) --validate-lighting-scheduled-stress || \
 		status=$$?; \
-	./ft_vox_analytics$(EXE_EXT) --validate-lighting-scheduled-stress || \
+	./$(NAME_ANALYTICS) --validate-lighting-scheduled-stress || \
 		analytics_status=$$?; \
 	if [ $$analytics_status -ne 0 ] && [ $$status -eq 0 ]; then \
 		status=$$analytics_status; \
@@ -151,7 +151,7 @@ validate-lighting-scheduled-stress: normal analytics
 validate-lighting-lifecycle: normal analytics
 	@status=0; analytics_status=0; ./ft_vox$(EXE_EXT) \
 		--validate-lighting-lifecycle || status=$$?; \
-	./ft_vox_analytics$(EXE_EXT) --validate-lighting-lifecycle || \
+	./$(NAME_ANALYTICS) --validate-lighting-lifecycle || \
 		analytics_status=$$?; \
 	if [ $$analytics_status -ne 0 ] && [ $$status -eq 0 ]; then \
 		status=$$analytics_status; \
@@ -161,7 +161,7 @@ validate-worldgen-probe: normal
 	@./ft_vox$(EXE_EXT) --worldgen-probe
 
 validate-worldgen-probe-analytics: analytics
-	@./ft_vox_analytics$(EXE_EXT) --worldgen-probe --analytics-no-exporter
+	@./$(NAME_ANALYTICS) --worldgen-probe --analytics-no-exporter
 
 plan:
 	@sh Libft/mk/print_build_plan.sh "$(MAKE)" internal-all
@@ -203,31 +203,33 @@ debug:
 
 internal-debug: $(NAME_DEBUG)
 
-$(TARGET): $(OBJS) $(LIBFT_LINK_LIB) $(FT_VOX_BUILD_CONFIG_INPUTS)
+$(TARGET): $(OBJS) $(LIBFT_LINK_LIB) $(FT_VOX_BUILD_CONFIG_INPUTS) | $(OBJ_DIR)/
 	@if [ "$(BUILD_PLAN_MODE)" = "1" ]; then printf '%s\n' "__BUILD_PLAN__|link|minecraft|Minecraft|$@"; else printf '\033[1;35m[MINECRAFT] Linking %s\033[0m\n' "$@"; fi
-	$(file >$@.rsp,$(OBJS) $(LIBFT_LINK_FLAGS))
-	@$(CC) $(CFLAGS) -o $@ @$@.rsp $(LDFLAGS)
+	@$(MKDIR) "$(dir $@)"
+	$(if $(or $(filter 1,$(BUILD_PLAN_MODE)),$(findstring n,$(firstword $(MAKEFLAGS)))),,$(file >$(OBJ_DIR)/$(notdir $@).rsp,$(OBJS) $(LIBFT_LINK_FLAGS)))
+	@$(CC) $(CFLAGS) -o $@ @$(OBJ_DIR)/$(notdir $@).rsp $(LDFLAGS)
 	@printf '\033[1;35m[MINECRAFT] Link ready: %s\033[0m\n' "$@"
 	@if [ "$(FT_VOX_ANALYTICS)" != "1" ]; then \
 		$(MAKE) --no-print-directory FT_VOX_ANALYTICS=1 \
 			LIBFT_ARCHIVE_SUFFIX=_analytics \
 			LIBFT_BUILD_OUTPUT_SUFFIX=_analytics \
-			TARGET=ft_vox_analytics$(EXE_EXT) internal-all; \
+			TARGET=$(NAME_ANALYTICS) internal-all; \
 		analytics_status=$$?; \
 		if [ $$analytics_status -ne 0 ]; then exit $$analytics_status; fi; \
-		if [ ! -f "ft_vox_analytics$(EXE_EXT)" ]; then \
+		if [ ! -f "$(NAME_ANALYTICS)" ]; then \
 			printf '%s\n' '[MINECRAFT][Analytics] output missing' >&2; \
 			exit 1; \
 		fi; \
 		printf '\033[1;35m[MINECRAFT][Analytics] Ready: %s\033[0m\n' \
-			"ft_vox_analytics$(EXE_EXT)"; \
+			"$(NAME_ANALYTICS)"; \
 	fi
 
 $(TEST_NAME): $(TEST_OBJS) $(OBJS_NO_MAIN) $(TARGET) $(LIBFT_FULL_LIB) \
-        $(FT_VOX_BUILD_CONFIG_INPUTS)
+        $(FT_VOX_BUILD_CONFIG_INPUTS) | $(OBJ_DIR_TEST)/
 	@if [ "$(BUILD_PLAN_MODE)" = "1" ]; then printf '%s\n' "__BUILD_PLAN__|link|minecraft|MinecraftTest|$@"; else printf '\033[1;35m[MINECRAFT][Test] Linking %s\033[0m\n' "$@"; fi
-	$(file >$@.rsp,$(TEST_OBJS) $(OBJS_NO_MAIN) $(LIBFT_LINK_FLAGS))
-	@$(CC) $(CFLAGS) -o $@ @$@.rsp $(LDFLAGS)
+	@$(MKDIR) "$(dir $@)"
+	$(if $(or $(filter 1,$(BUILD_PLAN_MODE)),$(findstring n,$(firstword $(MAKEFLAGS)))),,$(file >$(OBJ_DIR_TEST)/$(notdir $@).rsp,$(TEST_OBJS) $(OBJS_NO_MAIN) $(LIBFT_LINK_FLAGS)))
+	@$(CC) $(CFLAGS) -o $@ @$(OBJ_DIR_TEST)/$(notdir $@).rsp $(LDFLAGS)
 	@printf '\033[1;35m[MINECRAFT][Test] Link ready: %s\033[0m\n' "$@"
 
 $(OBJ_DIR)/%.o: %.cpp | $$(dir $$@)
@@ -270,7 +272,7 @@ fclean: clean
 	-$(RMDIR) $(LIBFT_PARENT_SELECTED_BUILD_ROOT)
 	-$(RMDIR) $(LIBFT_PARENT_SELECTED_BUILD_ROOT)
 	-$(RM) $(LIBFT_PARENT_SELECTED_ARCHIVES)
-	-$(RM) $(NAME) $(NAME_DEBUG) $(TEST_NAME)
+	-$(RM) $(NAME) $(NAME_DEBUG) $(NAME_ANALYTICS) $(TEST_NAME)
 	-$(RMDIR) $(OBJ_DIR) $(OBJ_DIR_DEBUG) $(OBJ_DIR_TEST) data
 
 re:

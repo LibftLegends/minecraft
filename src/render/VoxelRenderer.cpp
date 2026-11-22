@@ -120,14 +120,16 @@ std::size_t VoxelRenderer::collect_world_item_markers(int32_t width,
 	GpuOverlayRenderer::ItemMarker *markers) const
 {
 	const WorldItemStore *items = world.item_store();
-	std::vector<WorldItemSnapshot> visible_items;
+	std::vector<WorldItemRenderPosition> visible_items;
 	if (width <= 0 || height <= 0 || items == nullptr
-		|| items->query_renderable(camera.x, camera.y, camera.z, 32.0,
+		|| items->query_render_positions(camera.x, camera.y, camera.z, 32.0,
 			&visible_items) != FT_ERR_SUCCESS || visible_items.empty())
 		return (0U);
-	std::sort(visible_items.begin(), visible_items.end(),
-		[&camera](const WorldItemSnapshot &left,
-			const WorldItemSnapshot &right)
+	const std::size_t marker_count = std::min<std::size_t>(
+		visible_items.size(), GpuOverlayRenderer::MAX_ITEM_MARKERS);
+	std::partial_sort(visible_items.begin(),
+		visible_items.begin() + static_cast<std::ptrdiff_t>(marker_count),
+		visible_items.end(), [&camera](const auto &left, const auto &right)
 		{
 			const double left_x = left.x - camera.x;
 			const double left_y = left.y - camera.y;
@@ -145,8 +147,6 @@ std::size_t VoxelRenderer::collect_world_item_markers(int32_t width,
 				return (false);
 			return (left.entity_id < right.entity_id);
 		});
-	const std::size_t marker_count = std::min<std::size_t>(
-		visible_items.size(), GpuOverlayRenderer::MAX_ITEM_MARKERS);
 	static const double tangent_half_fov = 0.83909963117728;
 	double forward_x = 0.0;
 	double forward_y = 0.0;
@@ -162,7 +162,7 @@ std::size_t VoxelRenderer::collect_world_item_markers(int32_t width,
 	std::size_t rendered = 0U;
 	for (std::size_t index = 0U; index < marker_count; ++index)
 	{
-		const WorldItemSnapshot &item = visible_items[index];
+		const WorldItemRenderPosition &item = visible_items[index];
 		const double offset_x = item.x - camera.x;
 		const double offset_y = item.y + 0.12 - camera.y;
 		const double offset_z = item.z - camera.z;

@@ -11,6 +11,15 @@
 # include <memory>
 # include <vector>
 
+struct WorldChunkBlockEdit
+{
+	int32_t local_x;
+	int32_t local_y;
+	int32_t local_z;
+	uint32_t expected_block_id;
+	uint32_t replacement_block_id;
+};
+
 struct WorldChunkReadState
 {
 	static constexpr std::size_t LIGHT_SAMPLE_COUNT = GAME_VOXEL_CHUNK_WIDTH
@@ -62,11 +71,21 @@ class WorldChunk
 	uint16_t computed_light_input_version;
 	uint64_t pending_mesh_request_id;
 	ft_bool pending_mesh_request_interactive;
+	bool pending_mesh_request_preview_only = false;
 	uint64_t pending_mesh_request_voxel_revision;
 	uint16_t pending_mesh_request_content_version;
 	uint16_t pending_mesh_request_light_input_version;
 	ft_bool last_mesh_publication_interactive;
 	uint64_t last_mesh_publication_voxel_revision;
+	struct BorderDeleteDependency
+	{
+		uint64_t source_voxel_revision;
+		uint64_t receiver_mesh_revision;
+	};
+	/* A published mesh carries the requirements for the edits it actually
+	 * contains. Later edits accumulate separately until that mesh is built. */
+	std::array<BorderDeleteDependency, 4> border_delete_dependencies = {};
+	std::array<BorderDeleteDependency, 4> published_border_delete_dependencies = {};
 	/* Per-chunk completion marker used by validators and diagnostics.  A
 	 * completed mesh may be geometry-only, so this records the final light
 	 * publication mode for the latest mesh revision. */
@@ -106,7 +125,9 @@ class WorldChunk
 	WorldChunk &operator=(const WorldChunk &other);
 	int32_t move(WorldChunk &other) noexcept;
 	void cancel_remesh_work() noexcept;
+	void record_mesh_publication(uint64_t revision) noexcept;
 	void mark_content_changed() noexcept;
+	void mark_content_changed(bool light_input_changed) noexcept;
 	void mark_light_input_changed() noexcept;
 	void set_light_dependency(int32_t chunk_x, int32_t chunk_z) noexcept;
 	void clear_light_dependency() noexcept;
@@ -121,6 +142,8 @@ class WorldChunk
 	int32_t prepare_read_state_after_block_edit(int32_t local_x,
 		int32_t local_y, int32_t local_z, uint32_t block_id,
 		std::shared_ptr<WorldChunkReadState> &prepared_state) noexcept;
+	int32_t prepare_read_state_after_block_edits(const WorldChunkBlockEdit *edits,
+		std::size_t count, std::shared_ptr<WorldChunkReadState> &prepared_state) noexcept;
 	void commit_prepared_read_state(
 		std::shared_ptr<WorldChunkReadState> &prepared_state,
 		uint8_t changed_light_faces = 0U) noexcept;

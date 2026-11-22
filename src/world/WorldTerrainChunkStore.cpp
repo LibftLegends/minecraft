@@ -109,6 +109,7 @@ WorldTerrainChunkStore::WorldTerrainChunkStore(
 
 WorldTerrainChunkStore::~WorldTerrainChunkStore()
 {
+	this->reset();
 }
 
 WorldTerrainChunkStore &WorldTerrainChunkStore::operator=(
@@ -232,6 +233,8 @@ int32_t WorldTerrainChunkStore::save_chunk(int32_t chunk_x, int32_t chunk_z,
 	const game_voxel_chunk &chunk) const noexcept
 {
 	std::lock_guard<std::mutex> lock(this->mutex_);
+	if (this->chunk_is_reserved(chunk_x, chunk_z))
+		return (FT_ERR_THREAD_BUSY);
 	std::string path;
 	std::vector<uint8_t> record;
 	int32_t result = this->chunk_path(chunk_x, chunk_z, path);
@@ -282,11 +285,14 @@ int32_t WorldTerrainChunkStore::StagedChunk::prepare(
 	delete directory;
 	if (result != FT_ERR_SUCCESS)
 		return (result);
-	result = file_close_descriptor(descriptor);
+	/* Only commit_staged_chunk publishes the canonical filename. Write the
+	 * private staging file directly through its exclusively opened descriptor. */
+	result = file_write_all_to_descriptor(descriptor,
+		reinterpret_cast<const char *>(record.data()),
+		FT_NATIVE_SIZE_TO_FT_SIZE_CAST(record.size()));
+	const int32_t close_result = file_close_descriptor(descriptor);
 	if (result == FT_ERR_SUCCESS)
-		result = file_write_all_atomic(temp_path.c_str(),
-			reinterpret_cast<const char *>(record.data()),
-			FT_NATIVE_SIZE_TO_FT_SIZE_CAST(record.size()));
+		result = close_result;
 	try
 	{
 		if (result == FT_ERR_SUCCESS)
@@ -309,24 +315,110 @@ int32_t WorldTerrainChunkStore::StagedChunk::prepare(
 int32_t WorldTerrainChunkStore::commit_staged_chunk(int32_t chunk_x,
 	int32_t chunk_z, StagedChunk &staged, bool replace_existing) const noexcept
 {
+	std::lock_guard<std::mutex> lock(this->mutex_);
+	if (this->chunk_is_reserved(chunk_x, chunk_z))
+		return (FT_ERR_THREAD_BUSY);
+	return (this->commit_staged_chunk_locked(chunk_x, chunk_z, staged, replace_existing));
+}
+
+int32_t WorldTerrainChunkStore::commit_staged_chunk_locked(int32_t chunk_x,
+	int32_t chunk_z, StagedChunk &staged, bool replace_existing) const noexcept
+{
 	if (staged.path_.empty())
 		return (FT_ERR_INVALID_STATE);
-	std::lock_guard<std::mutex> lock(this->mutex_);
 	std::string destination;
-	int32_t result = this->chunk_path(chunk_x, chunk_z, destination);
+	int32_t result = this->chunk_path(chunk_x, chunk_z, destination, false);
 	if (result != FT_ERR_SUCCESS)
 		return (result);
 	if (destination != staged.destination_)
 		return (FT_ERR_INVALID_ARGUMENT);
-	/* Stream results only create new payloads. An edit publisher can replace
-	 * a regular payload after checking the live voxel version under its lock. */
-	const file_type type = file_get_type(destination.c_str());
-	if (type != FILE_TYPE_MISSING && (!replace_existing || type != FILE_TYPE_REGULAR))
-		return (FT_ERR_ALREADY_EXISTS);
+	/* An edit usually replaces an existing regular file. Resolving that file
+	 * under the terrain root also resolves its parent. A new destination still
+	 * needs the missing-leaf check, and stream results cannot overwrite files. */
+	if (replace_existing && file_get_type(destination.c_str()) == FILE_TYPE_REGULAR)
+	{
+		result = file_validate_regular_file_inside_root("saves/terrain", destination.c_str());
+		if (result != FT_ERR_SUCCESS)
+			return (result);
+	}
+	else
+	{
+		result = file_validate_path_resolution_inside_root("saves/terrain", destination.c_str());
+		if (result != FT_ERR_SUCCESS)
+			return (result);
+		const file_type type = file_get_type(destination.c_str());
+		if (type != FILE_TYPE_MISSING && (!replace_existing || type != FILE_TYPE_REGULAR))
+			return (FT_ERR_ALREADY_EXISTS);
+	}
 	result = file_move(staged.path_.c_str(), destination.c_str());
 	if (result == FT_ERR_SUCCESS)
 		staged.path_.clear();
 	return (result);
+}
+
+WorldTerrainChunkStore::PreparedEdit::~PreparedEdit() noexcept
+{
+	if (auto *owner = this->reservation_owner.load())
+		owner->release_prepared_edit(*this);
+}
+
+int32_t WorldTerrainChunkStore::PreparedEdit::publish() noexcept
+{
+	if (auto *owner = this->reservation_owner.load())
+		return (owner->publish_prepared_edit(*this));
+	return (FT_ERR_INVALID_STATE);
+}
+
+bool WorldTerrainChunkStore::PreparedEdit::has_reservation() const noexcept
+{
+	return (this->reservation_owner.load() != nullptr);
+}
+
+int32_t WorldTerrainChunkStore::reserve_prepared_edit(PreparedEdit &edit) noexcept
+{
+	std::lock_guard<std::mutex> lock(this->mutex_);
+	if (!this->initialized_ || edit.reservation_owner.load() != nullptr || edit.published
+		|| edit.destination.empty())
+		return (FT_ERR_INVALID_STATE);
+	if (this->reserved_edit_.load() != nullptr)
+		return (FT_ERR_THREAD_BUSY);
+	edit.reservation_owner = this;
+	this->reserved_edit_.store(&edit);
+	return (FT_ERR_SUCCESS);
+}
+
+int32_t WorldTerrainChunkStore::publish_prepared_edit(PreparedEdit &edit) noexcept
+{
+	std::lock_guard<std::mutex> lock(this->mutex_);
+	if (this->reserved_edit_.load() != &edit)
+		return (FT_ERR_INVALID_STATE);
+	if (edit.published)
+		return (FT_ERR_SUCCESS);
+	const int32_t result = this->commit_staged_chunk_locked(edit.chunk_x, edit.chunk_z,
+		edit.file, true);
+	edit.published = result == FT_ERR_SUCCESS;
+	return (result);
+}
+
+void WorldTerrainChunkStore::release_prepared_edit(PreparedEdit &edit) noexcept
+{
+	std::lock_guard<std::mutex> lock(this->mutex_);
+	if (this->reserved_edit_.load() == &edit)
+	{
+		this->reserved_edit_.store(nullptr);
+		edit.reservation_owner = nullptr;
+	}
+}
+
+bool WorldTerrainChunkStore::has_reserved_edit() const noexcept
+{
+	return (this->reserved_edit_.load() != nullptr);
+}
+
+bool WorldTerrainChunkStore::chunk_is_reserved(int32_t chunk_x, int32_t chunk_z) const noexcept
+{
+	const PreparedEdit *edit = this->reserved_edit_.load();
+	return (edit != nullptr && edit->chunk_x == chunk_x && edit->chunk_z == chunk_z);
 }
 
 int32_t WorldTerrainChunkStore::load_chunk(int32_t chunk_x, int32_t chunk_z,
@@ -356,16 +448,18 @@ int32_t WorldTerrainChunkStore::load_stream_chunk(const std::string &path,
 	std::vector<uint8_t> record;
 	if (path.empty())
 		return (FT_ERR_NOT_FOUND);
-	int32_t result = file_validate_path_resolution_inside_root("saves/terrain",
-		path.c_str());
-	if (result != FT_ERR_SUCCESS)
-		return (result);
+	if (file_path_is_inside_root("saves/terrain", path.c_str()) == FT_FALSE)
+		return (FT_ERR_INVALID_PATH);
 	const file_type type = file_get_type(path.c_str());
 	if (type == FILE_TYPE_MISSING)
-		return (FT_ERR_NOT_FOUND);
+	{
+		const int32_t result = file_validate_path_resolution_inside_root(
+			"saves/terrain", path.c_str());
+		return (result == FT_ERR_SUCCESS ? FT_ERR_NOT_FOUND : result);
+	}
 	if (type != FILE_TYPE_REGULAR)
 		return (FT_ERR_INVALID_PATH);
-	result = file_validate_regular_file_inside_root("saves/terrain",
+	int32_t result = file_validate_regular_file_inside_root("saves/terrain",
 		path.c_str());
 	if (result == FT_ERR_SUCCESS)
 		result = read_file(path.c_str(), record);
@@ -407,6 +501,8 @@ int32_t WorldTerrainChunkStore::remove_chunk(int32_t chunk_x,
 	int32_t chunk_z) const noexcept
 {
 	std::lock_guard<std::mutex> lock(this->mutex_);
+	if (this->chunk_is_reserved(chunk_x, chunk_z))
+		return (FT_ERR_THREAD_BUSY);
 	std::string path;
 	int32_t result = this->chunk_path(chunk_x, chunk_z, path);
 	if (result != FT_ERR_SUCCESS)
@@ -448,6 +544,8 @@ int32_t WorldTerrainChunkStore::has_chunk(int32_t chunk_x, int32_t chunk_z,
 void WorldTerrainChunkStore::reset() noexcept
 {
 	std::lock_guard<std::mutex> lock(this->mutex_);
+	if (auto *edit = this->reserved_edit_.exchange(nullptr))
+		edit->reservation_owner.store(nullptr);
 	this->directory_.clear();
 	this->initialized_ = false;
 }

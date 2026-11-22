@@ -45,10 +45,10 @@ namespace
 	#endif
 	#if defined(LIBFT_ENABLE_ANALYTICS)
 	static const char *LIGHT_HARNESS_WATCHDOG_REPORT =
-		"minecraft_lighting_watchdog_analytics.json";
+		"build_logs/minecraft_lighting_watchdog_analytics.json";
 	#else
 	static const char *LIGHT_HARNESS_WATCHDOG_REPORT =
-		"minecraft_lighting_watchdog_normal.json";
+		"build_logs/minecraft_lighting_watchdog_normal.json";
 	#endif
 
 	class LightingHarnessWatchdog;
@@ -264,23 +264,23 @@ namespace
 	#if defined(LIBFT_ENABLE_ANALYTICS)
 	static const char *LIGHT_HARNESS_BUILD_VARIANT = "analytics";
 	static const char *LIGHT_HARNESS_STARTUP_REPORT =
-		"minecraft_lighting_harness_analytics.jsonl";
+		"build_logs/minecraft_lighting_harness_analytics.jsonl";
 	static const char *LIGHT_HARNESS_STARTUP_FAILURE_REPORT =
-		"minecraft_lighting_harness_failure_analytics.jsonl";
+		"build_logs/minecraft_lighting_harness_failure_analytics.jsonl";
 	static const char *LIGHT_HARNESS_EDIT_REPORT =
-		"minecraft_lighting_edit_matrix_analytics.jsonl";
+		"build_logs/minecraft_lighting_edit_matrix_analytics.jsonl";
 	static const char *LIGHT_HARNESS_FAILURE_REPORT =
-		"minecraft_lighting_edit_matrix_failure_analytics.jsonl";
+		"build_logs/minecraft_lighting_edit_matrix_failure_analytics.jsonl";
 	#else
 	static const char *LIGHT_HARNESS_BUILD_VARIANT = "normal";
 	static const char *LIGHT_HARNESS_STARTUP_REPORT =
-		"minecraft_lighting_harness_normal.jsonl";
+		"build_logs/minecraft_lighting_harness_normal.jsonl";
 	static const char *LIGHT_HARNESS_STARTUP_FAILURE_REPORT =
-		"minecraft_lighting_harness_failure_normal.jsonl";
+		"build_logs/minecraft_lighting_harness_failure_normal.jsonl";
 	static const char *LIGHT_HARNESS_EDIT_REPORT =
-		"minecraft_lighting_edit_matrix_normal.jsonl";
+		"build_logs/minecraft_lighting_edit_matrix_normal.jsonl";
 	static const char *LIGHT_HARNESS_FAILURE_REPORT =
-		"minecraft_lighting_edit_matrix_failure_normal.jsonl";
+		"build_logs/minecraft_lighting_edit_matrix_failure_normal.jsonl";
 	#endif
 
 	static uint64_t elapsed_milliseconds(
@@ -3772,7 +3772,7 @@ int LightingTestHarness::validate_stress(uint32_t edit_count,
 	if (harness.set_frame_retention_limit(8192U) != FT_ERR_SUCCESS)
 		return (1);
 	report_length = std::snprintf(report_path, sizeof(report_path),
-		"minecraft_lighting_%s_%s.jsonl", report_suffix,
+		"build_logs/minecraft_lighting_%s_%s.jsonl", report_suffix,
 		#if defined(LIBFT_ENABLE_ANALYTICS)
 		"analytics"
 		#else
@@ -3783,7 +3783,7 @@ int LightingTestHarness::validate_stress(uint32_t edit_count,
 		|| static_cast<std::size_t>(report_length) >= sizeof(report_path))
 		return (1);
 	report_length = std::snprintf(failure_path, sizeof(failure_path),
-		"minecraft_lighting_%s_failure_%s.jsonl", report_suffix,
+		"build_logs/minecraft_lighting_%s_failure_%s.jsonl", report_suffix,
 		#if defined(LIBFT_ENABLE_ANALYTICS)
 		"analytics"
 		#else

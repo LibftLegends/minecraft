@@ -1,5 +1,6 @@
 #include "../../src/edits/DeleteBlockCommand.hpp"
-#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+#include "WorldBlockLighting.hpp"
+#if defined(DEBUG)
 # include <cstdio>
 #endif
 
@@ -74,7 +75,9 @@ int32_t DeleteBlockCommand::execute(World &world) const
 			return (err);
 		}
 	}
-	wc->mark_content_changed();
+	const bool lighting_changed = world_block_lighting::inputs_differ(
+		existing_block_id, GAME_VOXEL_AIR_BLOCK);
+	wc->mark_content_changed(lighting_changed);
 	wc->commit_prepared_read_state(prepared_read_state);
 	world.chunk_streamer.mark_remesh_dirty(*wc);
 	wc->cancel_remesh_work();
@@ -89,17 +92,12 @@ int32_t DeleteBlockCommand::execute(World &world) const
 	world.edit_history.record(record);
 	(void)world.invalidate_loom_station_if_block_changed(world_x, world_y,
 		world_z, GAME_VOXEL_AIR_BLOCK);
-	world.chunk_streamer.mark_edit_remeshes(cx, cz, lx, world_y, lz);
-	incremental_additive_light = FT_FALSE;
-	incremental_removal_light = FT_FALSE;
-	if (voxel_block_emitted_light_level(existing_block_id) == 0U)
-		incremental_additive_light = FT_TRUE;
-	else
-		/* An emitter removal must enter the subtraction frontier even when
-		 * the cell also carries sky light.  The old implementation only chose
-		 * this path when sky was zero, which sent mixed sky/block cells through
-		 * a full relight and exposed the chunk's intermediate dark state. */
-		incremental_removal_light = FT_TRUE;
+	world.chunk_streamer.mark_edit_remeshes(cx, cz, lx, world_y, lz,
+		lighting_changed);
+	/* An emitter removal must subtract block light even in a sunlit cell. */
+	const bool removes_emitter = voxel_block_emitted_light_level(existing_block_id) != 0U;
+	incremental_additive_light = lighting_changed && !removes_emitter ? FT_TRUE : FT_FALSE;
+	incremental_removal_light = lighting_changed && removes_emitter ? FT_TRUE : FT_FALSE;
 	world.chunk_streamer.prioritize_edit_border_remeshes(cx, cz, lx,
 		world_y, lz, incremental_additive_light,
 		incremental_removal_light, existing_block_id,
@@ -111,7 +109,7 @@ int32_t DeleteBlockCommand::execute(World &world) const
 		existing_block_id, GAME_VOXEL_AIR_BLOCK);
 	if (remesh_error != FT_ERR_SUCCESS && remesh_error != FT_ERR_FULL)
 		return (remesh_error);
-	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	#if defined(DEBUG)
 	if (wc->voxel_revision % 32U == 0U)
 	{
 	std::fprintf(stderr,

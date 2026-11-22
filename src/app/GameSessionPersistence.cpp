@@ -26,6 +26,9 @@ namespace
 {
 	static const std::size_t SESSION_SNAPSHOT_MAX_BYTES =
 		128U * 1024U * 1024U;
+	/* Magic and version, 16 header fields, output session ID, and checksum. */
+	static constexpr std::size_t SESSION_SNAPSHOT_MAX_FIXED_BYTES =
+		2U * sizeof(uint32_t) + 18U * sizeof(uint64_t);
 	static const uint32_t SESSION_SNAPSHOT_VERSION = 5U;
 	static const uint32_t SESSION_SNAPSHOT_VERSION_WITH_JOURNAL = 6U;
 	static const uint32_t SESSION_SNAPSHOT_VERSION_WITH_CARDS = 7U;
@@ -318,7 +321,8 @@ static int32_t game_session_persistence_save_file(const char *file_path,
 		uint64_t output_session_id = 0U,
 		const std::vector<uint8_t> *revision_server_state = nullptr,
 		const std::vector<uint8_t> *host_config_state = nullptr,
-		std::vector<uint8_t> *serialized_snapshot = nullptr) noexcept
+		std::vector<uint8_t> *serialized_snapshot = nullptr,
+		bool item_identity_validated = false) noexcept
 {
 	ft_string character_buffer;
 	ft_byte_buffer recipe_buffer;
@@ -331,14 +335,17 @@ static int32_t game_session_persistence_save_file(const char *file_path,
 
 	if (file_path == nullptr || file_path[0] == '\0')
 		return (FT_ERR_INVALID_ARGUMENT);
-	const int32_t validation_scope = RuntimeAnalytics::begin_scope(
-		RuntimeAnalyticsScope::SESSION_ENCODE_VALIDATION);
-	result = world_items.validate_instance_id_uniqueness(
-		character.get_inventory());
-	if (validation_scope == FT_ERR_SUCCESS)
-		(void)RuntimeAnalytics::end_scope();
-	if (result != FT_ERR_SUCCESS)
-		return (result);
+	if (!item_identity_validated)
+	{
+		const int32_t validation_scope = RuntimeAnalytics::begin_scope(
+			RuntimeAnalyticsScope::SESSION_ENCODE_VALIDATION);
+		result = world_items.validate_instance_id_uniqueness(
+			character.get_inventory());
+		if (validation_scope == FT_ERR_SUCCESS)
+			(void)RuntimeAnalytics::end_scope();
+		if (result != FT_ERR_SUCCESS)
+			return (result);
+	}
 	const int32_t character_scope = RuntimeAnalytics::begin_scope(
 		RuntimeAnalyticsScope::SESSION_ENCODE_CHARACTER);
 	result = character_buffer.initialize();
@@ -445,7 +452,8 @@ static int32_t game_session_persistence_save_file(const char *file_path,
 		return (FT_ERR_OUT_OF_RANGE);
 	try
 	{
-		output.reserve(40U + character_buffer.size() + item_bytes.size()
+		output.reserve(SESSION_SNAPSHOT_MAX_FIXED_BYTES
+			+ character_buffer.size() + item_bytes.size()
 			+ (recipe_book == nullptr ? 0U : recipe_buffer.size())
 			+ craft_action_cache_bytes.size() + processing_state_bytes.size()
 			+ transaction_journal_bytes.size()
@@ -820,7 +828,7 @@ int32_t GameSessionPersistence::save_file_with_revision_server_checkpoint(
 		&crop_growth_state, output_session_id, &revision_server_state));
 }
 
-int32_t GameSessionPersistence::save_file_with_revision_server_checkpoint_and_host_config(
+int32_t GameSessionPersistence::save_validated_session_snapshot(
 	const char *file_path, const game_character &character,
 	const WorldItemStore &world_items,
 	const MinecraftRecipeCatalog &recipe_catalog,
@@ -845,7 +853,7 @@ int32_t GameSessionPersistence::save_file_with_revision_server_checkpoint_and_ho
 		SESSION_SNAPSHOT_VERSION_WITH_HOST_CONFIG,
 		&revision_metadata_state, &fluid_state, &entity_state,
 		&crop_growth_state, output_session_id, &revision_server_state,
-		&host_config_state, serialized_snapshot));
+		&host_config_state, serialized_snapshot, true));
 }
 
 static int32_t game_session_persistence_load_file_once(const char *file_path,

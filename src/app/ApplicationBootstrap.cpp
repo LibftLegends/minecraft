@@ -1,8 +1,6 @@
 #include "../../src/app/ApplicationBootstrap.hpp"
-
-#if defined(LIBFT_ENABLE_ANALYTICS)
-# include <cstdio>
-#endif
+#include <cstdio>
+#include <filesystem>
 
 ApplicationBootstrap::ApplicationBootstrap()
 {
@@ -25,6 +23,22 @@ ApplicationBootstrap &ApplicationBootstrap::operator=(const ApplicationBootstrap
 
 int ApplicationBootstrap::run_validators(const ApplicationOptions &options)
 {
+	if (options.validate_all_mode || options.validate_block_edit_performance_mode
+		|| options.validate_world_revision_mode || options.validate_world_items_mode
+		|| options.validate_transaction_journal_mode
+		|| options.validate_lighting_harness_mode || options.validate_lighting_stress_mode
+		|| options.validate_lighting_scheduled_stress_mode
+		|| options.validate_lighting_lifecycle_mode)
+	{
+		std::error_code error;
+		std::filesystem::create_directories("build_logs", error);
+		if (error)
+		{
+			std::fprintf(stderr, "Validators: unable to create build_logs: %s\n",
+				error.message().c_str());
+			return (1);
+		}
+	}
 	if (options.validate_all_mode)
 		return (ApplicationValidator::validate_all());
 	if (options.validate_camera_speed_mode)

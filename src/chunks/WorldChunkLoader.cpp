@@ -196,7 +196,7 @@ int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk,
 	world_chunk->initialized = true;
 	world_chunk->mesh_revision += 1U;
 	world_chunk->voxel_revision += 1U;
-	world_chunk->last_mesh_publication_voxel_revision = world_chunk->voxel_revision;
+	world_chunk->record_mesh_publication(world_chunk->voxel_revision);
 	world_chunk->light_revision += 1U;
 	world_chunk->content_version = 1U;
 	world_chunk->light_version = 1U;
@@ -234,7 +234,7 @@ int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk,
 	world_chunk->initialized = true;
 	world_chunk->mesh_revision += 1U;
 	world_chunk->voxel_revision += 1U;
-	world_chunk->last_mesh_publication_voxel_revision = world_chunk->voxel_revision;
+	world_chunk->record_mesh_publication(world_chunk->voxel_revision);
 	world_chunk->light_revision += 1U;
 	world_chunk->content_version = 1U;
 	world_chunk->light_version = 1U;
@@ -266,7 +266,7 @@ int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk,
 	world_chunk->initialized = true;
 	world_chunk->mesh_revision += 1U;
 	world_chunk->voxel_revision += 1U;
-	world_chunk->last_mesh_publication_voxel_revision = world_chunk->voxel_revision;
+	world_chunk->record_mesh_publication(world_chunk->voxel_revision);
 	world_chunk->light_revision += 1U;
 	world_chunk->content_version = 1U;
 	world_chunk->light_version = 1U;
@@ -301,7 +301,7 @@ int32_t WorldChunkLoader::initialize_chunk(WorldChunk *world_chunk,
 	world_chunk->initialized = true;
 	world_chunk->mesh_revision += 1U;
 	world_chunk->voxel_revision += 1U;
-	world_chunk->last_mesh_publication_voxel_revision = world_chunk->voxel_revision;
+	world_chunk->record_mesh_publication(world_chunk->voxel_revision);
 	world_chunk->light_revision += 1U;
 	world_chunk->content_version = 1U;
 	world_chunk->light_version = 1U;
@@ -362,7 +362,7 @@ int32_t WorldChunkLoader::remesh_chunk(WorldChunk *chunks, int32_t chunk_count,
 	if (err == FT_ERR_SUCCESS)
 	{
 		wc->mesh_revision += 1U;
-		wc->last_mesh_publication_voxel_revision = wc->voxel_revision;
+		wc->record_mesh_publication(wc->voxel_revision);
 		wc->mesh_dirty = false;
 		err = wc->publish_read_state();
 	}
@@ -400,7 +400,7 @@ int32_t WorldChunkLoader::remesh_chunk(WorldChunk *chunks, int32_t chunk_count,
 		if (err == FT_ERR_SUCCESS)
 		{
 			wc->mesh_revision += 1U;
-			wc->last_mesh_publication_voxel_revision = wc->voxel_revision;
+			wc->record_mesh_publication(wc->voxel_revision);
 			wc->mesh_dirty = false;
 			err = wc->publish_read_state();
 		}
@@ -411,7 +411,7 @@ int32_t WorldChunkLoader::remesh_chunk(WorldChunk *chunks, int32_t chunk_count,
 	if (err == FT_ERR_SUCCESS)
 	{
 		wc->mesh_revision += 1U;
-		wc->last_mesh_publication_voxel_revision = wc->voxel_revision;
+		wc->record_mesh_publication(wc->voxel_revision);
 		wc->mesh_dirty = false;
 		err = wc->publish_read_state();
 	}

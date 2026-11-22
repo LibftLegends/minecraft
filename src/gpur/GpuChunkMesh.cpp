@@ -44,6 +44,13 @@ void GpuChunkMesh::alloc_buffers()
 	glGenBuffers(1, &_vbo);
 	glGenBuffers(1, &_solid_ebo);
 	glGenBuffers(1, &_water_ebo);
+	glBindVertexArray(_solid_vao);
+	glBindBuffer(GL_ARRAY_BUFFER, _vbo);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _solid_ebo);
+	setup_attributes();
+	glBindVertexArray(_water_vao);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _water_ebo);
+	setup_attributes();
 }
 
 void GpuChunkMesh::upload_geometry(const chunk_mesh &mesh,
@@ -61,13 +68,11 @@ void GpuChunkMesh::upload_geometry(const chunk_mesh &mesh,
 			? static_cast<const void *>(mesh.vertices.begin()) : nullptr,
 		GL_STATIC_DRAW);
 	glBindVertexArray(_solid_vao);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _solid_ebo);
 	glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(solid_bytes),
 		solid_bytes > 0U
 			? static_cast<const void *>(solid_indices.begin()) : nullptr,
 		GL_STATIC_DRAW);
 	glBindVertexArray(_water_vao);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _water_ebo);
 	glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(water_bytes),
 		water_bytes > 0U
 			? static_cast<const void *>(water_indices.begin()) : nullptr,
@@ -106,14 +111,6 @@ void GpuChunkMesh::sync(const chunk_mesh &mesh, uint64_t revision,
 	if (_solid_vao == 0)
 		alloc_buffers();
 	upload_geometry(mesh, mesh.solid_indices, mesh.water_indices);
-	glBindVertexArray(_solid_vao);
-	glBindBuffer(GL_ARRAY_BUFFER, _vbo);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _solid_ebo);
-	setup_attributes();
-	glBindVertexArray(_water_vao);
-	glBindBuffer(GL_ARRAY_BUFFER, _vbo);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _water_ebo);
-	setup_attributes();
 	glBindVertexArray(0);
 	_uploaded_chunk_x = chunk_x;
 	_uploaded_chunk_z = chunk_z;
@@ -244,6 +241,11 @@ bool GpuChunkMesh::uploaded_coordinates_match(int32_t chunk_x,
 uint64_t GpuChunkMesh::uploaded_revision() const
 {
 	return (this->_uploaded_revision);
+}
+
+uint64_t GpuChunkMesh::uploaded_voxel_revision() const
+{
+	return (this->_uploaded_voxel_revision);
 }
 
 size_t GpuChunkMesh::gpu_bytes() const

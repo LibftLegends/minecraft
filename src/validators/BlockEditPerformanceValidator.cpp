@@ -24,7 +24,7 @@ namespace
 	static const uint64_t MAX_DIRTY_REMESHES = 16U;
 	static const int32_t EDIT_X = 2;
 	static const int32_t EDIT_Z = -6;
-	static const char *REPORT_PATH = "minecraft_block_edit_workload.jsonl";
+	static const char *REPORT_PATH = "build_logs/minecraft_block_edit_workload.jsonl";
 
 	static uint64_t workload_percentile(
 		const std::vector<uint64_t> &samples, uint64_t percentage) noexcept

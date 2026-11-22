@@ -448,7 +448,7 @@ void WorldRegenerationResultApplier::apply_chunk(WorldChunkStreamer &streamer,
 	replacement.initialized = true;
 	replacement.mesh_revision = chunk->mesh_revision + 1U;
 	replacement.voxel_revision = chunk->voxel_revision + 1U;
-	replacement.last_mesh_publication_voxel_revision = replacement.voxel_revision;
+	replacement.record_mesh_publication(replacement.voxel_revision);
 	replacement.light_revision = chunk->light_revision + 1U;
 	replacement.content_version = 1U;
 	replacement.light_version = 1U;

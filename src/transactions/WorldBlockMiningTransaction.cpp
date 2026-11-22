@@ -5,8 +5,6 @@
 
 #include "../coordinates/WorldCoordinates.hpp"
 #include "../../Libft/Modules/Errno/errno.hpp"
-#include "../../Libft/Modules/Basic/limits.hpp"
-#include <chrono>
 #include <cstdio>
 #include <vector>
 #include <algorithm>
@@ -50,17 +48,14 @@ namespace
 	}
 	static int32_t checkpoint(const char *path,
 		const GameSessionSnapshotWriter *writer,
-		const char *phase = "recovery", bool defer_write = false,
+		bool defer_write = false,
 		uint64_t prepare_request_id = 0U) noexcept
 	{
 		if (path == nullptr || path[0] == '\0' || writer == nullptr)
 			return (FT_ERR_INVALID_ARGUMENT);
 #if defined(LIBFT_ENABLE_ANALYTICS)
-		const auto started = std::chrono::steady_clock::now();
 		const int32_t scope_error = RuntimeAnalytics::begin_scope(
 			RuntimeAnalyticsScope::MINING_CHECKPOINT);
-#else
-		(void)phase;
 #endif
 		int32_t result;
 		if (prepare_request_id != 0U)
@@ -75,12 +70,6 @@ namespace
 				std::fprintf(stderr, "Analytics: mining checkpoint scope end failed (%d)\n",
 					end_error);
 		}
-		const uint64_t elapsed_us = static_cast<uint64_t>(
-			std::chrono::duration_cast<std::chrono::microseconds>(
-				std::chrono::steady_clock::now() - started).count());
-		if (elapsed_us >= 2000U)
-			std::fprintf(stderr, "[Analytics][Mining] checkpoint=%s duration_us="
-				FT_UINT64_DECIMAL_FORMAT " status=%d\n", phase, elapsed_us, result);
 #endif
 		return (result);
 	}
@@ -466,7 +455,6 @@ int32_t WorldBlockMiningTransaction::execute(const char *snapshot_path,
 	if (pending_request_id != nullptr && *pending_request_id != 0U)
 		return (FT_ERR_THREAD_BUSY);
 	std::vector<uint8_t> payload;
-	std::vector<uint8_t> journal_before;
 	GameTransactionJournal::Record existing = {};
 	uint64_t sequence = 0U;
 	bool replayed = false;
@@ -488,9 +476,6 @@ int32_t WorldBlockMiningTransaction::execute(const char *snapshot_path,
 	}
 	else if (result != FT_ERR_NOT_FOUND)
 		return (result);
-	result = journal.serialize(journal_before);
-	if (result != FT_ERR_SUCCESS)
-		return (result);
 	if (existing.state != GameTransactionJournal::PREPARED)
 	{
 		result = journal.prepare(MINING_SCOPE, request_id, MINING_TYPE,
@@ -499,14 +484,15 @@ int32_t WorldBlockMiningTransaction::execute(const char *snapshot_path,
 		if (result != FT_ERR_SUCCESS)
 			return (result);
 	}
-	result = checkpoint(snapshot_path, snapshot_writer, "prepare", false,
+	result = checkpoint(snapshot_path, snapshot_writer, false,
 		pending_request_id != nullptr ? request_id : 0U);
 	if (result != FT_ERR_SUCCESS)
 	{
-		const int32_t rollback_result = journal.deserialize(
-			journal_before.data(), journal_before.size());
-		return (rollback_result == FT_ERR_SUCCESS
-			? result : FT_ERR_INVALID_STATE);
+		if (sequence != 0U && !replayed
+			&& journal.rollback_last_prepare(MINING_SCOPE, request_id, sequence)
+				!= FT_ERR_SUCCESS)
+			return (FT_ERR_INVALID_STATE);
+		return (result);
 	}
 	if (pending_request_id != nullptr)
 	{
@@ -542,9 +528,11 @@ int32_t WorldBlockMiningTransaction::complete_prepared(const char *snapshot_path
 				static_cast<int32_t>(read_u32(record.payload, 24U)), &current)
 			|| current != read_u32(record.payload, 28U))
 		{
+			if (terrain != nullptr && terrain->published)
+				return (FT_ERR_INVALID_STATE);
 			result = journal.mark_aborted(MINING_SCOPE, request_id);
 			if (result == FT_ERR_SUCCESS)
-				result = checkpoint(snapshot_path, snapshot_writer, "abort", true);
+				result = checkpoint(snapshot_path, snapshot_writer, true);
 			return (result);
 		}
 	}
@@ -560,7 +548,7 @@ int32_t WorldBlockMiningTransaction::complete_prepared(const char *snapshot_path
 	if (result == FT_ERR_SUCCESS)
 		result = journal.prune_terminal_scope(MINING_SCOPE, request_id);
 	if (result == FT_ERR_SUCCESS)
-		result = checkpoint(snapshot_path, snapshot_writer, "commit", true);
+		result = checkpoint(snapshot_path, snapshot_writer, true);
 	return (result);
 }
 

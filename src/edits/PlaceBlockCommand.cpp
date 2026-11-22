@@ -1,5 +1,6 @@
 #include "../../src/edits/PlaceBlockCommand.hpp"
-#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+#include "WorldBlockLighting.hpp"
+#if defined(DEBUG)
 # include <cstdio>
 #endif
 
@@ -78,7 +79,9 @@ int32_t PlaceBlockCommand::execute(World &world) const
 			return (err);
 		}
 	}
-	wc->mark_content_changed();
+	const bool lighting_changed = world_block_lighting::inputs_differ(
+		current_block_id, block_id);
+	wc->mark_content_changed(lighting_changed);
 	wc->commit_prepared_read_state(prepared_read_state);
 	world.chunk_streamer.mark_remesh_dirty(*wc);
 	wc->cancel_remesh_work();
@@ -91,11 +94,12 @@ int32_t PlaceBlockCommand::execute(World &world) const
 	record.previous_block_id = current_block_id;
 	(void)wc->chunk.record_dirty_edit(record.edit);
 	world.edit_history.record(record);
-	world.chunk_streamer.mark_edit_remeshes(cx, cz, lx, world_y, lz);
+	world.chunk_streamer.mark_edit_remeshes(cx, cz, lx, world_y, lz,
+		lighting_changed);
 	/* Turning air into a solid block can remove sky/block light from the
 	 * affected frontier.  Keep this as one explicit classification so the
 	 * worker cannot accidentally receive a contradictory seed state. */
-	incremental_removal_light = FT_TRUE;
+	incremental_removal_light = lighting_changed ? FT_TRUE : FT_FALSE;
 	world.chunk_streamer.prioritize_edit_border_remeshes(cx, cz, lx,
 		world_y, lz, FT_FALSE, incremental_removal_light,
 		GAME_VOXEL_AIR_BLOCK, block_id, existing_light);
@@ -106,7 +110,7 @@ int32_t PlaceBlockCommand::execute(World &world) const
 		GAME_VOXEL_AIR_BLOCK, block_id);
 	if (remesh_error != FT_ERR_SUCCESS && remesh_error != FT_ERR_FULL)
 		return (remesh_error);
-	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	#if defined(DEBUG)
 	if (wc->voxel_revision % 32U == 0U)
 	{
 	std::fprintf(stderr,

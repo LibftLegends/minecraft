@@ -1,4 +1,5 @@
 #include "../../src/world/WorldGenerationWorkerLoop.hpp"
+#include <algorithm>
 #include <chrono>
 
 WorldGenerationWorkerLoop::WorldGenerationWorkerLoop()
@@ -23,7 +24,10 @@ WorldGenerationWorkerLoop &WorldGenerationWorkerLoop::operator=(const WorldGener
 bool WorldGenerationWorkerLoop::request_is_cancelled(const WorldGenerationPipeline &pipeline,
 	const WorldGenerationPipeline::Request &request) noexcept
 {
-	return (request.cancellation_epoch != pipeline.pipeline_epoch_.load());
+	const bool remesh = request.operation == WorldGenerationPipeline::WorldGenerationOperation::REMESH;
+	return (request.cancellation_epoch != pipeline.request_epoch(remesh ? request.remesh_interactive : FT_FALSE)
+		|| (remesh && request.cancellation_token != nullptr
+			&& request.cancellation_token->load(std::memory_order_acquire) != request.cancellation_token_value));
 }
 
 std::unique_ptr<WorldGenerationPipeline::Result> WorldGenerationWorkerLoop::process_request(WorldGenerationPipeline &pipeline,
@@ -35,7 +39,7 @@ std::unique_ptr<WorldGenerationPipeline::Result> WorldGenerationWorkerLoop::proc
 		return (nullptr);
 	if (request->operation == WorldGenerationPipeline::WorldGenerationOperation::REMESH)
 		return (WorldChunkGenerationWorker::process_remesh(*request));
-	return (WorldChunkGenerationWorker::process_generation(*request));
+	return (WorldChunkGenerationWorker::process_generation(*request, pipeline.pipeline_epoch_));
 }
 
 void WorldGenerationWorkerLoop::run(WorldGenerationPipeline &pipeline) noexcept
@@ -46,9 +50,11 @@ void WorldGenerationWorkerLoop::run(WorldGenerationPipeline &pipeline) noexcept
 	 * before new-chunk generation.  The generation escape prevents a sustained
 	 * stream of edits from starving the world as a whole. */
 	generations_since_remesh = 0U;
+	bool just_retired_work = false;
 	while (true)
 	{
 		std::unique_ptr<WorldGenerationPipeline::Request> request;
+		std::unique_ptr<WorldGenerationPipeline::Request> retired_request;
 		std::unique_ptr<WorldGenerationPipeline::Result> retired_result;
 		bool is_remesh;
 		std::unique_ptr<WorldGenerationPipeline::Result> result;
@@ -59,7 +65,8 @@ void WorldGenerationWorkerLoop::run(WorldGenerationPipeline &pipeline) noexcept
 			pipeline.condition_.wait(lock,
 				[&pipeline]()
 			{
-				if (pipeline.stopping_ || !pipeline.retired_results_.empty())
+				if (pipeline.stopping_ || !pipeline.retired_results_.empty()
+					|| !pipeline.retired_requests_.empty())
 					return (true);
 				for (const std::unique_ptr<WorldGenerationPipeline::Request> &item
 					: pipeline.requests_)
@@ -74,35 +81,46 @@ void WorldGenerationWorkerLoop::run(WorldGenerationPipeline &pipeline) noexcept
 						< pipeline.generation_worker_limit_);
 				});
 			if (pipeline.stopping_ && pipeline.requests_.empty()
-				&& pipeline.retired_results_.empty())
+				&& pipeline.retired_results_.empty() && pipeline.retired_requests_.empty())
 				return ;
-			if (!pipeline.retired_results_.empty())
+			/* Recentring can leave a long cleanup queue. Give each worker an
+			 * opportunity to run an interactive mesh between retired payloads. */
+			const bool retired_work_waits = !pipeline.retired_requests_.empty()
+				|| !pipeline.retired_results_.empty();
+			const bool edit_waits_after_cleanup = retired_work_waits && just_retired_work
+				&& std::any_of(pipeline.requests_.begin(), pipeline.requests_.end(),
+					[](const auto &candidate)
+					{
+						return (candidate != nullptr
+							&& candidate->operation
+								== WorldGenerationPipeline::WorldGenerationOperation::REMESH
+							&& candidate->remesh_interactive != FT_FALSE);
+					});
+			if (retired_work_waits && !edit_waits_after_cleanup)
 			{
-				retired_result = std::move(pipeline.retired_results_.front());
-				pipeline.retired_results_.pop_front();
-			}
+				if (!pipeline.retired_requests_.empty())
+				{
+					retired_request = std::move(pipeline.retired_requests_.front());
+					pipeline.retired_requests_.pop_front();
+				}
 				else
+				{
+					retired_result = std::move(pipeline.retired_results_.front());
+					pipeline.retired_results_.pop_front();
+				}
+			}
+			else
 			{
-				std::deque<std::unique_ptr<WorldGenerationPipeline::Request>>::iterator
-					selected_request;
-				std::deque<std::unique_ptr<WorldGenerationPipeline::Request>>::iterator
-					first_generation;
-				std::deque<std::unique_ptr<WorldGenerationPipeline::Request>>::iterator
-					first_remesh;
-				std::deque<std::unique_ptr<WorldGenerationPipeline::Request>>::iterator
-					first_interactive_remesh;
-
 				/* Start with no selection.  When the generation quota is full and
 				 * only a background remesh is eligible at a later service point,
 				 * falling back to requests_.begin() would silently bypass
 				 * generation_worker_limit_ and let every worker consume terrain
 				 * work, starving lighting/remesh capacity. */
-				selected_request = pipeline.requests_.end();
-				first_generation = pipeline.requests_.end();
-				first_remesh = pipeline.requests_.end();
-				first_interactive_remesh = pipeline.requests_.end();
-				for (std::deque<std::unique_ptr<WorldGenerationPipeline::Request>>::iterator
-					iterator = pipeline.requests_.begin();
+				auto selected_request = pipeline.requests_.end();
+				auto first_generation = pipeline.requests_.end();
+				auto first_remesh = pipeline.requests_.end();
+				auto first_interactive_remesh = pipeline.requests_.end();
+				for (auto iterator = pipeline.requests_.begin();
 					iterator != pipeline.requests_.end(); ++iterator)
 				{
 					if (*iterator != nullptr
@@ -123,7 +141,7 @@ void WorldGenerationWorkerLoop::run(WorldGenerationPipeline &pipeline) noexcept
 						first_generation = iterator;
 				}
 				if (first_interactive_remesh != pipeline.requests_.end()
-					&& (first_generation == pipeline.requests_.end()
+					&& (edit_waits_after_cleanup || first_generation == pipeline.requests_.end()
 						|| generations_since_remesh < 8U))
 				{
 					selected_request = first_interactive_remesh;
@@ -175,9 +193,9 @@ void WorldGenerationWorkerLoop::run(WorldGenerationPipeline &pipeline) noexcept
 					pipeline.active_generation_requests_.fetch_add(1U);
 			}
 		}
-		/* Destruction of completed chunk payloads can release large CMA/vector
-		 * allocations. Keep that work off the gameplay thread. */
-		if (retired_result != nullptr)
+		/* Release large solver, snapshot, and mesh buffers outside the lock. */
+		just_retired_work = retired_result != nullptr || retired_request != nullptr;
+		if (just_retired_work)
 			continue ;
 		is_remesh = request->operation == WorldGenerationPipeline::WorldGenerationOperation::REMESH;
 		const bool is_generation = !is_remesh;
@@ -191,6 +209,9 @@ void WorldGenerationWorkerLoop::run(WorldGenerationPipeline &pipeline) noexcept
 			WorldGenerationWorkerLoop::request_is_cancelled(pipeline, *request);
 		if (request_cancelled)
 			request->remesh_in_progress = FT_FALSE;
+		if (request_cancelled
+			&& request->operation == WorldGenerationPipeline::WorldGenerationOperation::STREAM)
+			result.reset();
 		/* An active remesh can be cancelled after it has left the pipeline
 		 * queue.  Do not silently drop that request: the streamer owns a
 		 * pending_mesh_request_id for it and needs the normal result-commit
@@ -233,6 +254,7 @@ void WorldGenerationWorkerLoop::run(WorldGenerationPipeline &pipeline) noexcept
 			pipeline.active_requests_.fetch_sub(1U);
 			if (is_generation)
 				pipeline.active_generation_requests_.fetch_sub(1U);
+			bool requeued = false;
 			{
 				std::lock_guard<std::mutex> lock(pipeline.mutex_);
 				for (std::size_t index = 0U;
@@ -254,11 +276,19 @@ void WorldGenerationWorkerLoop::run(WorldGenerationPipeline &pipeline) noexcept
 						break ;
 					}
 				}
-				/* The continuation owns the partial solver. Let other queued
-				 * work of the same priority take its turn before resuming. */
-				pipeline.requests_.push_back(std::move(request));
+				/* Cancellation and queue admission share this lock. An old slice
+				 * must not slip back into the queue after a recenter. */
+				if (!WorldGenerationWorkerLoop::request_is_cancelled(pipeline, *request)
+					&& !pipeline.stopping_.load())
+				{
+					pipeline.requests_.push_back(std::move(request));
+					requeued = true;
+				}
 			}
-			pipeline.condition_.notify_one();
+			if (!requeued && is_remesh)
+				pipeline.release_remesh_slot();
+			if (requeued || is_generation)
+				pipeline.condition_.notify_one();
 			continue ;
 		}
 		if (result != nullptr && !pipeline.stopping_.load())

@@ -98,6 +98,9 @@ void GameSessionSaveWorker::run() noexcept
 			result = GameSessionPersistence::write_serialized_snapshot(path.c_str(), snapshot);
 		if (result != FT_ERR_SUCCESS)
 			terrain.reset();
+		else if (terrain != nullptr && terrain->has_reservation())
+			/* A restart can reconcile this write once the prepare is durable. */
+			result = terrain->publish();
 		{
 			std::lock_guard<std::mutex> lock(this->mutex_);
 			this->result_ = result;

@@ -17,8 +17,8 @@ else
 endif
 
 LIBFT_ARCHIVE_SUFFIX      := _ft_vox_cfg$(FT_VOX_CONFIG_FINGERPRINT)
-LIBFT_FULL_LIB           = $(LIBFT_DIR)/Full_Libft$(LIBFT_ARCHIVE_SUFFIX).a
-LIBFT_FULL_DEBUG_LIB     = $(LIBFT_DIR)/Full_Libft_debug$(LIBFT_ARCHIVE_SUFFIX).a
+LIBFT_FULL_LIB           = $(LIBFT_DIR)/build/archives/Full_Libft$(LIBFT_ARCHIVE_SUFFIX).a
+LIBFT_FULL_DEBUG_LIB     = $(LIBFT_DIR)/build/archives/Full_Libft_debug$(LIBFT_ARCHIVE_SUFFIX).a
 ifeq ($(DEBUG),1)
 LIBFT_LINK_LIB           = $(LIBFT_FULL_DEBUG_LIB)
 else

@@ -41,7 +41,7 @@ uint8_t WorldGenerationPipeline::BoundaryLightChange::effect_on(
 }
 
 WorldGenerationPipeline::WorldGenerationPipeline() noexcept : requests_(),
-results_(), retired_results_(), mutex_(), results_mutex_(), condition_(), pipeline_epoch_(1U),
+retired_requests_(), results_(), retired_results_(), mutex_(), results_mutex_(), condition_(), pipeline_epoch_(1U),
 	remesh_in_flight_(0U), active_requests_(0U),
 	active_generation_requests_(0U), stopping_(false), active_request_ids_(),
 	active_request_chunk_x_(), active_request_chunk_z_(),
@@ -144,6 +144,7 @@ int32_t WorldGenerationPipeline::initialize(std::size_t worker_count,
 	this->maximum_queued_ = maximum_queued;
 	this->stopping_ = false;
 	this->pipeline_epoch_.fetch_add(1U);
+	this->interactive_remesh_epoch_.fetch_add(1U);
 	try
 	{
 		index = 0U;
@@ -175,6 +176,7 @@ int32_t WorldGenerationPipeline::destroy() noexcept
 
 		this->stopping_ = true;
 		this->pipeline_epoch_.fetch_add(1U);
+		this->interactive_remesh_epoch_.fetch_add(1U);
 		this->requests_.clear();
 	}
 	this->condition_.notify_all();
@@ -207,6 +209,7 @@ int32_t WorldGenerationPipeline::destroy() noexcept
 	{
 		std::lock_guard<std::mutex> lock(this->mutex_);
 
+		this->retired_requests_.clear();
 		this->retired_results_.clear();
 	}
 	return (FT_ERR_SUCCESS);
@@ -368,7 +371,7 @@ int32_t WorldGenerationPipeline::submit_remesh(uint64_t request_id,
 	if (light_update_config != nullptr)
 		resolved_light_config = *light_update_config;
 	error_code = WorldGenerationRequestBuilder::build_remesh(request,
-			request_id, this->pipeline_epoch_.load(), world_epoch,
+			request_id, this->request_epoch(interactive), world_epoch,
 			relevance_epoch, generation_revision, chunk_x, chunk_z,
 			voxel_revision, light_revision, content_version, light_input_version,
 			std::move(snapshot),
@@ -382,7 +385,6 @@ int32_t WorldGenerationPipeline::submit_remesh(uint64_t request_id,
 		return (error_code);
 	{
 		std::lock_guard<std::mutex> lock(this->mutex_);
-		std::deque<std::unique_ptr<Request>>::iterator iterator;
 
 		if (!this->initialized_ || this->stopping_)
 		{
@@ -396,7 +398,14 @@ int32_t WorldGenerationPipeline::submit_remesh(uint64_t request_id,
 		#endif
 			return (FT_ERR_INVALID_STATE);
 		}
-		iterator = this->requests_.begin();
+		/* The capture can be superseded while the request is being built.
+		 * Reject it before it can replace the newer request or take a slot. */
+		if (request->cancellation_epoch != this->request_epoch(request->remesh_interactive)
+			|| (request->cancellation_token != nullptr
+				&& request->cancellation_token->load(std::memory_order_acquire)
+					!= request->cancellation_token_value))
+			return (FT_ERR_INVALID_STATE);
+		auto iterator = this->requests_.begin();
 		while (iterator != this->requests_.end())
 		{
 			if (*iterator != nullptr
@@ -404,13 +413,19 @@ int32_t WorldGenerationPipeline::submit_remesh(uint64_t request_id,
 				&& (*iterator)->chunk_x == chunk_x
 				&& (*iterator)->chunk_z == chunk_z)
 			{
-				iterator = this->requests_.erase(iterator);
+				const auto superseded = iterator++;
+				this->retired_requests_.splice(this->retired_requests_.end(), this->requests_, superseded);
 				this->release_remesh_slot();
+				this->condition_.notify_one();
 			}
 			else
 				++iterator;
 		}
-		if (this->remesh_in_flight_.load() >= 2U)
+		/* Only a standalone geometry preview may use the extra slot. Its
+		 * lighting retry must compete for the ordinary slots again. */
+		const std::size_t remesh_limit =
+			request->snapshot->geometry_preview_only ? 3U : 2U;
+		if (this->remesh_in_flight_.load() >= remesh_limit)
 			return (FT_ERR_FULL);
 		/* remesh_in_flight_ already bounds replacement work independently from
 		 * terrain-generation queue occupancy.  Do not reserve queue entries by
@@ -425,23 +440,18 @@ int32_t WorldGenerationPipeline::submit_remesh(uint64_t request_id,
 	return (FT_ERR_SUCCESS);
 }
 
-int32_t WorldGenerationPipeline::poll(std::unique_ptr<Result> &result) noexcept
+int32_t WorldGenerationPipeline::poll(std::unique_ptr<Result> &result,
+	bool remesh_only) noexcept
 {
-	std::deque<std::unique_ptr<Result>>::iterator iterator;
-	bool found_interactive_remesh;
-
 	result.reset();
 	std::lock_guard<std::mutex> lock(this->results_mutex_);
 
-	if (this->results_.empty())
-		return (FT_ERR_NOT_FOUND);
 	/* A generation result can be large and numerous during startup.  Always
 	 * commit an interactive remesh first, then another remesh, so a ready edit
 	 * is not hidden behind background publication or the FIFO generation
 	 * backlog.  Worker selection already provides a generation escape; this
 	 * only affects publication order. */
-	iterator = this->results_.begin();
-	found_interactive_remesh = false;
+	auto iterator = this->results_.end();
 	for (std::deque<std::unique_ptr<Result>>::iterator candidate =
 		this->results_.begin(); candidate != this->results_.end(); ++candidate)
 	{
@@ -451,14 +461,16 @@ int32_t WorldGenerationPipeline::poll(std::unique_ptr<Result> &result) noexcept
 			if ((*candidate)->interactive_remesh != FT_FALSE)
 			{
 				iterator = candidate;
-				found_interactive_remesh = true;
 				break ;
 			}
-			if (!found_interactive_remesh
-				&& iterator == this->results_.begin())
+			if (iterator == this->results_.end())
 				iterator = candidate;
 		}
 	}
+	if (iterator == this->results_.end() && !remesh_only)
+		iterator = this->results_.begin();
+	if (iterator == this->results_.end())
+		return (FT_ERR_NOT_FOUND);
 	result = std::move(*iterator);
 	this->results_.erase(iterator);
 	return (FT_ERR_SUCCESS);
@@ -483,6 +495,7 @@ int32_t WorldGenerationPipeline::retire_chunk(
 
 	if (result == nullptr || chunk == nullptr)
 		return (result == nullptr ? FT_ERR_NO_MEMORY : FT_ERR_INVALID_ARGUMENT);
+	chunk->cancel_remesh_work();
 	result->chunk = std::move(chunk);
 	this->retire_result(std::move(result));
 	return (FT_ERR_SUCCESS);
@@ -498,32 +511,39 @@ int32_t WorldGenerationPipeline::capture_snapshot(const WorldChunk &target,
 		northwest, northeast, southwest, southeast, snapshot));
 }
 
-void WorldGenerationPipeline::cancel_queued() noexcept
+uint64_t WorldGenerationPipeline::request_epoch(ft_bool interactive_remesh) const noexcept
 {
-	std::size_t cancelled_remesh_count;
-	std::size_t observed_count;
-	std::size_t replacement_count;
+	return (interactive_remesh != FT_FALSE ? this->interactive_remesh_epoch_.load()
+		: this->pipeline_epoch_.load());
+}
 
-	std::lock_guard<std::mutex> lock(this->mutex_);
-
-	this->pipeline_epoch_.fetch_add(1U);
-	cancelled_remesh_count = 0U;
-	for (const std::unique_ptr<Request> &request : this->requests_)
+void WorldGenerationPipeline::cancel_queued(bool keep_interactive_remeshes) noexcept
+{
 	{
-		if (request != nullptr
-			&& request->operation == WorldGenerationOperation::REMESH)
-			cancelled_remesh_count += 1U;
+		std::lock_guard<std::mutex> lock(this->mutex_);
+		this->pipeline_epoch_.fetch_add(1U);
+		if (!keep_interactive_remeshes)
+			this->interactive_remesh_epoch_.fetch_add(1U);
+		if (this->requests_.empty())
+			return ;
+		for (auto iterator = this->requests_.begin(); iterator != this->requests_.end();)
+		{
+			const auto queued = iterator++;
+			const std::unique_ptr<Request> &request = *queued;
+			if (request != nullptr && request->operation == WorldGenerationOperation::REMESH)
+			{
+				if (keep_interactive_remeshes && request->remesh_interactive != FT_FALSE
+					&& (request->cancellation_token == nullptr
+						|| request->cancellation_token->load(std::memory_order_acquire)
+							== request->cancellation_token_value))
+					continue ;
+				this->release_remesh_slot();
+			}
+			/* Free detached payloads on a worker after it releases the lock. */
+			this->retired_requests_.splice(this->retired_requests_.end(), this->requests_, queued);
+		}
 	}
-	this->requests_.clear();
-	while (cancelled_remesh_count > 0U)
-	{
-		observed_count = this->remesh_in_flight_.load();
-		replacement_count = observed_count >= cancelled_remesh_count
-			? observed_count - cancelled_remesh_count : 0U;
-		if (this->remesh_in_flight_.compare_exchange_weak(observed_count,
-			replacement_count))
-			break ;
-	}
+	this->condition_.notify_all();
 }
 
 std::size_t WorldGenerationPipeline::queued_count() const noexcept

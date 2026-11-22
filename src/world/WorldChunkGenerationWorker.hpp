@@ -17,7 +17,8 @@ class WorldChunkGenerationWorker
 	~WorldChunkGenerationWorker();
 	WorldChunkGenerationWorker &operator=(const WorldChunkGenerationWorker &other);
 
-	static std::unique_ptr<WorldGenerationPipeline::Result> process_generation(WorldGenerationPipeline::Request &request) noexcept;
+	static std::unique_ptr<WorldGenerationPipeline::Result> process_generation(
+		WorldGenerationPipeline::Request &request, const std::atomic<uint64_t> &stream_epoch) noexcept;
 	static std::unique_ptr<WorldGenerationPipeline::Result> process_remesh(WorldGenerationPipeline::Request &request) noexcept;
 	/* Apply deterministic planned structures to a generated or synthetic chunk.
 	 * All writes stay within that chunk's owned footprint. */
@@ -26,16 +27,9 @@ class WorldChunkGenerationWorker
 			&feature_plans) noexcept;
 
   private:
-	static int32_t initialize_chunk_for_generation(WorldChunk &chunk,
-		int32_t chunk_x, int32_t chunk_z, const char *seed,
-		voxel_generation_config &config, uint32_t stage_mask,
-		std::vector<WorldGenerationPipeline::WorldDeferredBlockEdit> &deferred_edits,
-		const std::vector<WorldGenerationPipeline::GenerationFeaturePlan>
-			&feature_plans,
-		const WorldGenerationPipeline::WorldChunkSnapshot *source_snapshot,
-		const std::string &terrain_chunk_path, bool &loaded_from_terrain_store,
-		uint64_t *generation_duration_nanoseconds,
-		uint64_t *mesh_duration_nanoseconds) noexcept;
+	static int32_t initialize_chunk_for_generation(WorldGenerationPipeline::Result &result,
+		const WorldGenerationPipeline::Request &request,
+		const std::atomic<uint64_t> &stream_epoch) noexcept;
 	static std::unique_ptr<WorldGenerationPipeline::Result> finish_generation_result(std::unique_ptr<WorldGenerationPipeline::Result> result,
 		WorldGenerationPipeline::Request &request) noexcept;
 };

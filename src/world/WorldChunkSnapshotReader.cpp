@@ -22,47 +22,54 @@ WorldChunkSnapshotReader &WorldChunkSnapshotReader::operator=(const WorldChunkSn
 int32_t WorldChunkSnapshotReader::initialize_snapshot_chunk(game_voxel_chunk &chunk,
 	const WorldGenerationPipeline::WorldChunkSnapshot &snapshot) noexcept
 {
-	int32_t error_code;
-	std::size_t index;
-	std::size_t plane;
-	std::size_t local_z;
-	std::size_t remainder;
-	std::size_t local_y;
-	std::size_t local_x;
-
-	error_code = chunk.initialize();
+	constexpr std::size_t plane = static_cast<std::size_t>(GAME_VOXEL_CHUNK_WIDTH)
+		* GAME_VOXEL_CHUNK_HEIGHT;
+	constexpr std::size_t section_plane = static_cast<std::size_t>(GAME_VOXEL_CHUNK_WIDTH)
+		* GAME_VOXEL_CHUNK_DEPTH;
+	if (snapshot.blocks.size() > plane * GAME_VOXEL_CHUNK_DEPTH)
+		return (FT_ERR_OUT_OF_RANGE);
+	int32_t error_code = chunk.initialize();
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
-	index = 0U;
-	while (index < snapshot.blocks.size())
+	/* This chunk is private to the worker. Mark a nonempty snapshot dirty once,
+	 * then fill its sections without taking the chunk lock for each voxel. */
+	if (!snapshot.blocks.empty())
+		error_code = chunk.write_generated_block(0, 0, 0, GAME_VOXEL_AIR_BLOCK);
+	for (std::size_t index = 0U;
+		error_code == FT_ERR_SUCCESS && index < snapshot.blocks.size(); ++index)
 	{
-		plane = static_cast<std::size_t>(GAME_VOXEL_CHUNK_WIDTH)
-			* static_cast<std::size_t>(GAME_VOXEL_CHUNK_HEIGHT);
-		local_z = index / plane;
-		remainder = index % plane;
-		local_y = remainder / GAME_VOXEL_CHUNK_WIDTH;
-		local_x = remainder % GAME_VOXEL_CHUNK_WIDTH;
-		error_code = chunk.write_generated_block(static_cast<int32_t>(local_x),
-				static_cast<int32_t>(local_y), static_cast<int32_t>(local_z),
-				snapshot.blocks[index]);
-		if (error_code != FT_ERR_SUCCESS)
-		{
-			(void)chunk.destroy();
-			return (error_code);
-		}
-		index += 1U;
+		const uint32_t block_id = snapshot.blocks[index];
+		if (block_id == GAME_VOXEL_AIR_BLOCK)
+			continue ;
+		const std::size_t z = index / plane;
+		const std::size_t y = (index % plane) / GAME_VOXEL_CHUNK_WIDTH;
+		const std::size_t x = index % GAME_VOXEL_CHUNK_WIDTH;
+		const auto section_index = static_cast<uint8_t>(y / GAME_VOXEL_SECTION_EDGE);
+		const auto section_cell = static_cast<uint16_t>(x + z * GAME_VOXEL_CHUNK_WIDTH
+			+ (y % GAME_VOXEL_SECTION_EDGE) * section_plane);
+		if (section_cell != 0U)
+			error_code = chunk.get_section(section_index).set_block(section_cell, block_id);
 	}
-	if (snapshot.generation_metadata.valid != FT_FALSE)
+	/* Leave the first cell as air until the end. In dense sections this keeps
+	 * the palette's uniformity check from scanning an increasingly long run
+	 * of identical voxels after each write. Uniform sections still compact. */
+	for (uint8_t section_index = 0U;
+		error_code == FT_ERR_SUCCESS && section_index < GAME_VOXEL_CHUNK_SECTION_COUNT;
+		++section_index)
 	{
-		error_code = chunk.set_generation_metadata(
-			snapshot.generation_metadata);
-		if (error_code != FT_ERR_SUCCESS)
-		{
-			(void)chunk.destroy();
-			return (error_code);
-		}
+		const std::size_t first_cell = static_cast<std::size_t>(section_index)
+			* GAME_VOXEL_SECTION_EDGE * GAME_VOXEL_CHUNK_WIDTH;
+		if (first_cell >= snapshot.blocks.size())
+			break ;
+		const uint32_t block_id = snapshot.blocks[first_cell];
+		if (block_id != GAME_VOXEL_AIR_BLOCK)
+			error_code = chunk.get_section(section_index).set_block(0U, block_id);
 	}
-	return (FT_ERR_SUCCESS);
+	if (error_code == FT_ERR_SUCCESS && snapshot.generation_metadata.valid != FT_FALSE)
+		error_code = chunk.set_generation_metadata(snapshot.generation_metadata);
+	if (error_code != FT_ERR_SUCCESS)
+		(void)chunk.destroy();
+	return (error_code);
 }
 
 int32_t WorldChunkSnapshotReader::lookup_snapshot_block(void *user_data,

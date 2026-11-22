@@ -53,6 +53,15 @@ struct WorldItemPickupResult
 	bool entity_removed;
 };
 
+struct WorldItemRenderPosition
+{
+	uint64_t entity_id;
+	int32_t item_id;
+	double x;
+	double y;
+	double z;
+};
+
 class WorldItemStore
 {
   public:
@@ -85,10 +94,12 @@ class WorldItemStore
 	int32_t query_nearby(double x, double y, double z, double radius,
 		uint64_t actor_id, uint64_t server_tick,
 		std::vector<WorldItemSnapshot> *snapshots_out) const noexcept;
-	/* Renderer-only view. Includes published items regardless of temporary
+	/* Includes published items regardless of temporary
 	 * owner pickup locks; pending transaction entries remain hidden. */
 	int32_t query_renderable(double x, double y, double z, double radius,
 		std::vector<WorldItemSnapshot> *snapshots_out) const noexcept;
+	int32_t query_render_positions(double x, double y, double z, double radius,
+		std::vector<WorldItemRenderPosition> *positions_out) const noexcept;
 	int32_t serialize(std::vector<uint8_t> &bytes_out) const noexcept;
 	/* Atomically replace this initialized store with a fully decoded staged
 	 * store. The staged store receives the previous contents. */
@@ -103,6 +114,9 @@ class WorldItemStore
 	int32_t validate_instance_id_uniqueness(
 		const game_inventory &inventory, const WorldEntityStore *entities,
 		const std::vector<uint64_t> &additional_instance_ids) const noexcept;
+	int32_t validate_snapshot_items(const game_inventory_snapshot &inventory,
+		const WorldEntityStore &entities, const std::vector<uint64_t> &additional_instance_ids,
+		const MinecraftItemCatalog &catalog) const noexcept;
 	int32_t validate_item_instance_policy(
 		const MinecraftItemCatalog &catalog) const noexcept;
 	int32_t save_file(const char *file_path) const noexcept;
@@ -140,9 +154,13 @@ class WorldItemStore
 	uint64_t next_transfer_transaction_id_;
 	uint64_t change_revision_;
 	bool initialized_;
+	int32_t validate_instance_ids(const game_inventory_snapshot &inventory,
+		const WorldEntityStore *entities, const std::vector<uint64_t> &additional_instance_ids,
+		const MinecraftItemCatalog *catalog) const noexcept;
+	template<typename Snapshot>
 	int32_t query_internal(double x, double y, double z, double radius,
 		uint64_t actor_id, uint64_t server_tick, bool respect_owner_lock,
-		std::vector<WorldItemSnapshot> *snapshots_out) const noexcept;
+		std::vector<Snapshot> *snapshots_out) const noexcept;
 
 	static uint64_t chunk_key(int32_t chunk_x, int32_t chunk_z) noexcept;
 	static int32_t world_coordinate_to_chunk(double coordinate,

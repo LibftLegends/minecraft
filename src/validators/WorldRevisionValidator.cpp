@@ -222,7 +222,7 @@ static int32_t world_revision_validator_test_barrier_restore() noexcept
 	RegenerationWorldRules source_rules;
 	RegenerationWorldRules restored_rules;
 	RegenerationWorldRulesPolicy policy = {};
-	const char *metadata_path = "world_revision_active_barrier.tmp";
+	const char *metadata_path = "build_logs/world_revision_active_barrier.tmp";
 	const char *failure_stage = "source.initialize";
 	uint64_t selection_revision = 0U;
 	int32_t error_code = source.initialize("revision-validator");
@@ -2174,7 +2174,7 @@ int32_t WorldRevisionValidator::test_server_draft_authorization(
 			WorldRevisionServer file_checkpoint_server(world);
 			std::vector<uint8_t> checkpoint;
 			const char *checkpoint_path =
-				"world_revision_server_checkpoint.validator.tmp";
+				"build_logs/world_revision_server_checkpoint.validator.tmp";
 			int32_t file_result = server.save_checkpoint_file(checkpoint_path);
 			if (file_result == FT_ERR_SUCCESS)
 				file_result = file_checkpoint_server.load_checkpoint_file(

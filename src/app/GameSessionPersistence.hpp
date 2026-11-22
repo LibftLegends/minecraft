@@ -156,7 +156,12 @@ class GameSessionPersistence
 		const std::vector<uint8_t> &crop_growth_state,
 		uint64_t output_session_id,
 		const std::vector<uint8_t> &revision_server_state) noexcept;
-	static int32_t save_file_with_revision_server_checkpoint_and_host_config(
+
+  private:
+	friend class GameSession;
+	/* GameSession validates the complete item identity graph under its
+	 * transaction lock before encoding this snapshot. */
+	static int32_t save_validated_session_snapshot(
 		const char *file_path, const game_character &character,
 		const WorldItemStore &world_items,
 		const MinecraftRecipeCatalog &recipe_catalog,
@@ -172,6 +177,8 @@ class GameSessionPersistence
 		const std::vector<uint8_t> &revision_server_state,
 		const std::vector<uint8_t> &host_config_state,
 		std::vector<uint8_t> *serialized_snapshot = nullptr) noexcept;
+
+  public:
 	static int32_t write_serialized_snapshot(const char *file_path,
 		const std::vector<uint8_t> &snapshot) noexcept;
 	static int32_t load_file(const char *file_path,

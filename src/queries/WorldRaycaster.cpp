@@ -14,6 +14,35 @@ namespace
         int32_t z;
     };
 
+    struct RayBlockLookup
+    {
+        const World &world;
+        const WorldChunk *chunk = nullptr;
+        int32_t first_x = 0;
+        int32_t first_z = 0;
+        bool have_column = false;
+
+        bool block_at(int32_t x, int32_t y, int32_t z, uint32_t &block_id)
+        {
+            if (y < 0 || y >= GAME_VOXEL_CHUNK_HEIGHT)
+                return (false);
+            /* One ray can cross many cells before leaving the chunk. Reuse
+             * its lookup, including missing chunks, under the caller's lock. */
+            if (!have_column || x < first_x || x > first_x + (GAME_VOXEL_CHUNK_WIDTH - 1)
+                || z < first_z || z > first_z + (GAME_VOXEL_CHUNK_DEPTH - 1))
+            {
+                const int32_t chunk_x = WorldCoordinates::floor_divide(x, GAME_VOXEL_CHUNK_WIDTH);
+                const int32_t chunk_z = WorldCoordinates::floor_divide(z, GAME_VOXEL_CHUNK_DEPTH);
+                first_x = chunk_x * GAME_VOXEL_CHUNK_WIDTH;
+                first_z = chunk_z * GAME_VOXEL_CHUNK_DEPTH;
+                chunk = world.find_chunk(chunk_x, chunk_z);
+                have_column = true;
+            }
+            return (chunk != nullptr && chunk->chunk.read_block(x - first_x, y,
+                z - first_z, &block_id) == FT_ERR_SUCCESS);
+        }
+    };
+
     bool valid_ray(double ox, double oy, double oz, double dx, double dy, double dz,
                    double max_distance)
     {
@@ -55,10 +84,11 @@ namespace
                                  : (static_cast<double>(tz + 1) - oz) * delta_z;
         double distance = 0.0;
         uint32_t block_id;
+        RayBlockLookup lookup{world};
 
         while (distance <= max_distance)
         {
-            if (WorldBlockQuery::block_id_at(world, tx, ty, tz, &block_id)
+            if (lookup.block_at(tx, ty, tz, block_id)
                 && block_id != GAME_VOXEL_AIR_BLOCK)
             {
                 result.found = true;
@@ -168,11 +198,12 @@ int32_t WorldRaycaster::raycast_edit_target(const World &world, double origin_x,
                                       : (static_cast<double>(tz + 1) - origin_z) * delta_z;
     double distance = 0.0;
     uint32_t block_id;
+    RayBlockLookup lookup{world};
 
     while (distance <= max_distance)
     {
         if (!(tx == prev_x && ty == prev_y && tz == prev_z)
-            && WorldBlockQuery::block_id_at(world, tx, ty, tz, &block_id)
+            && lookup.block_at(tx, ty, tz, block_id)
             && block_id != GAME_VOXEL_AIR_BLOCK)
         {
             *hit_x = tx;

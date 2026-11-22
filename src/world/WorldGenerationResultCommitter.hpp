@@ -11,7 +11,8 @@ class WorldGenerationResultCommitter
 	~WorldGenerationResultCommitter();
 	WorldGenerationResultCommitter &operator=(const WorldGenerationResultCommitter &other);
 
-	static int32_t drain(WorldChunkStreamer &streamer, World &world) noexcept;
+	static int32_t drain(WorldChunkStreamer &streamer, World &world,
+		bool remesh_only = false) noexcept;
 	static int32_t move_mesh(chunk_mesh &destination,
 		chunk_mesh &source) noexcept;
 

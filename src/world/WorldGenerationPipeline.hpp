@@ -9,6 +9,7 @@
 # include <condition_variable>
 # include <cstdint>
 # include <deque>
+# include <list>
 # include <functional>
 # include <memory>
 # include <mutex>
@@ -69,6 +70,7 @@ class WorldGenerationPipeline
 		/* West, east, north, south. These neighbors depend on the source
 		 * relight and their retained light can feed a removed light back. */
 		uint8_t blocked_light_faces = 0U;
+		bool geometry_preview_only = false;
 		std::array<std::weak_ptr<const WorldChunkReadState>, 4> boundary_read_states;
 		ft_bool dependency_valid;
 		int32_t dependency_chunk_x;
@@ -238,6 +240,7 @@ class WorldGenerationPipeline
 	{
 		static constexpr uint32_t STAGE_GEOMETRY_ONLY = 1U << 0;
 		static constexpr uint32_t STAGE_GEOMETRY_FINAL = 1U << 1;
+		static constexpr uint32_t STAGE_GEOMETRY_WAIT_FOR_LIGHT = 1U << 2;
 		uint64_t					request_id;
 		uint64_t					world_epoch;
 		uint64_t					relevance_epoch;
@@ -411,7 +414,7 @@ class WorldGenerationPipeline
 		const std::shared_ptr<std::atomic<uint64_t>> &cancellation_token =
 			std::shared_ptr<std::atomic<uint64_t>>(),
 		uint64_t cancellation_token_value = 0U) noexcept;
-	int32_t poll(std::unique_ptr<Result> &result) noexcept;
+	int32_t poll(std::unique_ptr<Result> &result, bool remesh_only = false) noexcept;
 	void retire_result(std::unique_ptr<Result> result) noexcept;
 	int32_t retire_chunk(std::unique_ptr<WorldChunk> chunk) noexcept;
 	int32_t capture_snapshot(const WorldChunk &target, const WorldChunk *west,
@@ -420,7 +423,7 @@ class WorldGenerationPipeline
 		const WorldChunk *northeast, const WorldChunk *southwest,
 		const WorldChunk *southeast,
 		WorldChunkSnapshot &snapshot) const noexcept;
-	void cancel_queued() noexcept;
+	void cancel_queued(bool keep_interactive_remeshes = false) noexcept;
 	std::size_t queued_count() const noexcept;
 	std::size_t completed_count() const noexcept;
 	std::size_t active_count() const noexcept;
@@ -432,13 +435,15 @@ class WorldGenerationPipeline
 	uint64_t oldest_completed_result_age_nanoseconds() const noexcept;
 	bool is_initialized() const noexcept;
 
-	std::deque<std::unique_ptr<Request>> requests_;
+	std::list<std::unique_ptr<Request>> requests_;
+	std::list<std::unique_ptr<Request>> retired_requests_;
 	std::deque<std::unique_ptr<Result>> results_;
 	std::deque<std::unique_ptr<Result>> retired_results_;
 	mutable std::mutex mutex_;
 	mutable std::mutex results_mutex_;
 	std::condition_variable condition_;
 	std::atomic<uint64_t> pipeline_epoch_;
+	std::atomic<uint64_t> interactive_remesh_epoch_{1U};
 	std::atomic<std::size_t> remesh_in_flight_;
 	std::atomic<std::size_t> active_requests_;
 	std::atomic<std::size_t> active_generation_requests_;
@@ -456,6 +461,7 @@ class WorldGenerationPipeline
 	bool							initialized_;
 
 	static std::size_t resolve_worker_count(std::size_t worker_count) noexcept;
+	uint64_t request_epoch(ft_bool interactive_remesh) const noexcept;
 };
 
 # include "../../src/world/WorldChunkGenerationWorker.hpp"

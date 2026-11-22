@@ -1052,7 +1052,7 @@ namespace
 	static int32_t validate_card_transfer_journal_recovery()
 	{
 		static const char *SNAPSHOT_PATH =
-			"world_item_card_transfer_recovery.tmp";
+			"build_logs/world_item_card_transfer_recovery.tmp";
 		game_character character;
 		game_character recovered_character;
 		WorldItemStore world_items;
@@ -1559,14 +1559,14 @@ int WorldItemStoreValidator::validate() const
 			spawner_result);
 		return (1);
 	}
-	const char *snapshot_file = "world_item_store_validator_snapshot.tmp";
-	const char *session_snapshot_file = "game_session_validator_snapshot.tmp";
+	const char *snapshot_file = "build_logs/world_item_store_validator_snapshot.tmp";
+	const char *session_snapshot_file = "build_logs/game_session_validator_snapshot.tmp";
 	const char *duplicate_id_save_file =
-		"world_item_duplicate_id_save_validator.tmp";
-	const char *pickup_recovery_file = "world_item_pickup_recovery.tmp";
-	const char *craft_recovery_file = "world_item_craft_recovery.tmp";
+		"build_logs/world_item_duplicate_id_save_validator.tmp";
+	const char *pickup_recovery_file = "build_logs/world_item_pickup_recovery.tmp";
+	const char *craft_recovery_file = "build_logs/world_item_craft_recovery.tmp";
 	const char *processing_recovery_file =
-		"world_item_processing_recovery.tmp";
+		"build_logs/world_item_processing_recovery.tmp";
 	WorldItemStore store;
 	WorldItemStore restored_store;
 	WorldItemStore session_restored_store;

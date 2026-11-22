@@ -181,6 +181,7 @@ class World
 	int32_t initialize_for_world(const char *seed_value,
 		const uint8_t world_id[32], const char *voxel_config_file_path = nullptr);
 	void mark_geometry_changed() noexcept;
+	int32_t publish_pending_remeshes() noexcept;
 	void set_voxel_config(const voxel_generation_config &config);
 	const voxel_generation_config &voxel_generation_settings() const;
 	int32_t load_voxel_config(const char *file_path);
@@ -221,10 +222,17 @@ class World
 		uint32_t replacement_block_id,
 		uint64_t expected_voxel_revision,
 		WorldTerrainChunkStore::PreparedEdit *prepared = nullptr);
+	static constexpr std::size_t MAX_CHUNK_BLOCK_EDITS = 64U;
+	/* Replace distinct cells in one loaded chunk at one expected revision.
+	 * A successful batch publishes one voxel revision and one terrain write. */
+	int32_t replace_chunk_block_states(int32_t chunk_x, int32_t chunk_z,
+		uint64_t expected_voxel_revision, const WorldChunkBlockEdit *edits,
+		std::size_t count);
 	int32_t capture_block_state_write(int32_t world_x, int32_t world_y,
 		int32_t world_z, uint32_t expected_block_id, uint32_t replacement_block_id,
 		uint64_t expected_voxel_revision,
 		std::unique_ptr<WorldTerrainChunkStore::PreparedEdit> &out) const noexcept;
+	int32_t reserve_prepared_block_write(WorldTerrainChunkStore::PreparedEdit &edit) noexcept;
 	int32_t till_farmland_at(int32_t world_x, int32_t world_y,
 		int32_t world_z, uint64_t expected_voxel_revision);
 	bool farmland_is_hydrated(int32_t world_x, int32_t world_y,

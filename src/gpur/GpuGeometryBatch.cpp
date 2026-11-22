@@ -1,5 +1,6 @@
 #include "../../src/gpur/GpuGeometryBatch.hpp"
 #include "../../src/diagnostics/RuntimeAnalytics.hpp"
+#include <algorithm>
 
 #if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
 # include <cstdio>
@@ -16,11 +17,82 @@ namespace
 	 * the entire render frame.  Remaining visible meshes stay in the pending
 	 * queue and are revisited on later frames. */
 	static const int32_t MAX_MESH_UPLOADS_PER_FRAME = 1;
+	static const int32_t MAX_INTERACTIVE_MESH_UPLOADS_PER_FRAME = 2;
 	static const size_t MAX_MESH_UPLOAD_BYTES_PER_FRAME = 8U * 1024U * 1024U;
 
 	static bool visibility_camera_value_matches(double left, double right)
 	{
 		return (std::abs(left - right) <= 1.0e-9);
+	}
+
+	static int32_t mesh_upload_priority(const WorldChunk &chunk,
+		const GpuChunkMesh &uploaded)
+	{
+		if (chunk.last_mesh_publication_voxel_revision != chunk.voxel_revision)
+			/* A subsequent edit can already be waiting for its own mesh. The
+			 * completed interactive mesh can still replace what the GPU drew. */
+			return (chunk.last_mesh_publication_interactive != FT_FALSE ? 1 : 0);
+		/* A later light-only publication can replace an edit's CPU mesh before
+		 * the renderer sees it. The GPU voxel revision still records the gap. */
+		if (uploaded.uploaded_coordinates_match(chunk.chunk_x, chunk.chunk_z)
+			&& uploaded.uploaded_voxel_revision() != chunk.voxel_revision)
+			return (2);
+		return (chunk.last_mesh_publication_interactive != FT_FALSE ? 1 : 0);
+	}
+
+	static size_t mesh_upload_bytes(const chunk_mesh &mesh)
+	{
+		return (mesh.vertices.size() * sizeof(chunk_mesh_vertex)
+			+ (mesh.solid_indices.size() + mesh.water_indices.size()) * sizeof(uint32_t));
+	}
+
+	static bool waits_for_border_upload(const WorldChunk &chunk, const GpuChunkMesh &uploaded)
+	{
+		if (!uploaded.uploaded_coordinates_match(chunk.chunk_x, chunk.chunk_z))
+			return (false);
+		const uint64_t drawn_revision = uploaded.uploaded_voxel_revision();
+		return (std::any_of(chunk.published_border_delete_dependencies.begin(),
+			chunk.published_border_delete_dependencies.end(), [drawn_revision](const auto &dependency)
+			{
+				return (dependency.source_voxel_revision > drawn_revision);
+			}));
+	}
+
+	static bool collect_border_uploads(const World &world, const GpuChunkMesh *uploaded,
+		std::array<int32_t, WorldCoordinates::CHUNK_COUNT> &slots, size_t &count,
+		size_t &bytes)
+	{
+		for (size_t index = 0U; index < count; ++index)
+		{
+			const int32_t slot = slots[index];
+			const WorldChunk &chunk = world.chunks[slot];
+			if (!waits_for_border_upload(chunk, uploaded[slot]))
+				continue ;
+			const uint64_t drawn_revision = uploaded[slot].uploaded_voxel_revision();
+			for (size_t face = 0U; face < chunk.published_border_delete_dependencies.size(); ++face)
+			{
+				const auto &dependency = chunk.published_border_delete_dependencies[face];
+				if (dependency.source_voxel_revision <= drawn_revision)
+					continue ;
+				const uint64_t required = dependency.receiver_mesh_revision;
+				const auto &offset = WorldGenerationPipeline::BOUNDARY_NEIGHBORS[face];
+				const WorldChunk *receiver = world.find_chunk(chunk.chunk_x + offset[0], chunk.chunk_z + offset[1]);
+				if (receiver == nullptr || !receiver->initialized)
+					continue ;
+				const int32_t neighbour = static_cast<int32_t>(receiver - world.chunks);
+				if (uploaded[neighbour].uploaded_coordinates_match(receiver->chunk_x, receiver->chunk_z)
+					&& uploaded[neighbour].uploaded_revision() >= required)
+					continue ;
+				if (!receiver->light_ready_for_render || receiver->mesh_revision < required)
+					return (false);
+				if (std::find(slots.data(), slots.data() + count, neighbour) == slots.data() + count)
+				{
+					slots[count++] = neighbour;
+					bytes += mesh_upload_bytes(receiver->mesh);
+				}
+			}
+		}
+		return (true);
 	}
 }
 
@@ -87,6 +159,7 @@ void GpuGeometryBatch::sync_pending_visible_meshes(const Camera &camera,
 	int32_t cursor_slot;
 	int32_t nearest_pending_index = -1;
 	int32_t priority_pending_index = -1;
+	int32_t highest_upload_priority = 0;
 	double nearest_pending_distance = 0.0;
 	double priority_pending_distance = 0.0;
 	if (visible_slot_count > 0)
@@ -146,7 +219,9 @@ void GpuGeometryBatch::sync_pending_visible_meshes(const Camera &camera,
 			{
 				const WorldChunk &pending_chunk = world.chunks[pending_slot];
 				if (pending_chunk.initialized
-					&& pending_chunk.mesh.has_occupied_bounds == FT_TRUE
+					&& pending_chunk.light_ready_for_render
+					&& (pending_chunk.mesh.has_occupied_bounds == FT_TRUE
+						|| waits_for_border_upload(pending_chunk, _chunk_meshes[pending_slot]))
 					&& _chunk_meshes[pending_slot].needs_sync(
 						pending_chunk.mesh_revision, pending_chunk.chunk_x,
 						pending_chunk.chunk_z,
@@ -165,19 +240,13 @@ void GpuGeometryBatch::sync_pending_visible_meshes(const Camera &camera,
 						nearest_pending_index = pending_index;
 						nearest_pending_distance = pending_distance;
 					}
-					/* Interactive edits take priority over background mesh
-					 * publication.  Initial generated chunks use voxel revision 1;
-					 * a higher revision means the player/world changed this chunk
-					 * after that initial publication. */
-					const bool current_interactive_publication =
-						pending_chunk.last_mesh_publication_interactive != FT_FALSE
-						&& pending_chunk.last_mesh_publication_voxel_revision
-							== pending_chunk.voxel_revision;
-					if ((pending_chunk.owns_current_interactive_remesh()
-						|| current_interactive_publication)
-						&& (priority_pending_index < 0
-							|| pending_distance < priority_pending_distance))
+					const int32_t priority = mesh_upload_priority(pending_chunk,
+						_chunk_meshes[pending_slot]);
+					if (priority > 0 && (priority > highest_upload_priority
+						|| (priority == highest_upload_priority
+							&& pending_distance < priority_pending_distance)))
 					{
+						highest_upload_priority = priority;
 						priority_pending_index = pending_index;
 						priority_pending_distance = pending_distance;
 					}
@@ -191,6 +260,7 @@ void GpuGeometryBatch::sync_pending_visible_meshes(const Camera &camera,
 			visible_start = nearest_pending_index;
 	}
 	int32_t visible_offset = 0;
+	bool uploaded_interactive_mesh = false;
 
 	uploaded_count = 0;
 	uploaded_bytes = 0U;
@@ -206,6 +276,9 @@ void GpuGeometryBatch::sync_pending_visible_meshes(const Camera &camera,
 		else
 		{
 			const WorldChunk &chunk = world.chunks[slot];
+			const bool empty_border_edit = chunk.initialized && chunk.light_ready_for_render
+				&& chunk.mesh.has_occupied_bounds == FT_FALSE
+				&& waits_for_border_upload(chunk, _chunk_meshes[slot]);
 			const bool retain_previous_mesh = chunk.initialized
 				&& !chunk.light_ready_for_render && chunk.mesh_dirty
 				&& _chunk_meshes[slot].has_uploaded_geometry()
@@ -216,7 +289,7 @@ void GpuGeometryBatch::sync_pending_visible_meshes(const Camera &camera,
 				_chunk_meshes[slot].invalidate();
 			}
 			else if ((!chunk.light_ready_for_render
-				|| chunk.mesh.has_occupied_bounds == FT_FALSE)
+				|| (chunk.mesh.has_occupied_bounds == FT_FALSE && !empty_border_edit))
 				&& !retain_previous_mesh)
 			{
 				_chunk_meshes[slot].invalidate();
@@ -236,8 +309,6 @@ void GpuGeometryBatch::sync_pending_visible_meshes(const Camera &camera,
 				chunk.chunk_x, chunk.chunk_z,
 				chunk.last_mesh_publication_voxel_revision))
 			{
-				/* The CPU already revision-checked this payload. Render it even
-				 * if a neighbor is relighting or lies outside the upload list. */
 				/* Keep the last GPU publication visible while the replacement waits
 				 * for this frame's upload budget.  Invalidating here made every
 				 * remesh briefly disappear (and made a light publication look like
@@ -247,11 +318,27 @@ void GpuGeometryBatch::sync_pending_visible_meshes(const Camera &camera,
 				if (!_chunk_meshes[slot].uploaded_coordinates_match(
 					chunk.chunk_x, chunk.chunk_z))
 					_chunk_meshes[slot].invalidate();
-				const size_t mesh_bytes = chunk.mesh.vertices.size()
-					* sizeof(chunk_mesh_vertex)
-					+ chunk.mesh.solid_indices.size() * sizeof(uint32_t)
-					+ chunk.mesh.water_indices.size() * sizeof(uint32_t);
-				if (uploaded_count < MAX_MESH_UPLOADS_PER_FRAME
+				std::array<int32_t, WorldCoordinates::CHUNK_COUNT> upload_slots;
+				upload_slots[0] = slot;
+				size_t upload_count = 1U;
+				size_t mesh_bytes = mesh_upload_bytes(chunk.mesh);
+				/* Keep the old source mesh drawable until its receiving faces have
+				 * uploaded. A reciprocal or corner edit can need a group of uploads
+				 * before the next draw. Admit that group together, even when the first
+				 * group is larger than the usual budget. */
+				if (!collect_border_uploads(world, _chunk_meshes, upload_slots, upload_count, mesh_bytes))
+				{
+					++visible_offset;
+					continue ;
+				}
+				const bool interactive_publication =
+					mesh_upload_priority(chunk, _chunk_meshes[slot]) > 0;
+				/* A border edit can have two ready meshes. Upload both within
+				 * the byte budget so the seam doesn't wait another frame. */
+				const int32_t upload_limit = interactive_publication && uploaded_interactive_mesh
+					? MAX_INTERACTIVE_MESH_UPLOADS_PER_FRAME : MAX_MESH_UPLOADS_PER_FRAME;
+				if ((uploaded_count == 0
+						|| static_cast<size_t>(uploaded_count) + upload_count <= static_cast<size_t>(upload_limit))
 					&& (uploaded_count == 0
 						|| uploaded_bytes + mesh_bytes
 							<= MAX_MESH_UPLOAD_BYTES_PER_FRAME))
@@ -265,7 +352,7 @@ void GpuGeometryBatch::sync_pending_visible_meshes(const Camera &camera,
 							analytics_error);
 					const auto upload_start = std::chrono::steady_clock::now();
 					static uint32_t light_upload_diagnostics = 0U;
-					if (light_upload_diagnostics < 16U)
+					if (_analytics_collect_diagnostics && light_upload_diagnostics < 16U)
 					{
 						uint8_t minimum_light = 255U;
 						uint8_t maximum_light = 0U;
@@ -296,9 +383,13 @@ void GpuGeometryBatch::sync_pending_visible_meshes(const Camera &camera,
 						light_upload_diagnostics += 1U;
 					}
 #endif
-					_chunk_meshes[slot].sync(chunk.mesh, chunk.mesh_revision,
-						chunk.chunk_x, chunk.chunk_z,
-						chunk.last_mesh_publication_voxel_revision);
+					for (size_t index = 0U; index < upload_count; ++index)
+					{
+						const int32_t upload_slot = upload_slots[index];
+						const WorldChunk &member = world.chunks[upload_slot];
+						_chunk_meshes[upload_slot].sync(member.mesh, member.mesh_revision,
+							member.chunk_x, member.chunk_z, member.last_mesh_publication_voxel_revision);
+					}
 				#if defined(DEBUG)
 					if (chunk.last_mesh_publication_interactive != FT_FALSE
 						|| chunk.owns_current_interactive_remesh())
@@ -308,7 +399,8 @@ void GpuGeometryBatch::sync_pending_visible_meshes(const Camera &camera,
 							static_cast<unsigned long long>(chunk.voxel_revision),
 							static_cast<unsigned long long>(chunk.mesh_revision));
 				#endif
-					uploaded_count += 1;
+					uploaded_count += static_cast<int32_t>(upload_count);
+					uploaded_interactive_mesh = interactive_publication;
 					uploaded_bytes += mesh_bytes;
 #if defined(LIBFT_ENABLE_ANALYTICS)
 					analytics_error = RuntimeAnalytics::end_scope();
@@ -319,7 +411,7 @@ void GpuGeometryBatch::sync_pending_visible_meshes(const Camera &camera,
 					const uint64_t upload_us = static_cast<uint64_t>(
 						std::chrono::duration_cast<std::chrono::microseconds>(
 							std::chrono::steady_clock::now() - upload_start).count());
-					if (upload_us >= 8000U)
+					if (_analytics_collect_diagnostics && upload_us >= 8000U)
 						std::fprintf(stderr,
 							"[Analytics][Render] slow scheduled mesh upload slot=%d "
 							"chunk=(%d,%d) bytes=%zu duration_us=%llu\n", slot,
@@ -374,15 +466,15 @@ void GpuGeometryBatch::collect(const Camera &camera, const World &world,
 	bool			visible;
 #if defined(LIBFT_ENABLE_ANALYTICS)
 	int32_t		analytics_error;
+	#if defined(DEBUG)
 	const bool collect_diagnostics = (++_analytics_collect_frame % 120U == 0U);
-	_analytics_collect_diagnostics = false;
+	#else
+	constexpr bool collect_diagnostics = false;
+	#endif
+	_analytics_collect_diagnostics = collect_diagnostics;
 #endif
-#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+#if defined(DEBUG)
 	static bool startup_collect_reported = false;
-#endif
-#if defined(LIBFT_ENABLE_ANALYTICS)
-	if (collect_diagnostics)
-		_analytics_collect_diagnostics = true;
 #endif
 	chunk_count = world.chunk_count;
 	if (chunk_count < 0)
@@ -461,7 +553,7 @@ void GpuGeometryBatch::collect(const Camera &camera, const World &world,
 #endif
 
 	cache.configure(camera, width, height, world.active_render_distance);
-#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+#if defined(DEBUG)
 	if (!startup_collect_reported)
 		std::fprintf(stderr, "[Startup] GPU batch: visibility scan begin\n");
 #endif
@@ -501,13 +593,16 @@ void GpuGeometryBatch::collect(const Camera &camera, const World &world,
 			continue ;
 		}
 		const WorldChunk &wc = *scan_chunk;
+		const bool empty_border_edit = wc.initialized && wc.light_ready_for_render
+			&& wc.mesh.has_occupied_bounds == FT_FALSE
+			&& waits_for_border_upload(wc, _chunk_meshes[slot]);
 		const bool retain_previous_mesh = wc.initialized
 			&& !wc.light_ready_for_render && wc.mesh_dirty
 			&& _chunk_meshes[slot].has_uploaded_geometry()
 			&& _chunk_meshes[slot].uploaded_coordinates_match(
 				wc.chunk_x, wc.chunk_z);
 		if (!wc.initialized || (wc.mesh.has_occupied_bounds == FT_FALSE
-			&& !retain_previous_mesh))
+			&& !retain_previous_mesh && !empty_border_edit))
 		{
 			_chunk_meshes[slot].invalidate();
 			scanned_count += 1;
@@ -521,7 +616,7 @@ void GpuGeometryBatch::collect(const Camera &camera, const World &world,
 				? std::chrono::steady_clock::now()
 				: std::chrono::steady_clock::time_point();
 #endif
-			visible = MeshCuller::chunk_is_visible(camera, wc, cache);
+			visible = empty_border_edit || MeshCuller::chunk_is_visible(camera, wc, cache);
 #if defined(LIBFT_ENABLE_ANALYTICS)
 			if (sample_cull)
 			{
@@ -621,7 +716,7 @@ void GpuGeometryBatch::collect(const Camera &camera, const World &world,
 		}
 		scanned_count += 1;
 	}
-#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+#if defined(DEBUG)
 	if (!startup_collect_reported)
 		std::fprintf(stderr, "[Startup] GPU batch: visibility scan end listed=%zu\n",
 			_visible_chunk_slots.size());
@@ -629,12 +724,12 @@ void GpuGeometryBatch::collect(const Camera &camera, const World &world,
 	if (chunk_count > 0)
 		_upload_cursor = (_upload_cursor + 1) % chunk_count;
 	size_t uploaded_bytes = 0U;
-	#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+	#if defined(DEBUG)
 	if (!startup_collect_reported)
 		std::fprintf(stderr, "[Startup] GPU batch: mesh sync begin\n");
 	#endif
 	sync_pending_visible_meshes(camera, world, uploaded_count, uploaded_bytes);
-#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+#if defined(DEBUG)
 	if (!startup_collect_reported)
 		std::fprintf(stderr, "[Startup] GPU batch: mesh sync end uploads=%d\n",
 			uploaded_count);
@@ -736,7 +831,7 @@ void GpuGeometryBatch::collect(const Camera &camera, const World &world,
 			nearby_culled_count,
 			static_cast<unsigned long long>(collect_us));
 #endif
-#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+#if defined(DEBUG)
 	startup_collect_reported = true;
 #endif
 }
@@ -771,7 +866,7 @@ void GpuGeometryBatch::flush_solid(GLuint, GLint u_mvp, GLint u_chunk_offset,
 	const uint64_t flush_us = static_cast<uint64_t>(
 		std::chrono::duration_cast<std::chrono::microseconds>(
 			std::chrono::steady_clock::now() - flush_start).count());
-	if (_analytics_collect_diagnostics || flush_us >= 8000U)
+	if (_analytics_collect_diagnostics && flush_us >= 8000U)
 		std::fprintf(stderr,
 			"[Analytics][Render] slow solid flush visible=%zu draws=%u "
 			"duration_us=%llu\n", _visible_chunk_slots.size(), draw_count,
@@ -797,7 +892,7 @@ void GpuGeometryBatch::flush_water(GLuint, GLint u_mvp, GLint u_chunk_offset,
 	const uint64_t flush_us = static_cast<uint64_t>(
 		std::chrono::duration_cast<std::chrono::microseconds>(
 			std::chrono::steady_clock::now() - flush_start).count());
-	if (_analytics_collect_diagnostics || flush_us >= 8000U)
+	if (_analytics_collect_diagnostics && flush_us >= 8000U)
 		std::fprintf(stderr,
 			"[Analytics][Render] slow water flush visible=%zu draws=%u "
 			"duration_us=%llu\n", _visible_chunk_slots.size(), draw_count,

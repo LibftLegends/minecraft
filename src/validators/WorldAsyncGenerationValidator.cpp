@@ -3,6 +3,7 @@
 #include "../../src/chunks/ChunkNeighborMesher.hpp"
 #include "../../src/world/WorldChunkSnapshotCapture.hpp"
 #include "../../src/world/WorldChunkSnapshotReader.hpp"
+#include "../../src/world/WorldGenerationResultCommitter.hpp"
 #include <chrono>
 #include <cstdio>
 #include <memory>
@@ -67,6 +68,24 @@ namespace
 			if (error == FT_ERR_SUCCESS
 				&& store.commit_staged_chunk(chunk_x, chunk_z, older)
 					!= FT_ERR_ALREADY_EXISTS)
+				error = FT_ERR_INVALID_STATE;
+		}
+		if (error == FT_ERR_SUCCESS)
+		{
+			/* A job invalidated on the way to the worker must not read this
+			 * saved chunk or initialise its lighting and mesh. */
+			WorldGenerationPipeline::Request obsolete = {};
+			obsolete.operation = WorldGenerationPipeline::WorldGenerationOperation::STREAM;
+			obsolete.cancellation_epoch = 1U;
+			obsolete.chunk_x = chunk_x;
+			obsolete.chunk_z = chunk_z;
+			obsolete.terrain_chunk_path = terrain_path;
+			const std::atomic<uint64_t> live_epoch{2U};
+			const auto cancelled = WorldChunkGenerationWorker::process_generation(obsolete, live_epoch);
+			if (cancelled == nullptr || cancelled->error_code != FT_ERR_INVALID_STATE
+				|| cancelled->chunk != nullptr || cancelled->loaded_from_terrain_store
+				|| cancelled->generation_duration_nanoseconds != 0U
+				|| cancelled->mesh_duration_nanoseconds != 0U)
 				error = FT_ERR_INVALID_STATE;
 		}
 		if (error == FT_ERR_SUCCESS)
@@ -174,7 +193,58 @@ namespace
 				!= replacement.cancellation_token_value
 			|| streamer.remesh_capture_in_flight_.load() != 1U)
 			return (ApplicationError::fail("async-worldgen stale replacement token", 1));
+		WorldGenerationPipeline &pipeline = streamer.pipeline();
+		result = pipeline.initialize(1U, 4U);
+		if (result != FT_ERR_SUCCESS)
+			return (ApplicationError::fail("async-worldgen stale submission setup", result));
+		result = pipeline.submit_remesh(first_request, replacement.world_epoch,
+			replacement.relevance_epoch, replacement.generation_revision,
+			replacement.chunk_x, replacement.chunk_z, replacement.voxel_revision,
+			replacement.light_revision, replacement.content_version,
+			replacement.light_input_version, WorldGenerationPipeline::WorldChunkSnapshot{},
+			nullptr, FT_TRUE, FT_FALSE, FT_FALSE, FT_FALSE, 0, 0, 0,
+			GAME_VOXEL_AIR_BLOCK, GAME_VOXEL_AIR_BLOCK, nullptr,
+			replacement.cancellation_token, first_token);
+		if (result != FT_ERR_INVALID_STATE || pipeline.remesh_in_flight_count() != 0U)
+			return (ApplicationError::fail("async-worldgen accepted cancelled capture", 1));
 		std::printf("async-worldgen: superseded capture retained the current cancellation token\n");
+		/* Model two occupied slots with the capture worker stopped. The edit
+		 * still needs to capture its new geometry before either solve ends. */
+		WorldChunkStreamer crowded_streamer(world);
+		crowded_streamer.remesh_capture_in_flight_.store(2U);
+		chunk.cancel_remesh_work();
+		chunk.light_ready_for_render = true;
+		chunk.light_version = chunk.content_version;
+		chunk.computed_light_input_version = chunk.light_input_version;
+		chunk.mark_light_input_changed();
+		const std::vector<WorldGenerationPipeline::IncrementalLightSeed> openings = {
+			{FT_TRUE, FT_FALSE, FT_FALSE, 0, y, 15, VOXEL_GENERATOR_STONE_BLOCK, GAME_VOXEL_AIR_BLOCK, 0U},
+			{FT_TRUE, FT_FALSE, FT_FALSE, 1, y, 15, VOXEL_GENERATOR_STONE_BLOCK, GAME_VOXEL_AIR_BLOCK, 0U}};
+		result = crowded_streamer.queue_chunk_remesh(chunk, FT_TRUE, FT_FALSE,
+			0, y, 15, VOXEL_GENERATOR_STONE_BLOCK, GAME_VOXEL_AIR_BLOCK, &openings);
+		if (result != FT_ERR_SUCCESS || crowded_streamer.remesh_capture_tasks_.size() != 1U
+			|| !crowded_streamer.remesh_capture_tasks_.front().geometry_preview_only
+			|| !chunk.pending_mesh_request_preview_only
+			|| crowded_streamer.remesh_capture_tasks_.front().incremental_light_seeds.size() != openings.size())
+			return (ApplicationError::fail("async-worldgen crowded edit capture", 1));
+		/* The pipeline also enforces the cap, independently of capture.
+		 * An ordinary remesh must still wait while both slots are occupied. */
+		pipeline.remesh_in_flight_.store(2U);
+		const auto submit_at_capacity = [&pipeline](bool preview) noexcept
+		{
+			WorldGenerationPipeline::WorldChunkSnapshot snapshot;
+			snapshot.geometry_preview_only = preview;
+			return (pipeline.submit_remesh(101U, 1U, 1U, 1U, 0, 0,
+				1U, 1U, 1U, 1U, std::move(snapshot), nullptr, FT_TRUE,
+				FT_FALSE, FT_FALSE, FT_FALSE, 0, 0, 0, GAME_VOXEL_AIR_BLOCK,
+				GAME_VOXEL_AIR_BLOCK, nullptr, nullptr, 0U));
+		};
+		const int32_t regular_result = submit_at_capacity(false);
+		const int32_t preview_result = submit_at_capacity(true);
+		pipeline.remesh_in_flight_.fetch_sub(2U);
+		if (regular_result != FT_ERR_FULL || preview_result != FT_ERR_SUCCESS)
+			return (ApplicationError::fail("async-worldgen crowded edit pipeline", 1));
+		std::printf("async-worldgen: a visible edit can bypass two active lighting solves\n");
 		return (0);
 	}
 }
@@ -648,8 +718,14 @@ int WorldAsyncGenerationValidator::validate_remesh_priority_metrics() noexcept
 		|| pipeline.requests_.front()->incremental_processed_cells != 137U)
 		return (ApplicationError::fail("async-worldgen discarded remesh continuation",
 			FT_ERR_INVALID_STATE));
-	pipeline.requests_.clear();
-	pipeline.remesh_in_flight_.store(0U);
+	pipeline.remesh_in_flight_.store(1U);
+	pipeline.cancel_queued();
+	if (pipeline.queued_count() != 0U || pipeline.remesh_in_flight_count() != 0U
+		|| pipeline.has_request_or_result(41U) || pipeline.retired_requests_.size() != 1U
+		|| pipeline.retired_requests_.front()->request_id != 41U
+		|| pipeline.retired_requests_.front()->incremental_processed_cells != 137U)
+		return (ApplicationError::fail("async-worldgen cancelled continuation retirement",
+			FT_ERR_INVALID_STATE));
 	std::printf("async-worldgen: priority changes preserved an in-progress remesh\n");
 	diagnostics = world.stream_diagnostics();
 	if (diagnostics.remesh_starvation_promotions != 2U
@@ -701,6 +777,168 @@ int WorldAsyncGenerationValidator::validate_remesh_priority_metrics() noexcept
 	}
 	std::printf("async-worldgen: long-run queue stress passed duplicates=10000 "
 		"unique=64 promotions=64\n");
+
+	/* Cross a chunk boundary with the latest edit queued behind obsolete
+	 * previews. The ready edit should still publish during this update. */
+	using Result = WorldGenerationPipeline::Result;
+	WorldChunk &target = world.chunks[0];
+	const uint64_t current_request = 113U;
+	const std::size_t obsolete_count = 12U;
+	if (chunk_mesh_initialize(target.mesh) != FT_ERR_SUCCESS)
+		return (ApplicationError::fail("async-worldgen publication fixture mesh", 1));
+	target.initialized = true;
+	target.voxel_revision = 2U;
+	target.content_version = 2U;
+	target.light_input_version = 2U;
+	target.light_version = target.content_version;
+	target.computed_light_input_version = target.light_input_version;
+	target.light_ready_for_render = true;
+	target.set_pending_remesh_request(current_request, FT_TRUE);
+	world.chunk_index_valid = true;
+	world.register_chunk_index(target);
+	for (std::size_t result_index = 0U; result_index <= obsolete_count; ++result_index)
+	{
+		auto result = std::make_unique<Result>();
+		result->operation = WorldGenerationPipeline::WorldGenerationOperation::REMESH;
+		result->request_id = current_request - (obsolete_count - result_index);
+		result->voxel_revision = target.voxel_revision;
+		result->light_revision = target.light_revision;
+		result->content_version = target.content_version;
+		result->light_input_version = target.light_input_version;
+		result->interactive_remesh = FT_TRUE;
+		result->stage_mask = Result::STAGE_GEOMETRY_ONLY
+			| (result->request_id == current_request
+				? Result::STAGE_GEOMETRY_FINAL : Result::STAGE_GEOMETRY_WAIT_FOR_LIGHT);
+		result->error_code = FT_ERR_SUCCESS;
+		result->mesh = std::make_unique<chunk_mesh>();
+		if (chunk_mesh_initialize(*result->mesh) != FT_ERR_SUCCESS)
+			return (ApplicationError::fail("async-worldgen publication result mesh", 1));
+		pipeline.results_.push_back(std::move(result));
+	}
+	auto terrain_result = std::make_unique<Result>();
+	terrain_result->operation = WorldGenerationPipeline::WorldGenerationOperation::STREAM;
+	terrain_result->chunk_x = 9;
+	terrain_result->chunk_z = 8;
+	pipeline.results_.push_back(std::move(terrain_result));
+	world.chunk_streamer.stream_frame_ = 123U;
+	if (world.update_around(GAME_VOXEL_CHUNK_WIDTH, 0.0, 0,
+		WorldCoordinates::MIN_RENDER_DISTANCE)
+		!= FT_ERR_SUCCESS || target.last_mesh_publication_voxel_revision != target.voxel_revision
+		|| pipeline.completed_count() != 1U
+		|| world.chunk_streamer.stale_remesh_pending_count_ != obsolete_count)
+		return (ApplicationError::fail("async-worldgen edit blocked by superseded previews", 1));
+	if (world.update_around(GAME_VOXEL_CHUNK_WIDTH, 0.0, 0,
+		WorldCoordinates::MIN_RENDER_DISTANCE) != FT_ERR_SUCCESS
+		|| pipeline.completed_count() != 0U)
+		return (ApplicationError::fail("async-worldgen deferred terrain publication", 1));
+	std::printf("async-worldgen: current edit survived recenter and superseded previews\n");
+
+	/* Keep the edit waiting on a worker across normal and reserved frames. */
+	target.voxel_revision += 1U;
+	target.mesh_dirty = true;
+	world.chunk_streamer.prioritize_chunk_remesh(target.chunk_x, target.chunk_z);
+	terrain_result = std::make_unique<Result>();
+	terrain_result->operation = WorldGenerationPipeline::WorldGenerationOperation::STREAM;
+	terrain_result->chunk_x = 9;
+	terrain_result->chunk_z = 8;
+	pipeline.results_.push_back(std::move(terrain_result));
+	if (WorldGenerationResultCommitter::drain(world.chunk_streamer, world)
+		!= FT_ERR_SUCCESS || pipeline.completed_count() != 1U)
+		return (ApplicationError::fail("async-worldgen pending edit lost publication window", 1));
+	world.chunk_streamer.stream_frame_ = 128U;
+	if (WorldGenerationResultCommitter::drain(world.chunk_streamer, world)
+		!= FT_ERR_SUCCESS || pipeline.completed_count() != 0U)
+		return (ApplicationError::fail("async-worldgen pending edit starved terrain publication", 1));
+	std::printf("async-worldgen: edit publication deferred terrain and preserved streaming progress\n");
+
+	/* A neighbour's new light invalidates the solve, while a ready preview
+	 * still describes the current shape of the edited chunk. */
+	const uint64_t preview_request = current_request + 1U;
+	target.set_pending_remesh_request(preview_request, FT_TRUE);
+	auto preview = std::make_unique<Result>();
+	preview->operation = WorldGenerationPipeline::WorldGenerationOperation::REMESH;
+	preview->request_id = preview_request;
+	preview->chunk_x = target.chunk_x;
+	preview->chunk_z = target.chunk_z;
+	preview->voxel_revision = target.voxel_revision;
+	preview->light_revision = target.light_revision;
+	preview->content_version = target.content_version;
+	preview->light_input_version = target.light_input_version;
+	preview->interactive_remesh = FT_TRUE;
+	preview->stage_mask = Result::STAGE_GEOMETRY_ONLY;
+	preview->mesh = std::make_unique<chunk_mesh>();
+	if (chunk_mesh_initialize(*preview->mesh) != FT_ERR_SUCCESS)
+		return (ApplicationError::fail("async-worldgen boundary preview mesh", 1));
+	pipeline.results_.push_back(std::move(preview));
+	const uint16_t old_computed_light = target.computed_light_input_version;
+	const uint16_t old_light_input = target.light_input_version;
+	Result border_light = {};
+	border_light.chunk_x = target.chunk_x - 1;
+	border_light.chunk_z = target.chunk_z;
+	border_light.changed_light_faces = 1U << 1U;
+	border_light.neighbor_relight_faces = border_light.changed_light_faces;
+	world.chunk_streamer.invalidate_boundary_receivers(border_light);
+	if (target.pending_mesh_request_id != preview_request
+		|| target.light_input_version == old_light_input)
+		return (ApplicationError::fail("async-worldgen boundary light discarded ready preview", 1));
+	if (WorldGenerationResultCommitter::drain(world.chunk_streamer, world, true)
+		!= FT_ERR_SUCCESS || target.last_mesh_publication_voxel_revision != target.voxel_revision
+		|| target.pending_mesh_request_id != 0U || !target.mesh_dirty
+		|| target.computed_light_input_version != old_computed_light || target.light_is_current())
+		return (ApplicationError::fail("async-worldgen boundary light blocked edit geometry", 1));
+	std::printf("async-worldgen: boundary relight kept ready edit geometry and rescheduled light\n");
+
+	/* This time the neighbour finishes while the standalone preview is still
+	 * building. Once ready, that same preview must also survive recentering. */
+	const uint64_t building_request = preview_request + 1U;
+	target.voxel_revision += 1U;
+	target.set_pending_remesh_request(building_request, FT_TRUE);
+	target.pending_mesh_request_preview_only = true;
+	preview = std::make_unique<Result>();
+	preview->operation = WorldGenerationPipeline::WorldGenerationOperation::REMESH;
+	preview->request_id = building_request;
+	preview->chunk_x = target.chunk_x;
+	preview->chunk_z = target.chunk_z;
+	preview->voxel_revision = target.voxel_revision;
+	preview->light_revision = target.light_revision;
+	preview->content_version = target.content_version;
+	preview->light_input_version = target.light_input_version;
+	preview->interactive_remesh = FT_TRUE;
+	preview->stage_mask = Result::STAGE_GEOMETRY_ONLY | Result::STAGE_GEOMETRY_WAIT_FOR_LIGHT;
+	preview->mesh = std::make_unique<chunk_mesh>();
+	if (chunk_mesh_initialize(*preview->mesh) != FT_ERR_SUCCESS)
+		return (ApplicationError::fail("async-worldgen in-flight preview mesh", 1));
+	world.chunk_streamer.invalidate_boundary_receivers(border_light);
+	if (target.pending_mesh_request_id != building_request)
+		return (ApplicationError::fail("async-worldgen boundary light canceled in-flight preview", 1));
+	auto pending_preview = std::make_unique<WorldGenerationPipeline::Request>();
+	pending_preview->request_id = building_request;
+	pending_preview->operation = WorldGenerationPipeline::WorldGenerationOperation::REMESH;
+	pending_preview->remesh_interactive = FT_TRUE;
+	pending_preview->cancellation_epoch = pipeline.interactive_remesh_epoch_.load();
+	const uint64_t preview_epoch = pending_preview->cancellation_epoch;
+	pipeline.requests_.push_back(std::move(pending_preview));
+	pipeline.remesh_in_flight_.store(1U);
+	auto old_terrain = std::make_unique<WorldGenerationPipeline::Request>();
+	old_terrain->operation = WorldGenerationPipeline::WorldGenerationOperation::STREAM;
+	old_terrain->request_id = building_request + 1U;
+	pipeline.requests_.push_back(std::move(old_terrain));
+	world.chunk_streamer.next_remesh_submission_frame_ = world.chunk_streamer.stream_frame_ + 2U;
+	if (world.update_around(0.0, 0.0, 0, WorldCoordinates::MIN_RENDER_DISTANCE)
+		!= FT_ERR_SUCCESS || target.pending_mesh_request_id != building_request
+		|| pipeline.interactive_remesh_epoch_.load() != preview_epoch
+		|| pipeline.queued_count() != 1U || pipeline.requests_.front()->request_id != building_request
+		|| pipeline.remesh_in_flight_count() != 1U)
+		return (ApplicationError::fail("async-worldgen unfinished edit canceled at recenter", 1));
+	pipeline.requests_.pop_front();
+	pipeline.release_remesh_slot();
+	pipeline.results_.push_back(std::move(preview));
+	if (WorldGenerationResultCommitter::drain(world.chunk_streamer, world, true)
+		!= FT_ERR_SUCCESS || target.last_mesh_publication_voxel_revision != target.voxel_revision
+		|| target.pending_mesh_request_id != 0U || target.pending_mesh_request_preview_only
+		|| !target.mesh_dirty || target.light_is_current())
+		return (ApplicationError::fail("async-worldgen light-stale preview lost at recenter", 1));
+	std::printf("async-worldgen: in-flight edit preview survived boundary light and recenter\n");
 	return (0);
 }
 
@@ -1040,6 +1278,15 @@ int WorldAsyncGenerationValidator::validate_immutable_capture_equivalence(
 			}
 		return (1);
 	}
+	game_voxel_chunk reconstructed;
+	std::vector<uint32_t> reconstructed_blocks = std::move(live_snapshot.blocks);
+	error_code = WorldChunkSnapshotReader::initialize_snapshot_chunk(
+		reconstructed, state_snapshot);
+	if (error_code != FT_ERR_SUCCESS
+		|| reconstructed.copy_blocks(reconstructed_blocks.data(),
+			static_cast<uint32_t>(reconstructed_blocks.size())) != FT_ERR_SUCCESS
+		|| reconstructed_blocks != state_snapshot.blocks || !reconstructed.is_dirty())
+		return (ApplicationError::fail("async-worldgen snapshot reconstruction", 1));
 	error_code = capture(border_snapshot, false);
 	const std::size_t border_cells = static_cast<std::size_t>(
 		2 * (GAME_VOXEL_CHUNK_WIDTH + GAME_VOXEL_CHUNK_DEPTH) + 4)

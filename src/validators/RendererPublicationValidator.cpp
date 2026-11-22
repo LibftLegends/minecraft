@@ -7,6 +7,8 @@
 #include "../../src/frame/RendererColor.hpp"
 #include "../../src/render/VoxelRenderer.hpp"
 #include "../../src/world/World.hpp"
+#include "../../src/world/WorldGenerationResultCommitter.hpp"
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -144,22 +146,41 @@ namespace
 	}
 
 	static bool mesh_has_boundary_face(const WorldChunk &chunk, uint8_t face,
-		uint16_t boundary_x) noexcept
+		uint16_t boundary_x, int32_t local_y, int32_t local_z,
+		uint8_t *packed_light = nullptr) noexcept
 	{
-		std::size_t index = 0U;
-
-		while (index < chunk.mesh.vertices.size())
+		for (std::size_t index = 0U; index + 3U < chunk.mesh.vertices.size();
+			index += 4U)
 		{
-			const chunk_mesh_vertex &vertex = chunk.mesh.vertices[index];
-			if (vertex.face == face && vertex.coordinate_x == boundary_x)
+			const auto &first = chunk.mesh.vertices[index];
+			if (first.face != face || first.coordinate_x != boundary_x)
+				continue ;
+			int32_t minimum_y = first.coordinate_y;
+			int32_t maximum_y = minimum_y;
+			int32_t minimum_z = first.coordinate_z;
+			int32_t maximum_z = minimum_z;
+			for (std::size_t corner = 1U; corner < 4U; ++corner)
+			{
+				const auto &vertex = chunk.mesh.vertices[index + corner];
+				minimum_y = std::min<int32_t>(minimum_y, vertex.coordinate_y);
+				maximum_y = std::max<int32_t>(maximum_y, vertex.coordinate_y);
+				minimum_z = std::min<int32_t>(minimum_z, vertex.coordinate_z);
+				maximum_z = std::max<int32_t>(maximum_z, vertex.coordinate_z);
+			}
+			if (local_y >= minimum_y && local_y < maximum_y
+				&& local_z >= minimum_z && local_z < maximum_z)
+			{
+				if (packed_light != nullptr)
+					*packed_light = first.packed_light;
 				return (true);
-			index += 1U;
+			}
 		}
 		return (false);
 	}
 
 	static int validate_boundary_delete_publication(ApplicationWindow &window,
-		VoxelRenderer &renderer, Camera &camera, World &world) noexcept
+		VoxelRenderer &renderer, Camera &camera, World &world,
+		bool hold_receiver) noexcept
 	{
 		int32_t target_x = 0;
 		int32_t target_chunk_x = 0;
@@ -171,7 +192,6 @@ namespace
 		WorldChunk *neighbour_chunk;
 		uint32_t target_block = air_block;
 		uint32_t neighbour_block = air_block;
-		bool place_first = false;
 		int32_t unrelated_chunk_z = 0;
 		int32_t edit_y = -1;
 		int32_t slot_index;
@@ -220,7 +240,7 @@ namespace
 				WorldChunk *candidate = &world.chunks[slot_index];
 				WorldChunk *east = nullptr;
 
-				if (candidate->initialized)
+				if (candidate->initialized && candidate->light_buffer_is_valid())
 				{
 					const WorldChunk *unrelated = world.find_chunk(candidate->chunk_x,
 						candidate->chunk_z - 1);
@@ -235,17 +255,26 @@ namespace
 						&& local_z < GAME_VOXEL_CHUNK_DEPTH - 1 && edit_y < 0)
 					{
 						local_y = 0;
-						while (local_y < GAME_VOXEL_CHUNK_HEIGHT && edit_y < 0)
+						while (local_y + 1 < GAME_VOXEL_CHUNK_HEIGHT && edit_y < 0)
 						{
 							if (candidate->chunk.read_block(
 								GAME_VOXEL_CHUNK_WIDTH - 1, local_y, local_z,
 								&target_block) == FT_ERR_SUCCESS
 								&& east->chunk.read_block(0, local_y, local_z,
 									&neighbour_block) == FT_ERR_SUCCESS
-								&& neighbour_block != air_block
-								&& (target_block == air_block
-									|| voxel_block_is_breakable(target_block)
-										!= FT_FALSE)
+								&& voxel_block_is_breakable(target_block) != FT_FALSE
+								&& voxel_block_occludes_faces(target_block) != FT_FALSE
+								&& voxel_light_sky(candidate->light.get(
+									GAME_VOXEL_CHUNK_WIDTH - 1, local_y + 1, local_z)) == 15U
+								&& voxel_block_occludes_faces(neighbour_block)
+									!= FT_FALSE
+								&& local_y > 0
+								&& candidate->chunk.read_block(GAME_VOXEL_CHUNK_WIDTH - 1,
+									local_y - 1, local_z, &target_block) == FT_ERR_SUCCESS
+								&& voxel_block_is_breakable(target_block) != FT_FALSE
+								&& voxel_block_occludes_faces(target_block) != FT_FALSE
+								&& east->chunk.read_block(0, local_y - 1, local_z,
+									&neighbour_block) == FT_ERR_SUCCESS
 								&& voxel_block_occludes_faces(neighbour_block)
 									!= FT_FALSE)
 							{
@@ -257,7 +286,6 @@ namespace
 									+ GAME_VOXEL_CHUNK_WIDTH - 1;
 								world_z = candidate->world_z + local_z;
 								edit_y = local_y;
-								place_first = target_block == air_block;
 							}
 							local_y += 1;
 						}
@@ -283,16 +311,13 @@ namespace
 		{
 			World::StreamDiagnostics diagnostics = world.stream_diagnostics();
 			std::fprintf(stderr,
-				"renderer-publication: no breakable solid boundary pair "
+				"renderer-publication: no skylit breakable boundary pair "
 				"after fixture wait ready=%zu pending=%zu active=%zu remesh=%zu\n",
 				diagnostics.ready_count, diagnostics.pending_count,
 				diagnostics.active_generation_count,
 				diagnostics.remesh_priority_queue_depth);
 			return (1);
 		}
-		if (place_first && world.place_block_at(target_x, edit_y, world_z,
-			VOXEL_GENERATOR_STONE_BLOCK) != FT_ERR_SUCCESS)
-			return (FT_ERR_INVALID_OPERATION);
 		target_chunk = world.find_chunk_mutable(target_chunk_x, chunk_z);
 		neighbour_chunk = world.find_chunk_mutable(neighbour_chunk_x, chunk_z);
 		if (target_chunk == nullptr || neighbour_chunk == nullptr
@@ -300,6 +325,7 @@ namespace
 			return (1);
 		slot_target = static_cast<int32_t>(target_chunk - world.chunks);
 		slot_neighbour = static_cast<int32_t>(neighbour_chunk - world.chunks);
+		const int32_t edit_local_z = world_z - neighbour_chunk->world_z;
 		deadline = static_cast<uint64_t>(
 			std::chrono::duration_cast<std::chrono::milliseconds>(
 				std::chrono::steady_clock::now().time_since_epoch()).count())
@@ -318,6 +344,8 @@ namespace
 			target_chunk = world.find_chunk_mutable(target_chunk_x, chunk_z);
 			neighbour_chunk = world.find_chunk_mutable(neighbour_chunk_x, chunk_z);
 			if (target_chunk != nullptr && neighbour_chunk != nullptr
+				&& !mesh_has_boundary_face(*neighbour_chunk, CHUNK_MESH_FACE_WEST,
+					0U, edit_y, edit_local_z)
 				&& renderer.get_gpu_renderer()->uploaded_identity_matches(
 					slot_target, target_chunk->mesh_revision,
 					target_chunk->chunk_x, target_chunk->chunk_z,
@@ -339,21 +367,76 @@ namespace
 		old_neighbour_mesh = neighbour_chunk->mesh_revision;
 		old_neighbour_voxel = neighbour_chunk->voxel_revision;
 		if (world.delete_block_at(target_x, edit_y, world_z)
-			!= FT_ERR_SUCCESS)
+			!= FT_ERR_SUCCESS || world.delete_block_at(target_x, edit_y - 1, world_z)
+				!= FT_ERR_SUCCESS)
 			return (1);
 		if (!world.block_id_at(target_x, edit_y, world_z, &target_block)
 			|| target_block != air_block
 			|| target_chunk->last_mesh_publication_voxel_revision != old_target_voxel)
 			return (FT_ERR_INTERNAL);
+		if (hold_receiver)
+		{
+			/* Force the edited mesh to finish while the exposed faces are still
+			 * absent from the receiver's mesh, then render that exact frame. */
+			neighbour_chunk->cancel_remesh_work();
+			neighbour_chunk->set_pending_remesh_request(UINT64_MAX, FT_FALSE);
+			const auto finish_by = std::chrono::steady_clock::now()
+				+ std::chrono::milliseconds(RENDERER_EDIT_PUBLICATION_MAX_LATENCY_MS);
+			while (target_chunk->last_mesh_publication_voxel_revision != target_chunk->voxel_revision)
+			{
+				if (std::chrono::steady_clock::now() >= finish_by)
+					return (FT_ERR_TIMEOUT);
+				error_code = world.chunk_streamer.queue_chunk_remesh(*target_chunk);
+				if (error_code != FT_ERR_SUCCESS && error_code != FT_ERR_FULL)
+					return (error_code);
+				error_code = WorldGenerationResultCommitter::drain(world.chunk_streamer, world, true);
+				if (error_code != FT_ERR_SUCCESS)
+					return (error_code);
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			}
+			if (neighbour_chunk->mesh_revision != old_neighbour_mesh)
+				return (FT_ERR_INVALID_STATE);
+			renderer.render_world(window.framebuffer(), camera, world,
+				static_cast<const RenderDebug *>(nullptr));
+			if (!renderer.get_gpu_renderer()->uploaded_identity_matches(slot_target,
+					old_target_mesh, target_chunk->chunk_x, target_chunk->chunk_z, old_target_voxel))
+			{
+				std::fprintf(stderr, "renderer-publication: deleted border was drawn before its receiving faces\n");
+				return (FT_ERR_INVALID_STATE);
+			}
+			neighbour_chunk->clear_pending_remesh_request();
+		}
+		/* Hold the edited chunk's relight while exercising the receiver's
+		 * actual capture, meshing, commit, and GPU upload paths. */
+		bool hold_source_light = !hold_receiver;
+		if (hold_source_light)
+		{
+			if (target_chunk->light_is_current())
+				return (FT_ERR_INVALID_STATE);
+			target_chunk->cancel_remesh_work();
+			target_chunk->set_pending_remesh_request(UINT64_MAX, FT_FALSE);
+		}
 		deadline = static_cast<uint64_t>(
 			std::chrono::duration_cast<std::chrono::milliseconds>(
 				std::chrono::steady_clock::now().time_since_epoch()).count())
-			+ 30000U;
+			+ RENDERER_EDIT_PUBLICATION_MAX_LATENCY_MS;
 		while (true)
 		{
-			if (world.update_around(camera.x, camera.z, 0,
-					WorldCoordinates::MIN_RENDER_DISTANCE) != FT_ERR_SUCCESS)
-				return (FT_ERR_INVALID_OPERATION);
+			if (hold_source_light)
+			{
+				/* Drain the real worker results without running orphan recovery
+				 * on the synthetic source marker. */
+				error_code = world.chunk_streamer.queue_chunk_remesh(*neighbour_chunk);
+				if (error_code != FT_ERR_SUCCESS && error_code != FT_ERR_FULL)
+					return (error_code);
+				error_code = WorldGenerationResultCommitter::drain(
+					world.chunk_streamer, world, true);
+			}
+			else
+				error_code = world.update_around(camera.x, camera.z, 0,
+					WorldCoordinates::MIN_RENDER_DISTANCE);
+			if (error_code != FT_ERR_SUCCESS)
+				return (error_code);
 			WorldChunk *unrelated = world.find_chunk_mutable(target_chunk_x,
 				unrelated_chunk_z);
 			if (unrelated == nullptr || !unrelated->initialized)
@@ -379,7 +462,7 @@ namespace
 			const bool target_old = renderer.get_gpu_renderer()
 				->uploaded_identity_matches(slot_target, old_target_mesh,
 					target_chunk->chunk_x, target_chunk->chunk_z, old_target_voxel);
-			const bool neighbour_new = renderer.get_gpu_renderer()
+			const bool neighbour_current = renderer.get_gpu_renderer()
 				->uploaded_identity_matches(slot_neighbour,
 					neighbour_chunk->mesh_revision, neighbour_chunk->chunk_x,
 					neighbour_chunk->chunk_z, neighbour_chunk->voxel_revision);
@@ -387,7 +470,12 @@ namespace
 				->uploaded_identity_matches(slot_neighbour, old_neighbour_mesh,
 					neighbour_chunk->chunk_x, neighbour_chunk->chunk_z,
 					old_neighbour_voxel);
-			if ((!target_new && !target_old) || (!neighbour_new && !neighbour_old))
+			uint8_t face_light = 0U;
+			const bool neighbour_new = neighbour_current
+				&& neighbour_chunk->mesh_revision != old_neighbour_mesh
+				&& mesh_has_boundary_face(*neighbour_chunk, CHUNK_MESH_FACE_WEST,
+					0U, edit_y, edit_local_z, &face_light);
+			if ((!target_new && !target_old) || (!neighbour_current && !neighbour_old))
 			{
 				std::fprintf(stderr,
 					"renderer-publication: border GPU publication gap "
@@ -399,22 +487,101 @@ namespace
 					neighbour_new ? 1 : 0, neighbour_old ? 1 : 0);
 				return (1);
 			}
+			if (hold_receiver && target_new && !neighbour_new)
+				return (ApplicationError::fail("renderer-publication missing receiving faces", 1));
+			if (hold_source_light && neighbour_new)
+			{
+				uint8_t lower_face_light = 0U;
+				if (!target_old || target_chunk->light_is_current()
+					|| !neighbour_chunk->mesh_dirty || !neighbour_chunk->waits_for_neighbor_light)
+					return (FT_ERR_INVALID_STATE);
+				if (!mesh_has_boundary_face(*neighbour_chunk, CHUNK_MESH_FACE_WEST,
+						0U, edit_y - 1, edit_local_z, &lower_face_light)
+					|| voxel_light_sky(face_light) != 15U
+					|| voxel_light_sky(lower_face_light) != 15U)
+				{
+					std::fprintf(stderr, "renderer-publication: border preview sky=%u,%u expected=15,15\n",
+						static_cast<unsigned int>(voxel_light_sky(face_light)),
+						static_cast<unsigned int>(voxel_light_sky(lower_face_light)));
+					return (FT_ERR_INVALID_STATE);
+				}
+				std::printf("renderer-publication: skylit border face uploaded while source light pending\n");
+				target_chunk->clear_pending_remesh_request();
+				hold_source_light = false;
+			}
 			if (target_new && neighbour_new)
 			{
-				if (!mesh_has_boundary_face(*neighbour_chunk,
-					CHUNK_MESH_FACE_WEST, 0U))
-					return (1);
 				std::printf("renderer-publication: border delete pair stable "
 					"target=(%d,%d) neighbour=(%d,%d)\n",
 					target_chunk->chunk_x, target_chunk->chunk_z,
 					neighbour_chunk->chunk_x, neighbour_chunk->chunk_z);
+				if (hold_receiver)
+				{
+					/* Lose the receiver's upload after the border edit was already
+					 * shown. A later interior edit has no dependency on it. */
+					const auto render_without_receiver = [&]()
+					{
+						const bool light_ready = neighbour_chunk->light_ready_for_render;
+						const bool mesh_dirty = neighbour_chunk->mesh_dirty;
+						neighbour_chunk->light_ready_for_render = false;
+						neighbour_chunk->mesh_dirty = false;
+						renderer.render_world(window.framebuffer(), camera, world,
+							static_cast<const RenderDebug *>(nullptr));
+						neighbour_chunk->light_ready_for_render = light_ready;
+						neighbour_chunk->mesh_dirty = mesh_dirty;
+					};
+					render_without_receiver();
+					error_code = world.place_block_at(target_chunk->world_x + 8,
+						GAME_VOXEL_CHUNK_HEIGHT - 6, target_chunk->world_z + 8,
+						VOXEL_GENERATOR_STONE_BLOCK);
+					const auto finish_by = std::chrono::steady_clock::now()
+						+ std::chrono::milliseconds(RENDERER_EDIT_PUBLICATION_MAX_LATENCY_MS);
+					while (error_code == FT_ERR_SUCCESS
+						&& target_chunk->last_mesh_publication_voxel_revision != target_chunk->voxel_revision)
+					{
+						if (std::chrono::steady_clock::now() >= finish_by)
+							return (FT_ERR_TIMEOUT);
+						error_code = world.publish_pending_remeshes();
+						std::this_thread::sleep_for(std::chrono::milliseconds(1));
+					}
+					if (error_code != FT_ERR_SUCCESS)
+						return (error_code);
+					/* Simulate a newer border edit awaiting its own source mesh.
+					 * Its receiver must not delay the already built interior mesh. */
+					auto &pending_east = target_chunk->border_delete_dependencies[1U];
+					const auto previous_east = pending_east;
+					pending_east = {target_chunk->voxel_revision + 1U, neighbour_chunk->mesh_revision + 1U};
+					render_without_receiver();
+					pending_east = previous_east;
+					if (!renderer.get_gpu_renderer()->uploaded_identity_matches(slot_target,
+							target_chunk->mesh_revision, target_chunk->chunk_x, target_chunk->chunk_z,
+							target_chunk->voxel_revision))
+						return (ApplicationError::fail("renderer-publication obsolete border dependency", FT_ERR_INVALID_STATE));
+					std::puts("renderer-publication: interior edit uploaded independently of old border receiver");
+				}
 				return (FT_ERR_SUCCESS);
 			}
 			if (static_cast<uint64_t>(
 					std::chrono::duration_cast<std::chrono::milliseconds>(
 						std::chrono::steady_clock::now().time_since_epoch()).count())
 				>= deadline)
+			{
+				std::fprintf(stderr,
+					"renderer-publication: border delete stalled at (%d,%d,%d) "
+					"target_gpu=%d target_dirty=%d target_pending=%llu "
+					"neighbour_gpu=%d neighbour_face=%d neighbour_dirty=%d "
+					"neighbour_pending=%llu neighbour_waiting_for_light=%d\n",
+					target_x, edit_y, world_z, target_new ? 1 : 0,
+					target_chunk->mesh_dirty ? 1 : 0,
+					static_cast<unsigned long long>(target_chunk->pending_mesh_request_id),
+					neighbour_current ? 1 : 0,
+					mesh_has_boundary_face(*neighbour_chunk, CHUNK_MESH_FACE_WEST,
+						0U, edit_y, edit_local_z) ? 1 : 0,
+					neighbour_chunk->mesh_dirty ? 1 : 0,
+					static_cast<unsigned long long>(neighbour_chunk->pending_mesh_request_id),
+					neighbour_chunk->waits_for_neighbor_light ? 1 : 0);
 				return (FT_ERR_TIMEOUT);
+			}
 			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		}
 	}
@@ -622,9 +789,12 @@ int RendererPublicationValidator::validate() const
 		(void)window.destroy();
 		return (1);
 	}
-	edit_y = static_cast<int32_t>(surface_top + 1.0);
-	error_code = world.place_block_at(2, edit_y, 2,
+	edit_y = static_cast<int32_t>(surface_top + 2.0);
+	error_code = world.place_block_at(2, edit_y - 1, 2,
 		VOXEL_GENERATOR_STONE_BLOCK);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = world.place_block_at(2, edit_y, 2,
+			VOXEL_GENERATOR_STONE_BLOCK);
 	if (error_code != FT_ERR_SUCCESS)
 	{
 		world.destroy();
@@ -794,7 +964,10 @@ int RendererPublicationValidator::validate() const
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
 	error_code = validate_boundary_delete_publication(window, renderer, camera,
-		world);
+		world, false);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = validate_boundary_delete_publication(window, renderer, camera,
+			world, true);
 	if (error_code != FT_ERR_SUCCESS)
 	{
 		std::fprintf(stderr,
@@ -807,8 +980,47 @@ int RendererPublicationValidator::validate() const
 	/* Repeat the publication contract for deletion.  A delete changes the
 	 * light frontier as well as the mesh, so the renderer must retain the
 	 * previous complete GPU publication until the replacement is ready. */
-	previous_mesh_revision = chunk->mesh_revision;
-	previous_voxel_revision = chunk->voxel_revision;
+	WorldChunk *edited_chunk = world.find_chunk_mutable(0, 0);
+	WorldChunk *light_source = world.find_chunk_mutable(1, 0);
+	if (edited_chunk == nullptr || light_source == nullptr)
+	{
+		world.destroy();
+		(void)window.destroy();
+		return (ApplicationError::fail("renderer-publication delete dependency",
+			FT_ERR_NOT_FOUND));
+	}
+	const auto settle_deadline = std::chrono::steady_clock::now()
+		+ std::chrono::seconds(3);
+	while (!light_source->light_is_current() || edited_chunk->mesh_dirty
+		|| edited_chunk->pending_mesh_request_id != 0U
+		|| !renderer.get_gpu_renderer()->uploaded_identity_matches(slot,
+			edited_chunk->mesh_revision, edited_chunk->chunk_x,
+			edited_chunk->chunk_z, edited_chunk->voxel_revision))
+	{
+		error_code = world.publish_pending_remeshes();
+		if (error_code != FT_ERR_SUCCESS
+			|| std::chrono::steady_clock::now() >= settle_deadline)
+		{
+			world.destroy();
+			(void)window.destroy();
+			return (ApplicationError::fail("renderer-publication dependency baseline",
+				error_code == FT_ERR_SUCCESS ? FT_ERR_TIMEOUT : error_code));
+		}
+		renderer.render_world(window.framebuffer(), camera, world,
+			static_cast<const RenderDebug *>(nullptr));
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	previous_mesh_revision = edited_chunk->mesh_revision;
+	previous_voxel_revision = edited_chunk->voxel_revision;
+	/* Hold the neighbour's publication until the renderer has shown the
+	 * deletion. Its request marker models a solve that spans several frames. */
+	light_source->cancel_remesh_work();
+	light_source->clear_light_dependency();
+	const uint16_t published_source_input = light_source->light_input_version;
+	light_source->mark_light_input_changed();
+	light_source->set_pending_remesh_request(UINT64_MAX, FT_FALSE);
+	edited_chunk->set_light_dependency(light_source->chunk_x, light_source->chunk_z);
+	const auto delete_started = std::chrono::steady_clock::now();
 	error_code = world.delete_block_at(2, edit_y, 2);
 	if (error_code != FT_ERR_SUCCESS)
 	{
@@ -816,13 +1028,24 @@ int RendererPublicationValidator::validate() const
 		(void)window.destroy();
 		return (ApplicationError::fail("renderer-publication delete", error_code));
 	}
-	deadline = static_cast<uint64_t>(
-		std::chrono::duration_cast<std::chrono::milliseconds>(
-			std::chrono::steady_clock::now().time_since_epoch()).count()) + 30000U;
+	uint32_t deleted_block = VOXEL_GENERATOR_STONE_BLOCK;
+	if (!world.block_id_at(2, edit_y, 2, &deleted_block)
+		|| deleted_block != GAME_VOXEL_AIR_BLOCK)
+	{
+		world.destroy();
+		(void)window.destroy();
+		return (ApplicationError::fail("renderer-publication delete collision",
+			FT_ERR_INVALID_STATE));
+	}
+	const auto delete_deadline = delete_started
+		+ std::chrono::milliseconds(RENDERER_EDIT_PUBLICATION_MAX_LATENCY_MS);
 	while (true)
 	{
-		error_code = world.update_around(camera.x, camera.z, 0,
-			WorldCoordinates::MIN_RENDER_DISTANCE);
+		/* Skip orphan recovery for the fixture's held neighbour marker. */
+		error_code = world.chunk_streamer.queue_chunk_remesh(*edited_chunk);
+		if (error_code == FT_ERR_SUCCESS || error_code == FT_ERR_FULL)
+			error_code = WorldGenerationResultCommitter::drain(world.chunk_streamer,
+				world, true);
 		if (error_code != FT_ERR_SUCCESS)
 		{
 			world.destroy();
@@ -830,8 +1053,20 @@ int RendererPublicationValidator::validate() const
 			return (ApplicationError::fail(
 				"renderer-publication delete stream", error_code));
 		}
+		const bool deletion_mesh_ready =
+			edited_chunk->last_mesh_publication_voxel_revision == edited_chunk->voxel_revision;
+		const ft_bool edit_priority = edited_chunk->last_mesh_publication_interactive;
+		if (deletion_mesh_ready)
+		{
+			/* Model a light-only result replacing the edit's publication before
+			 * upload, while another visible chunk also asks for priority. */
+			edited_chunk->last_mesh_publication_interactive = FT_FALSE;
+			light_source->mesh_revision += 1U;
+			light_source->last_mesh_publication_interactive = FT_TRUE;
+		}
 		renderer.render_world(window.framebuffer(), camera, world,
 			static_cast<const RenderDebug *>(nullptr));
+		edited_chunk->last_mesh_publication_interactive = edit_priority;
 		error_code = window.poll_events();
 		if (error_code != FT_ERR_SUCCESS)
 		{
@@ -857,6 +1092,13 @@ int RendererPublicationValidator::validate() const
 			const bool old_publication = renderer.get_gpu_renderer()
 				->uploaded_identity_matches(slot, previous_mesh_revision,
 					chunk->chunk_x, chunk->chunk_z, previous_voxel_revision);
+			if (deletion_mesh_ready && !new_publication)
+			{
+				world.destroy();
+				(void)window.destroy();
+				return (ApplicationError::fail("renderer-publication stale edited voxels retained",
+					FT_ERR_INVALID_STATE));
+			}
 			if (!new_publication && !old_publication)
 			{
 				std::fprintf(stderr,
@@ -872,10 +1114,39 @@ int RendererPublicationValidator::validate() const
 				(void)window.destroy();
 				return (1);
 			}
-			if (new_publication)
+			if (new_publication && std::chrono::steady_clock::now() <= delete_deadline)
 			{
+				if (!chunk->waits_for_neighbor_light || !chunk->mesh_dirty)
+				{
+					world.destroy();
+					(void)window.destroy();
+					return (ApplicationError::fail("renderer-publication preview lost relight",
+						FT_ERR_INVALID_STATE));
+				}
+				bool exposed_face_has_light = false;
+				for (std::size_t index = 0U; index < chunk->mesh.vertices.size(); ++index)
+				{
+					const chunk_mesh_vertex &vertex = chunk->mesh.vertices[index];
+					if (vertex.face == CHUNK_MESH_FACE_UP && vertex.coordinate_y == edit_y
+						&& vertex.coordinate_x >= 2U && vertex.coordinate_x <= 3U
+						&& vertex.coordinate_z >= 2U && vertex.coordinate_z <= 3U
+						&& voxel_light_sky(vertex.packed_light) > 0U)
+						exposed_face_has_light = true;
+				}
+				if (!exposed_face_has_light)
+				{
+					world.destroy();
+					(void)window.destroy();
+					return (ApplicationError::fail("renderer-publication exposed face light",
+						FT_ERR_INVALID_STATE));
+				}
 				mesh_has_light(chunk->mesh, &mesh_light_minimum,
 					&mesh_light_maximum, &mesh_light_nonzero);
+				const auto delete_latency = std::chrono::duration_cast<
+					std::chrono::milliseconds>(std::chrono::steady_clock::now()
+						- delete_started);
+				std::printf("renderer-publication: dependency_delete_latency_ms=%llu\n",
+					static_cast<unsigned long long>(delete_latency.count()));
 				std::printf("renderer-publication: delete_light chunk=(%d,%d) "
 					"voxel=%llu mesh=%llu light=%u input=%u computed=%u "
 					"pending=%llu min=%u max=%u nonzero=%zu\n",
@@ -892,17 +1163,68 @@ int RendererPublicationValidator::validate() const
 				break ;
 			}
 		}
-		if (static_cast<uint64_t>(std::chrono::duration_cast<
-			std::chrono::milliseconds>(std::chrono::steady_clock::now()
-				.time_since_epoch()).count()) >= deadline)
+		if (std::chrono::steady_clock::now() >= delete_deadline)
 		{
 			std::fprintf(stderr,
-				"renderer-publication: delete GPU upload timeout\n");
+				"renderer-publication: delete GPU upload timeout while light was pending\n");
 			world.destroy();
 			(void)window.destroy();
 			return (1);
 		}
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	/* Model the light becoming current while the neighbour still has geometry
+	 * queued. Keep the marker and bypass orphan recovery to exercise the gate. */
+	light_source->light_input_version = published_source_input;
+	const auto relight_deadline = std::chrono::steady_clock::now()
+		+ std::chrono::seconds(3);
+	while (edited_chunk->mesh_dirty || edited_chunk->waits_for_neighbor_light
+		|| !edited_chunk->light_is_current())
+	{
+		error_code = world.chunk_streamer.queue_chunk_remesh(*edited_chunk);
+		if (error_code == FT_ERR_SUCCESS || error_code == FT_ERR_FULL)
+			error_code = WorldGenerationResultCommitter::drain(world.chunk_streamer,
+				world, true);
+		if (error_code != FT_ERR_SUCCESS
+			|| std::chrono::steady_clock::now() >= relight_deadline)
+		{
+			world.destroy();
+			(void)window.destroy();
+			return (ApplicationError::fail("renderer-publication finish delayed light",
+				error_code == FT_ERR_SUCCESS ? FT_ERR_TIMEOUT : error_code));
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	light_source->clear_pending_remesh_request();
+	/* Recenter after capture has handed a geometry refresh to the pipeline.
+	 * Cancelling that refresh must leave the dependency identity unchanged. */
+	const uint64_t published_light_revision = edited_chunk->light_revision;
+	world.chunk_streamer.mark_remesh_dirty(*edited_chunk);
+	const auto recenter_deadline = std::chrono::steady_clock::now()
+		+ std::chrono::seconds(3);
+	while (std::chrono::steady_clock::now() < recenter_deadline)
+	{
+		error_code = world.chunk_streamer.queue_chunk_remesh(*edited_chunk);
+		if (error_code != FT_ERR_SUCCESS && error_code != FT_ERR_FULL)
+			break ;
+		const uint64_t request_id = edited_chunk->pending_mesh_request_id;
+		if (request_id != 0U && world.chunk_streamer.pipeline().has_request_or_result(request_id))
+		{
+			const double next_center_x = (static_cast<double>(world.center_chunk_x) + 1.5)
+				* GAME_VOXEL_CHUNK_WIDTH;
+			error_code = world.update_around(next_center_x, camera.z, 0,
+				WorldCoordinates::MIN_RENDER_DISTANCE);
+			break ;
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	if (std::chrono::steady_clock::now() >= recenter_deadline
+		|| error_code != FT_ERR_SUCCESS || edited_chunk->light_revision != published_light_revision)
+	{
+		world.destroy();
+		(void)window.destroy();
+		return (ApplicationError::fail("renderer-publication recenter light identity",
+			FT_ERR_INVALID_STATE));
 	}
 	std::printf("renderer-publication: ok slot=%d voxel_revision=%llu\n",
 		slot, static_cast<unsigned long long>(chunk->voxel_revision));

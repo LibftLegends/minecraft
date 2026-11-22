@@ -403,7 +403,7 @@ void GpuWorldRenderer::render(const Camera &camera, const World &world)
 	float	mvp[16];
 	float	far_z;
 	int32_t analytics_error;
-#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+#if defined(DEBUG)
 	static bool startup_render_reported = false;
 #endif
 
@@ -426,12 +426,12 @@ void GpuWorldRenderer::render(const Camera &camera, const World &world)
 	if (analytics_error != FT_ERR_SUCCESS)
 		std::fprintf(stderr, "Analytics: GPU collect scope start failed (%d)\n",
 			analytics_error);
-#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+#if defined(DEBUG)
 	if (!startup_render_reported)
 		std::fprintf(stderr, "[Startup] GPU world: before batch collect\n");
 #endif
 	_batch.collect(camera, world, _width, _height);
-#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+#if defined(DEBUG)
 	if (!startup_render_reported)
 		std::fprintf(stderr, "[Startup] GPU world: after batch collect\n");
 #endif
@@ -445,12 +445,12 @@ void GpuWorldRenderer::render(const Camera &camera, const World &world)
 		std::fprintf(stderr, "Analytics: GPU solid scope start failed (%d)\n",
 			analytics_error);
 	_world_shader.use();
-#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+#if defined(DEBUG)
 	if (!startup_render_reported)
 		std::fprintf(stderr, "[Startup] GPU world: before solid flush\n");
 #endif
 	_batch.flush_solid(0, _u_mvp, _u_chunk_offset, mvp, _atlas);
-#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+#if defined(DEBUG)
 	if (!startup_render_reported)
 		std::fprintf(stderr, "[Startup] GPU world: after solid flush\n");
 #endif
@@ -465,7 +465,7 @@ void GpuWorldRenderer::render(const Camera &camera, const World &world)
 		std::fprintf(stderr, "Analytics: GPU water scope start failed (%d)\n",
 			analytics_error);
 	_batch.flush_water(0, _u_mvp, _u_chunk_offset, mvp, _atlas);
-#if defined(DEBUG) || defined(LIBFT_ENABLE_ANALYTICS)
+#if defined(DEBUG)
 	if (!startup_render_reported)
 		std::fprintf(stderr, "[Startup] GPU world: after water flush\n");
 	startup_render_reported = true;

@@ -2,6 +2,7 @@
 # define WORLD_TERRAIN_CHUNK_STORE_HPP
 
 # include "../../Libft/Modules/Game/game_voxel_chunk.hpp"
+# include <atomic>
 # include <cstdint>
 # include <memory>
 # include <mutex>
@@ -53,6 +54,9 @@ class WorldTerrainChunkStore
 		StagedChunk &staged, bool replace_existing = false) const noexcept;
 	struct PreparedEdit
 	{
+		~PreparedEdit() noexcept;
+		int32_t publish() noexcept;
+		bool has_reservation() const noexcept;
 		int32_t chunk_x = 0;
 		int32_t chunk_z = 0;
 		int32_t world_y = 0;
@@ -64,7 +68,15 @@ class WorldTerrainChunkStore
 		std::shared_ptr<const WorldChunkReadState> base;
 		game_voxel_chunk voxels;
 		StagedChunk file;
+		bool published = false;
+	  private:
+		friend class WorldTerrainChunkStore;
+		std::atomic<WorldTerrainChunkStore *> reservation_owner{nullptr};
 	};
+	int32_t reserve_prepared_edit(PreparedEdit &edit) noexcept;
+	int32_t publish_prepared_edit(PreparedEdit &edit) noexcept;
+	void release_prepared_edit(PreparedEdit &edit) noexcept;
+	bool has_reserved_edit() const noexcept;
 	int32_t remove_chunk(int32_t chunk_x, int32_t chunk_z) const noexcept;
 	int32_t has_chunk(int32_t chunk_x, int32_t chunk_z,
 		bool *exists_out) const noexcept;
@@ -75,6 +87,10 @@ class WorldTerrainChunkStore
 	std::string directory_;
 	bool initialized_;
 	mutable std::mutex mutex_;
+	std::atomic<PreparedEdit *> reserved_edit_{nullptr};
+	bool chunk_is_reserved(int32_t chunk_x, int32_t chunk_z) const noexcept;
+	int32_t commit_staged_chunk_locked(int32_t chunk_x, int32_t chunk_z,
+		StagedChunk &staged, bool replace_existing) const noexcept;
 
 	int32_t chunk_path(int32_t chunk_x, int32_t chunk_z,
 		std::string &path_out, bool validate_resolution = true) const noexcept;
