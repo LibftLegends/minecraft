@@ -114,14 +114,11 @@ void PerspectiveTriangleRasterizer::write_pixel(uint32_t *pixel,
 	double &depth_entry, double inv_depth, double u, double v,
 	const TriangleTexture &texture)
 {
-	double	d;
-
 	if (inv_depth <= 0.0)
 		return ;
-	d = 1.0 / inv_depth;
-	if (d <= 0.0 || d >= depth_entry)
+	if (inv_depth <= depth_entry)
 		return ;
-	depth_entry = d;
+	depth_entry = inv_depth;
 	*pixel = RendererColor::shade_color(TextureAtlas::sample_triangle_texture(texture,
 				u / inv_depth, v / inv_depth), texture.shade);
 }
@@ -168,7 +165,7 @@ void PerspectiveTriangleRasterizer::rasterize(ft_render_framebuffer &framebuffer
 
 void PerspectiveTriangleRasterizer::draw_triangle(ft_render_framebuffer &framebuffer,
 	std::vector<double> &depth_buffer, const ScreenVertex vertices[3],
-	uint32_t block_id, uint8_t face) const
+	uint32_t block_id, uint8_t face, uint8_t packed_light) const
 {
 	double area = edge(vertices[0], vertices[1], vertices[2].x, vertices[2].y);
 	if (std::fabs(area) < 0.000001)
@@ -180,5 +177,6 @@ void PerspectiveTriangleRasterizer::draw_triangle(ft_render_framebuffer &framebu
 	compute_interpolants(vertices, 1.0 / area, sx, sy, it);
 	TriangleTexture texture = TextureAtlas::prepare_triangle_texture(block_id,
 			face);
+	texture.shade *= RendererColor::light_shade(packed_light);
 	rasterize(framebuffer, depth_buffer, vertices, sx, ex, sy, ey, it, texture);
 }

@@ -25,7 +25,7 @@ class WorldRevisionRegenerator
 	static int32_t submit_chunk_regeneration(WorldRevisionManager &manager,
 		World &world,
 		const WorldRevisionManager::RevisionChunk &entry) noexcept;
-	static int32_t commit_terrain_config(WorldRevisionManager &manager,
+	static int32_t commit_voxel_config(WorldRevisionManager &manager,
 		World &world) noexcept;
 };
 

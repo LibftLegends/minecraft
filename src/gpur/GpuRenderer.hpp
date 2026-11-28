@@ -10,8 +10,6 @@
 class GpuRenderer
 {
   public:
-	using MegaVertex = GpuWorldRenderer::MegaVertex;
-
 	GpuRenderer();
 	GpuRenderer(const GpuRenderer &other);
 	~GpuRenderer();
@@ -22,13 +20,19 @@ class GpuRenderer
 	void resize(int width, int height);
 	void render(const Camera &camera, const World &world);
 	void upload_overlay(const uint32_t *pixels, int w, int h);
+	void upload_overlay_region(const uint32_t *pixels, int w, int h,
+		int x, int y, int region_width, int region_height);
 	void draw_overlay();
+	void draw_item_markers(const GpuOverlayRenderer::ItemMarker *markers,
+		std::size_t count, int canvas_w, int canvas_h);
 	void draw_tint(float r, float g, float b, float a);
 	void clear_screen();
 	void upload_menu(const uint32_t *pixels, int w, int h);
 	void draw_menu(float alpha);
 	bool is_ready() const;
 	uint32_t gpu_mb_approx() const;
+	bool uploaded_identity_matches(int32_t slot, uint64_t revision,
+		int32_t chunk_x, int32_t chunk_z, uint64_t voxel_revision) const;
 
   private:
 	GpuWorldRenderer _world;

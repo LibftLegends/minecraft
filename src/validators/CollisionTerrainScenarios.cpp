@@ -35,7 +35,7 @@ int CollisionTerrainScenarios::setup_step_blocks(World &world, Camera &camera,
 	while (frame < 4)
 	{
 		error_code = world.place_block_at(step_x, step_y, step_z + frame,
-				TERRAIN_GENERATOR_STONE_BLOCK);
+				VOXEL_GENERATOR_STONE_BLOCK);
 		if (error_code != FT_ERR_SUCCESS && error_code != FT_ERR_ALREADY_EXISTS)
 			return (ApplicationError::fail("collision step setup", error_code));
 		frame = frame + 1;
@@ -113,13 +113,13 @@ void CollisionTerrainScenarios::setup_tunnel(World &world, Camera &camera,
 		(void)world.delete_block_at(tx, ty, tz + frame);
 		(void)world.delete_block_at(tx, ty + 1, tz + frame);
 		(void)world.place_block_at(tx - 1, ty, tz + frame,
-			TERRAIN_GENERATOR_STONE_BLOCK);
+			VOXEL_GENERATOR_STONE_BLOCK);
 		(void)world.place_block_at(tx - 1, ty + 1, tz + frame,
-			TERRAIN_GENERATOR_STONE_BLOCK);
+			VOXEL_GENERATOR_STONE_BLOCK);
 		(void)world.place_block_at(tx + 1, ty, tz + frame,
-			TERRAIN_GENERATOR_STONE_BLOCK);
+			VOXEL_GENERATOR_STONE_BLOCK);
 		(void)world.place_block_at(tx + 1, ty + 1, tz + frame,
-			TERRAIN_GENERATOR_STONE_BLOCK);
+			VOXEL_GENERATOR_STONE_BLOCK);
 		frame = frame + 1;
 	}
 }

@@ -12,7 +12,7 @@ class WorldRevisionRequestApplier
 	WorldRevisionRequestApplier &operator=(const WorldRevisionRequestApplier &other);
 
 	static int32_t apply(WorldRevisionManager &manager, World &world,
-		const terrain_generation_config &config, int32_t mode,
+		const voxel_generation_config &config, int32_t mode,
 		uint32_t stage_mask,
 		const std::vector<WorldRevisionManager::RevisionChunk> &selected_chunks,
 		const std::vector<WorldRevisionManager::RevisionChunk> &protected_chunks,

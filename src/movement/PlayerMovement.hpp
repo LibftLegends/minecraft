@@ -38,6 +38,7 @@ class PlayerMovement
 	static bool move_axis_with_water_step(Camera *camera, const World &world,
 		int axis, double delta);
 	static bool player_in_water(const Camera &camera, const World &world);
+	static bool player_on_ladder(const Camera &camera, const World &world);
 	static void update_air_velocity(Camera *camera, const CameraInput &input,
 		double delta_seconds);
 	static void update_water_velocity(Camera *camera, const CameraInput &input,

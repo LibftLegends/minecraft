@@ -3,18 +3,6 @@
 void MenuController::blit_canvas_to_framebuffer(const MenuCanvas &canvas,
 	ft_render_framebuffer &framebuffer)
 {
-bool menu_input_changed(const MenuCanvas::MenuInput &left,
-                        const MenuCanvas::MenuInput &right)
-{
-    return left.mouse_x != right.mouse_x || left.mouse_y != right.mouse_y
-        || left.mouse_clicked != right.mouse_clicked
-        || left.key_up != right.key_up || left.key_down != right.key_down
-        || left.key_enter != right.key_enter
-        || left.key_escape != right.key_escape;
-}
-
-void blit_canvas_to_framebuffer(const MenuCanvas &canvas, ft_render_framebuffer &framebuffer)
-{
     const uint32_t *src = canvas.pixels();
     if (src == nullptr || framebuffer.pixels == nullptr || framebuffer.width <= 0 ||
         framebuffer.height <= 0)
@@ -30,6 +18,15 @@ void blit_canvas_to_framebuffer(const MenuCanvas &canvas, ft_render_framebuffer 
         }
     }
 }
+
+static bool menu_input_changed(const MenuCanvas::MenuInput &left,
+                        const MenuCanvas::MenuInput &right)
+{
+    return left.mouse_x != right.mouse_x || left.mouse_y != right.mouse_y
+        || left.mouse_clicked != right.mouse_clicked
+        || left.key_up != right.key_up || left.key_down != right.key_down
+        || left.key_enter != right.key_enter
+        || left.key_escape != right.key_escape;
 }
 
 std::string MenuController::make_seed()

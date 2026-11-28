@@ -8,6 +8,7 @@
 # include "../../src/config/ApplicationOptions.hpp"
 # include "../../src/config/LaunchSettings.hpp"
 # include "../../src/diagnostics/DebugCrashHandler.hpp"
+# include "../../src/diagnostics/RuntimeAnalytics.hpp"
 # include "../../src/menu/MenuController.hpp"
 # include "../../src/platform/ApplicationWindow.hpp"
 # include "../../src/policy/RenderDistanceStrategy.hpp"
@@ -37,6 +38,7 @@ class Application
 	static int run_game(ApplicationOptions &options,
 		LaunchSettings &launch_settings,
 		const RenderDistanceStrategy &strategy);
+	static int run_worldgen_probe();
 };
 
 #endif

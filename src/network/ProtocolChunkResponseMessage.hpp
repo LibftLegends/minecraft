@@ -3,6 +3,8 @@
 
 # include "../ft_vox.hpp"
 
+# define PROTOCOL_CHUNK_RESPONSE_MAX_PAYLOAD (4U * 1024U * 1024U)
+
 class ProtocolChunkResponseMessage
 {
   public:

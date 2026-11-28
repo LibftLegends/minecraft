@@ -1,12 +1,15 @@
 #ifndef WORLD_GENERATION_PIPELINE_HPP
 # define WORLD_GENERATION_PIPELINE_HPP
 
-# include "../../Libft/Modules/Voxel/terrain_api.hpp"
+# include "../../Libft/Modules/Voxel/voxel_api.hpp"
 # include "../../src/chunks/WorldChunk.hpp"
+# include "../../src/world/WorldTerrainChunkStore.hpp"
 # include <atomic>
+# include <array>
 # include <condition_variable>
 # include <cstdint>
 # include <deque>
+# include <list>
 # include <functional>
 # include <memory>
 # include <mutex>
@@ -15,9 +18,16 @@
 # include <thread>
 # include <vector>
 
+class WorldGenerationWorkerLoop;
+
 class WorldGenerationPipeline
 {
   public:
+	static constexpr int32_t LIGHT_SNAPSHOT_HALO = 15;
+	/* Cardinal face order shared by snapshot capture and remesh publication. */
+	static constexpr int32_t BOUNDARY_NEIGHBORS[4][2] = {
+		{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+	static constexpr std::size_t DEFAULT_MAXIMUM_QUEUED_REQUESTS = 256U;
 	enum class WorldGenerationOperation : uint8_t
 	{
 		STREAM = 0,
@@ -39,15 +49,198 @@ class WorldGenerationPipeline
 	{
 		int32_t						chunk_x;
 		int32_t						chunk_z;
+		game_voxel_generation_metadata generation_metadata;
 		std::vector<uint32_t> blocks;
 		std::vector<uint32_t> west_border;
 		std::vector<uint32_t> east_border;
 		std::vector<uint32_t> north_border;
 		std::vector<uint32_t> south_border;
+		ft_bool west_border_valid;
+		ft_bool east_border_valid;
+		ft_bool north_border_valid;
+		ft_bool south_border_valid;
+		std::vector<uint32_t> lighting_blocks;
+		std::vector<uint8_t> lighting_existing_light;
+		std::vector<uint32_t> lighting_ring_offsets;
+		std::vector<uint8_t> existing_light;
+		ft_bool existing_light_valid;
+		ft_bool lighting_halo_valid;
+		ft_bool lighting_cardinal_halo_valid;
+		ft_bool lighting_halo_blocked;
+		/* West, east, north, south. These neighbors depend on the source
+		 * relight and their retained light can feed a removed light back. */
+		uint8_t blocked_light_faces = 0U;
+		bool geometry_preview_only = false;
+		std::array<std::weak_ptr<const WorldChunkReadState>, 4> boundary_read_states;
+		ft_bool dependency_valid;
+		int32_t dependency_chunk_x;
+		int32_t dependency_chunk_z;
+		uint64_t dependency_voxel_revision;
+		uint64_t dependency_light_revision;
+		uint16_t dependency_content_version;
+		uint16_t dependency_light_input_version;
+	};
+
+	struct							IncrementalLightSeed
+	{
+		ft_bool						additive;
+		ft_bool						removal;
+		ft_bool						external_source;
+		int32_t						local_x;
+		int32_t						local_y;
+		int32_t						local_z;
+		uint32_t					old_block_id;
+		uint32_t					new_block_id;
+		uint8_t						old_source_light;
+	};
+
+	struct IncrementalLightNode
+	{
+		int32_t x;
+		int32_t y;
+		int32_t z;
+	};
+
+	struct IncrementalRemovalNode
+	{
+		int32_t x;
+		int32_t y;
+		int32_t z;
+		uint8_t channel;
+		uint8_t level;
+	};
+
+	struct IncrementalLightScratch
+	{
+		/* Zero means the direct-sky height has not been computed. The
+		 * cache belongs to the request and survives across worker slices. */
+		std::array<uint16_t, GAME_VOXEL_CHUNK_WIDTH * GAME_VOXEL_CHUNK_DEPTH>
+			first_direct_sky_y_plus_one = {};
+		uint32_t modified_sections = 0U;
+	};
+
+	struct GenerationFeaturePlan
+	{
+		static const uint32_t MAXIMUM_SPAWNER_DEFINITIONS = 16U;
+		static const uint32_t MAXIMUM_LOOT_DROPS = 16U;
+		static const uint32_t MAXIMUM_FEATURE_PLANS_PER_REQUEST = 4096U;
+		struct SpawnerDefinition
+		{
+			double x;
+			double y;
+			double z;
+			uint32_t entity_type;
+			uint32_t maximum_alive;
+			uint32_t spawn_interval_ticks;
+			uint32_t loot_table_id;
+		};
+		struct LootDrop
+		{
+			int32_t item_id;
+			int32_t quantity;
+			double x;
+			double y;
+			double z;
+		};
+		enum : uint32_t
+		{
+			VILLAGE = 1U,
+			SURFACE_MAGMA_POOL = 2U,
+			VOLCANO = 3U,
+			RUINED_VILLAGE = 4U,
+			SHIPWRECK = 5U,
+			DESERT_PYRAMID = 6U,
+			ANCIENT_CANOPY = 7U,
+			SPIDER_NEST = 8U,
+			INSTABILITY_OVERLAY = 9U
+		};
+		uint32_t kind;
+		uint64_t host_intent_sequence;
+		uint32_t ordinal;
+		int32_t volcano_anchor_chunk_x;
+		int32_t volcano_anchor_chunk_z;
+		uint32_t volcano_footprint_chunks;
+		/* Host-authored world positions; the result applier publishes only
+		 * definitions owned by the chunk currently being committed. */
+		std::vector<SpawnerDefinition> spawner_definitions;
+		/* Optional host-owned ground rewards published with the chunk. */
+		std::vector<LootDrop> loot_drops;
+	};
+
+	struct IncrementalLightDelta
+	{
+		/* The logical record is five bytes: x, y (little-endian), z, and
+		 * packed light.  Keep it explicitly byte-packed instead of relying on
+		 * compiler struct padding while it crosses the worker result queue. */
+		uint8_t encoded[5];
+
+		IncrementalLightDelta() noexcept
+			: encoded{0U, 0U, 0U, 0U, 0U}
+		{
+		}
+
+		void set(uint8_t local_x, uint16_t local_y, uint8_t local_z,
+			uint8_t packed_light) noexcept
+		{
+			this->encoded[0] = local_x;
+			this->encoded[1] = static_cast<uint8_t>(local_y & 0xffU);
+			this->encoded[2] = static_cast<uint8_t>((local_y >> 8U) & 0xffU);
+			this->encoded[3] = local_z;
+			this->encoded[4] = packed_light;
+		}
+
+		uint8_t local_x() const noexcept
+		{
+			return (this->encoded[0]);
+		}
+
+		uint16_t local_y() const noexcept
+		{
+			return (static_cast<uint16_t>(this->encoded[1])
+				| (static_cast<uint16_t>(this->encoded[2]) << 8U));
+		}
+
+		uint8_t local_z() const noexcept
+		{
+			return (this->encoded[3]);
+		}
+
+		uint8_t packed_light() const noexcept
+		{
+			return (this->encoded[4]);
+		}
+	};
+
+	static_assert(sizeof(IncrementalLightDelta) == 5U,
+		"incremental light deltas must remain compact queue records");
+
+	struct BoundaryLightChange
+	{
+		static constexpr uint8_t RELIGHT = 1U;
+		static constexpr uint8_t REMESH = 2U;
+		uint8_t x;
+		uint8_t z;
+		uint16_t y;
+		uint8_t before;
+		uint8_t after;
+		bool source_face_visible;
+
+		uint8_t effect_on(const WorldChunkReadState &receiver) const noexcept;
+	};
+
+	struct BoundaryLightChanges
+	{
+		/* Above this bound an obsolete receiver snapshot takes the full solver. */
+		std::array<BoundaryLightChange, 32U> cells;
+		std::size_t count = 0U;
+		bool complete = true;
 	};
 
 	struct							Result
 	{
+		static constexpr uint32_t STAGE_GEOMETRY_ONLY = 1U << 0;
+		static constexpr uint32_t STAGE_GEOMETRY_FINAL = 1U << 1;
+		static constexpr uint32_t STAGE_GEOMETRY_WAIT_FOR_LIGHT = 1U << 2;
 		uint64_t					request_id;
 		uint64_t					world_epoch;
 		uint64_t					relevance_epoch;
@@ -55,32 +248,134 @@ class WorldGenerationPipeline
 		uint32_t					configuration_signature;
 		uint32_t					stage_mask;
 		uint64_t					voxel_revision;
+		uint64_t					light_revision;
+		uint16_t					content_version;
+		uint16_t					light_input_version;
+		voxel_light_update_config	light_update_config;
+		uint64_t					completed_at_nanoseconds;
+		uint64_t					generation_duration_nanoseconds;
+		uint64_t					mesh_duration_nanoseconds;
+		uint64_t					light_scanned_cells;
+		uint64_t					light_propagated_cells;
+		uint64_t					light_queue_peak;
+		ft_bool					incremental_light;
+		ft_bool					incremental_light_deltas_complete;
+		ft_bool					interactive_remesh;
+		ft_bool					lighting_halo_valid;
+		ft_bool					lighting_cardinal_halo_valid;
+		ft_bool					lighting_halo_blocked;
+		ft_bool					dependency_valid;
+		int32_t					dependency_chunk_x;
+		int32_t					dependency_chunk_z;
+		uint64_t				dependency_voxel_revision;
+		uint64_t				dependency_light_revision;
+		uint16_t				dependency_content_version;
+		uint16_t				dependency_light_input_version;
 		int32_t						chunk_x;
 		int32_t						chunk_z;
 		WorldGenerationOperation	operation;
 		int32_t						error_code;
 		std::unique_ptr<WorldChunk> chunk;
+		bool loaded_from_terrain_store = false;
+		WorldTerrainChunkStore::StagedChunk staged_terrain_chunk;
 		std::unique_ptr<chunk_mesh> mesh;
+		std::unique_ptr<chunk_mesh> retired_mesh;
+		std::unique_ptr<voxel_light_chunk> light;
+		std::vector<IncrementalLightDelta> incremental_light_deltas;
+		/* A completed nonempty patch updates this worker-owned copy for snapshot
+		 * readers. The gameplay thread applies the same delta to the live field. */
+		std::shared_ptr<const std::vector<uint8_t>> incremental_light_samples;
+		/* A changed face may alter propagated light, a visible face sample,
+		 * or both. The captured state identifies the neighbor evaluated by
+		 * the worker so publication can recognize concurrent changes. */
+		uint8_t changed_light_faces = 0U;
+		uint8_t neighbor_relight_faces = 0U;
+		uint8_t neighbor_remesh_faces = 0U;
+		std::array<std::weak_ptr<const WorldChunkReadState>, 4> boundary_read_states;
+		std::array<BoundaryLightChanges, 4> boundary_light_changes;
 		std::vector<WorldDeferredBlockEdit> deferred_edits;
+		std::vector<GenerationFeaturePlan> applied_feature_plans;
+
+		~Result() noexcept;
 	};
 
 	struct							Request
 	{
-		uint64_t					request_id;
-		uint64_t					cancellation_epoch;
+		/*
+		 * A Request is the complete ownership boundary for worker execution.
+		 * Everything below this point is copied or moved into the request before
+		 * it is queued.  Worker code must not add World, WorldChunkStreamer,
+		 * live WorldChunk pointers, renderer objects, or mutexes here.  The
+		 * compute worker is deliberately able to run without touching the live
+		 * world or waiting for the world's lock.
+		 */
+		std::string terrain_chunk_path;
+					uint64_t					request_id;
+					uint64_t					cancellation_epoch;
 		uint64_t					world_epoch;
 		uint64_t					relevance_epoch;
 		uint32_t					generation_revision;
 		uint32_t					configuration_signature;
 		uint32_t					stage_mask;
 		uint64_t					voxel_revision;
+		uint64_t					light_revision;
+		uint16_t					content_version;
+		uint16_t					light_input_version;
 		int32_t						chunk_x;
 		int32_t						chunk_z;
 		WorldGenerationOperation	operation;
 		std::string seed;
-		terrain_generation_config	config;
+		voxel_generation_config	config;
+		voxel_light_update_config	light_update_config;
+		std::unique_ptr<voxel_light_build_operation> remesh_light_operation;
+		std::unique_ptr<voxel_light_chunk> remesh_light;
+		std::unique_ptr<game_voxel_chunk> remesh_target;
+		ft_bool remesh_in_progress;
+		ft_bool remesh_geometry_published;
+		ft_bool remesh_interactive;
+		ft_bool remesh_geometry_only;
+		ft_bool incremental_additive_light;
+		ft_bool incremental_removal_light;
+		int32_t incremental_local_x;
+		int32_t incremental_local_y;
+		int32_t incremental_local_z;
+		uint32_t incremental_old_block_id;
+		uint32_t incremental_new_block_id;
+		std::vector<IncrementalLightSeed> incremental_light_seeds;
+		std::vector<IncrementalLightNode> incremental_additive_queue;
+		std::size_t incremental_additive_queue_index;
+		std::vector<IncrementalRemovalNode> incremental_removal_queue;
+		std::vector<uint8_t> incremental_removal_queued_cells;
+		std::vector<IncrementalRemovalNode> incremental_removal_addition_queue;
+		std::size_t incremental_removal_queue_index;
+		std::size_t incremental_removal_addition_queue_index;
+		ft_bool incremental_removal_state_initialized;
+		ft_bool incremental_removal_addition_started;
+		std::size_t incremental_seed_index;
+		ft_bool incremental_additive_state_initialized;
+		uint64_t incremental_processed_cells;
+		IncrementalLightScratch incremental_light_scratch;
+		std::shared_ptr<std::atomic<uint64_t>> cancellation_token;
+		uint64_t cancellation_token_value;
 		std::unique_ptr<WorldChunkSnapshot> snapshot;
 		std::vector<WorldDeferredBlockEdit> deferred_edits;
+		std::vector<GenerationFeaturePlan> feature_plans;
+	};
+
+	struct GenerationSubmission
+	{
+		uint64_t request_id;
+		uint64_t world_epoch;
+		uint64_t relevance_epoch;
+		uint32_t generation_revision;
+		int32_t chunk_x;
+		int32_t chunk_z;
+		const char *seed;
+		const voxel_generation_config *config;
+		uint32_t stage_mask;
+		WorldGenerationOperation operation;
+		const WorldChunkSnapshot *source_snapshot;
+		const std::vector<GenerationFeaturePlan> *feature_plans;
 	};
 
 	WorldGenerationPipeline() noexcept;
@@ -91,40 +386,82 @@ class WorldGenerationPipeline
 	int32_t initialize(std::size_t worker_count,
 		std::size_t maximum_queued) noexcept;
 	int32_t destroy() noexcept;
+	int32_t submit_generation_batch(
+		const std::vector<GenerationSubmission> &submissions) noexcept;
 	int32_t submit_generation(uint64_t request_id, uint64_t world_epoch,
 		uint64_t relevance_epoch, uint32_t generation_revision, int32_t chunk_x,
 		int32_t chunk_z, const char *seed,
-		const terrain_generation_config &config, uint32_t stage_mask,
+		const voxel_generation_config &config, uint32_t stage_mask,
 		WorldGenerationOperation operation,
-		const WorldChunkSnapshot *source_snapshot = nullptr) noexcept;
+		const WorldChunkSnapshot *source_snapshot = nullptr,
+		const std::vector<GenerationFeaturePlan> *feature_plans = nullptr,
+		std::string terrain_chunk_path = {}) noexcept;
 	int32_t submit_remesh(uint64_t request_id, uint64_t world_epoch,
 		uint64_t relevance_epoch, uint32_t generation_revision, int32_t chunk_x,
-		int32_t chunk_z, uint64_t voxel_revision,
-		const WorldChunkSnapshot &snapshot) noexcept;
-	int32_t poll(std::unique_ptr<Result> &result) noexcept;
+		int32_t chunk_z, uint64_t voxel_revision, uint64_t light_revision,
+		uint16_t content_version, uint16_t light_input_version,
+		WorldChunkSnapshot &&snapshot,
+		const voxel_light_update_config *light_update_config = nullptr,
+		ft_bool interactive = FT_FALSE,
+		ft_bool geometry_only = FT_FALSE,
+		ft_bool incremental_additive_light = FT_FALSE,
+		ft_bool incremental_removal_light = FT_FALSE,
+		int32_t incremental_local_x = 0, int32_t incremental_local_y = 0,
+		int32_t incremental_local_z = 0,
+		uint32_t incremental_old_block_id = GAME_VOXEL_AIR_BLOCK,
+		uint32_t incremental_new_block_id = GAME_VOXEL_AIR_BLOCK,
+		const std::vector<IncrementalLightSeed> *incremental_light_seeds = nullptr,
+		const std::shared_ptr<std::atomic<uint64_t>> &cancellation_token =
+			std::shared_ptr<std::atomic<uint64_t>>(),
+		uint64_t cancellation_token_value = 0U) noexcept;
+	int32_t poll(std::unique_ptr<Result> &result, bool remesh_only = false) noexcept;
+	void retire_result(std::unique_ptr<Result> result) noexcept;
+	int32_t retire_chunk(std::unique_ptr<WorldChunk> chunk) noexcept;
 	int32_t capture_snapshot(const WorldChunk &target, const WorldChunk *west,
 		const WorldChunk *east, const WorldChunk *north,
-		const WorldChunk *south, WorldChunkSnapshot &snapshot) const noexcept;
-	void cancel_queued() noexcept;
+		const WorldChunk *south, const WorldChunk *northwest,
+		const WorldChunk *northeast, const WorldChunk *southwest,
+		const WorldChunk *southeast,
+		WorldChunkSnapshot &snapshot) const noexcept;
+	void cancel_queued(bool keep_interactive_remeshes = false) noexcept;
 	std::size_t queued_count() const noexcept;
 	std::size_t completed_count() const noexcept;
+	std::size_t active_count() const noexcept;
+	std::size_t active_generation_count() const noexcept;
 	std::size_t remesh_in_flight_count() const noexcept;
+	bool has_request_or_result(uint64_t request_id) const noexcept;
+	bool has_remesh_for_chunk(int32_t chunk_x, int32_t chunk_z) const noexcept;
+	void release_remesh_slot() noexcept;
+	uint64_t oldest_completed_result_age_nanoseconds() const noexcept;
 	bool is_initialized() const noexcept;
 
-	std::deque<std::unique_ptr<Request>> requests_;
+	std::list<std::unique_ptr<Request>> requests_;
+	std::list<std::unique_ptr<Request>> retired_requests_;
 	std::deque<std::unique_ptr<Result>> results_;
+	std::deque<std::unique_ptr<Result>> retired_results_;
 	mutable std::mutex mutex_;
+	mutable std::mutex results_mutex_;
 	std::condition_variable condition_;
 	std::atomic<uint64_t> pipeline_epoch_;
+	std::atomic<uint64_t> interactive_remesh_epoch_{1U};
 	std::atomic<std::size_t> remesh_in_flight_;
-	bool							stopping_;
+	std::atomic<std::size_t> active_requests_;
+	std::atomic<std::size_t> active_generation_requests_;
+	std::atomic<bool>				stopping_;
+	std::array<uint64_t, 8U> active_request_ids_;
+	std::array<int32_t, 8U> active_request_chunk_x_;
+	std::array<int32_t, 8U> active_request_chunk_z_;
+	std::size_t active_request_id_count_;
 
   private:
+	friend class WorldGenerationWorkerLoop;
 	std::vector<std::thread> workers_;
 	std::size_t maximum_queued_;
+	std::size_t generation_worker_limit_;
 	bool							initialized_;
 
 	static std::size_t resolve_worker_count(std::size_t worker_count) noexcept;
+	uint64_t request_epoch(ft_bool interactive_remesh) const noexcept;
 };
 
 # include "../../src/world/WorldChunkGenerationWorker.hpp"

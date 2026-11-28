@@ -85,9 +85,23 @@ void GpuRenderer::upload_overlay(const uint32_t *pixels, int w, int h)
 	_overlay.upload_overlay(pixels, w, h);
 }
 
+void GpuRenderer::upload_overlay_region(const uint32_t *pixels, int w, int h,
+	int x, int y, int region_width, int region_height)
+{
+	_overlay.upload_overlay_region(pixels, w, h, x, y, region_width, region_height);
+}
+
 void GpuRenderer::draw_overlay()
 {
 	_overlay.draw_overlay(_width, _height);
+}
+
+void GpuRenderer::draw_item_markers(
+	const GpuOverlayRenderer::ItemMarker *markers, std::size_t count,
+	int canvas_w, int canvas_h)
+{
+	_overlay.draw_item_markers(markers, count, canvas_w, canvas_h, _width,
+		_height);
 }
 
 void GpuRenderer::draw_tint(float r, float g, float b, float a)
@@ -120,4 +134,11 @@ bool GpuRenderer::is_ready() const
 uint32_t GpuRenderer::gpu_mb_approx() const
 {
 	return (static_cast<uint32_t>(_world.gpu_bytes() / (1024UL * 1024UL)));
+}
+
+bool GpuRenderer::uploaded_identity_matches(int32_t slot, uint64_t revision,
+	int32_t chunk_x, int32_t chunk_z, uint64_t voxel_revision) const
+{
+	return (_ready && _world.uploaded_identity_matches(slot, revision,
+		chunk_x, chunk_z, voxel_revision));
 }

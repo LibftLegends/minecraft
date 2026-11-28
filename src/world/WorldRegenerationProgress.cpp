@@ -75,6 +75,11 @@ std::size_t WorldRegenerationProgress::job_count() const noexcept
 	return (this->job_count_);
 }
 
+std::size_t WorldRegenerationProgress::completed_job_count() const noexcept
+{
+	return (this->completed_job_count_);
+}
+
 void WorldRegenerationProgress::record_completed() noexcept
 {
 	this->completed_job_count_ += 1U;

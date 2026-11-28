@@ -4,13 +4,17 @@ RenderDebug::RenderDebug() : fps(0.0), frame_ms(0.0), visible_chunks(0),
 	loaded_chunks(0), render_distance(0), selected_block_id(0U), ram_mb(0U),
 	vram_approx_mb(0U), camera_x(0.0), camera_y(0.0), camera_z(0.0),
 	camera_speed(0.0), boost_speed(0.0), revision_preview_visible(false),
-	revision_pending(false), revision_map_radius(0),
+	revision_pending(false), revision_barriers_active(false), revision_map_radius(0),
 	revision_protected_count(0U), revision_selected_count(0U),
 	revision_transition_count(0U), revision_unchanged_count(0U)
 {
 	seed[0] = '\0';
 	biome_name[0] = '\0';
 	std::fill(revision_map, revision_map + sizeof(revision_map), 0U);
+	std::fill(revision_protection_reasons,
+		revision_protection_reasons + sizeof(revision_protection_reasons), 0U);
+	std::fill(revision_feature_highlights,
+		revision_feature_highlights + sizeof(revision_feature_highlights), 0U);
 }
 
 RenderDebug::RenderDebug(const RenderDebug &other) : fps(0.0), frame_ms(0.0),
@@ -18,6 +22,7 @@ RenderDebug::RenderDebug(const RenderDebug &other) : fps(0.0), frame_ms(0.0),
 	selected_block_id(0U), ram_mb(0U), vram_approx_mb(0U), camera_x(0.0),
 	camera_y(0.0), camera_z(0.0), camera_speed(0.0), boost_speed(0.0),
 	revision_preview_visible(false), revision_pending(false),
+	revision_barriers_active(false),
 	revision_map_radius(0), revision_protected_count(0U),
 	revision_selected_count(0U), revision_transition_count(0U),
 	revision_unchanged_count(0U)
@@ -52,8 +57,15 @@ RenderDebug &RenderDebug::operator=(const RenderDebug &other)
 		std::memcpy(biome_name, other.biome_name, sizeof(biome_name));
 		revision_preview_visible = other.revision_preview_visible;
 		revision_pending = other.revision_pending;
+		revision_barriers_active = other.revision_barriers_active;
 		revision_map_radius = other.revision_map_radius;
 		std::memcpy(revision_map, other.revision_map, sizeof(revision_map));
+		std::memcpy(revision_protection_reasons,
+			other.revision_protection_reasons,
+			sizeof(revision_protection_reasons));
+		std::memcpy(revision_feature_highlights,
+			other.revision_feature_highlights,
+			sizeof(revision_feature_highlights));
 		revision_protected_count = other.revision_protected_count;
 		revision_selected_count = other.revision_selected_count;
 		revision_transition_count = other.revision_transition_count;
@@ -81,8 +93,13 @@ void RenderDebug::clear()
 	biome_name[0] = '\0';
 	revision_preview_visible = false;
 	revision_pending = false;
+	revision_barriers_active = false;
 	revision_map_radius = 0;
 	std::fill(revision_map, revision_map + sizeof(revision_map), 0U);
+	std::fill(revision_protection_reasons,
+		revision_protection_reasons + sizeof(revision_protection_reasons), 0U);
+	std::fill(revision_feature_highlights,
+		revision_feature_highlights + sizeof(revision_feature_highlights), 0U);
 	revision_protected_count = 0U;
 	revision_selected_count = 0U;
 	revision_transition_count = 0U;

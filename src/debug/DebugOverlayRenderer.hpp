@@ -40,7 +40,8 @@ class DebugOverlayRenderer
 		int32_t scale);
 	static void draw_revision_cell(ft_render_framebuffer &fb, int32_t x,
 		int32_t z, int32_t radius, int32_t cell, int32_t origin_x,
-		int32_t origin_y, uint8_t state);
+		int32_t origin_y, uint8_t state, uint8_t protection_reasons,
+		bool feature_highlight, bool barriers_active);
 	static void draw_revision_grid(ft_render_framebuffer &fb,
 		const RenderDebug *d, int32_t radius, int32_t cell, int32_t origin_x,
 		int32_t origin_y);

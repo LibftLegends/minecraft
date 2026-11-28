@@ -5,6 +5,20 @@
 class RenderDebug
 {
   public:
+	enum RevisionProtectionMask : uint8_t
+	{
+		REVISION_PROTECTION_GENERATION = 1U,
+		REVISION_PROTECTION_LOOM = 2U,
+		REVISION_PROTECTION_MANUAL = 4U,
+		REVISION_PROTECTION_OCCUPIED = 8U
+	};
+	enum RevisionPreviewSize : uint32_t
+	{
+		REVISION_PREVIEW_RADIUS = 8U,
+		REVISION_PREVIEW_WIDTH = REVISION_PREVIEW_RADIUS * 2U + 1U,
+		REVISION_PREVIEW_CELL_COUNT = REVISION_PREVIEW_WIDTH
+			* REVISION_PREVIEW_WIDTH
+	};
 	double fps;
 	double frame_ms;
 	int32_t visible_chunks;
@@ -22,8 +36,11 @@ class RenderDebug
 	char biome_name[24];
 	bool revision_preview_visible;
 	bool revision_pending;
+	bool revision_barriers_active;
 	uint8_t revision_map_radius;
-	uint8_t revision_map[13 * 13];
+	uint8_t revision_map[REVISION_PREVIEW_CELL_COUNT];
+	uint8_t revision_protection_reasons[REVISION_PREVIEW_CELL_COUNT];
+	uint8_t revision_feature_highlights[REVISION_PREVIEW_CELL_COUNT];
 	uint32_t revision_protected_count;
 	uint32_t revision_selected_count;
 	uint32_t revision_transition_count;

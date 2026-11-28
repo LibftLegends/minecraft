@@ -8,4 +8,10 @@ objs_debug/
 objs_tests/
 /objs*_cfg*/
 build_logs/
+/build/
+/tmp/
+/ft_vox_analytics
+/ft_vox_analytics.exe
+/ft_vox_debug.exe
 ft_vox_config.json
+/saves/

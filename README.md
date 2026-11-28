@@ -76,8 +76,11 @@ removed.
 For build-system diagnostics that intentionally bypass the summary wrapper,
 use `make internal-all` or `make internal-tests`.
 
-Native ft_vox objects are stored under configuration-specific `objs_*_cfg...`
-directories. Changing compiler flags, optimization, debug, coverage, LTO, or
+Native ft_vox objects and linker response files are stored under
+configuration-specific directories in `build/`. Debug and test executables
+are in `build/bin/`. The normal and analytics game executables are built at
+the project root. Runtime analytics and validator reports are in `build_logs/`.
+Changing compiler flags, optimization, debug, coverage, LTO, or
 feature-detection inputs therefore cannot reuse incompatible objects from a
 previous configuration.
 

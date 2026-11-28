@@ -1,4 +1,253 @@
 #include "../../src/validators/WorldAsyncGenerationValidator.hpp"
+#include "../../src/diagnostics/ApplicationError.hpp"
+#include "../../src/chunks/ChunkNeighborMesher.hpp"
+#include "../../src/world/WorldChunkSnapshotCapture.hpp"
+#include "../../src/world/WorldChunkSnapshotReader.hpp"
+#include "../../src/world/WorldGenerationResultCommitter.hpp"
+#include <chrono>
+#include <cstdio>
+#include <memory>
+#include <new>
+#include <thread>
+
+namespace
+{
+	static const int32_t ASYNC_WORLDGEN_MAX_STARTUP_FRAMES = 240;
+	static const int32_t ASYNC_STARTUP_EDIT_REPETITIONS = 4;
+	static const int32_t ASYNC_STARTUP_PRIORITY_EDIT_ROUNDS = 8;
+	static const int32_t ASYNC_STARTUP_PRIORITY_EDIT_INTERVAL = 8;
+	static const uint64_t ASYNC_WORLDGEN_MAX_UPDATE_US = 100000U;
+
+	static int32_t validate_saved_chunk_streaming(World &world)
+	{
+		const int32_t chunk_x = 24;
+		const int32_t chunk_z = -24;
+		const double x = static_cast<double>(chunk_x * GAME_VOXEL_CHUNK_WIDTH);
+		const double z = static_cast<double>(chunk_z * GAME_VOXEL_CHUNK_DEPTH);
+		uint8_t world_id[32] = {'s', 'a', 'v', 'e', 'd', '-', 's', 't', 'r', 'e', 'a', 'm'};
+		const auto nonce = static_cast<uint64_t>(
+			std::chrono::system_clock::now().time_since_epoch().count());
+		for (std::size_t index = 0U; index < sizeof(nonce); ++index)
+			world_id[16U + index] = static_cast<uint8_t>(nonce >> (index * 8U));
+		game_voxel_chunk saved;
+		int32_t error = saved.initialize();
+		if (error == FT_ERR_SUCCESS)
+			error = saved.write_generated_block(3, 9, 4, VOXEL_GENERATOR_STONE_BLOCK);
+		if (error == FT_ERR_SUCCESS)
+			error = saved.write_block(3, 9, 4, GAME_VOXEL_AIR_BLOCK);
+		if (error == FT_ERR_SUCCESS)
+			error = saved.write_block(3, 253, 4, VOXEL_GENERATOR_STONE_BLOCK);
+		if (error == FT_ERR_SUCCESS)
+			error = world.initialize("async-saved-chunk");
+		WorldTerrainChunkStore &store = world.terrain_chunk_store();
+		if (error == FT_ERR_SUCCESS)
+			error = store.initialize(world_id);
+		std::string terrain_path;
+		if (error == FT_ERR_SUCCESS)
+			error = store.capture_stream_path(chunk_x, chunk_z, terrain_path);
+		if (error == FT_ERR_SUCCESS)
+		{
+			WorldTerrainChunkStore::StagedChunk older;
+			WorldTerrainChunkStore::StagedChunk current;
+			bool exists = true;
+			error = older.prepare(terrain_path, chunk_x, chunk_z, saved);
+			if (error == FT_ERR_SUCCESS)
+				error = store.has_chunk(chunk_x, chunk_z, &exists);
+			if (error == FT_ERR_SUCCESS && exists)
+				error = FT_ERR_INVALID_STATE;
+			if (error == FT_ERR_SUCCESS
+				&& store.commit_staged_chunk(chunk_x + 1, chunk_z, older)
+					!= FT_ERR_INVALID_ARGUMENT)
+				error = FT_ERR_INVALID_STATE;
+			if (error == FT_ERR_SUCCESS)
+				error = saved.write_block(3, 252, 4, VOXEL_GENERATOR_STONE_BLOCK);
+			if (error == FT_ERR_SUCCESS)
+				error = current.prepare(terrain_path, chunk_x, chunk_z, saved);
+			if (error == FT_ERR_SUCCESS)
+				error = store.commit_staged_chunk(chunk_x, chunk_z, current);
+			if (error == FT_ERR_SUCCESS
+				&& store.commit_staged_chunk(chunk_x, chunk_z, older)
+					!= FT_ERR_ALREADY_EXISTS)
+				error = FT_ERR_INVALID_STATE;
+		}
+		if (error == FT_ERR_SUCCESS)
+		{
+			/* A job invalidated on the way to the worker must not read this
+			 * saved chunk or initialise its lighting and mesh. */
+			WorldGenerationPipeline::Request obsolete = {};
+			obsolete.operation = WorldGenerationPipeline::WorldGenerationOperation::STREAM;
+			obsolete.cancellation_epoch = 1U;
+			obsolete.chunk_x = chunk_x;
+			obsolete.chunk_z = chunk_z;
+			obsolete.terrain_chunk_path = terrain_path;
+			const std::atomic<uint64_t> live_epoch{2U};
+			const auto cancelled = WorldChunkGenerationWorker::process_generation(obsolete, live_epoch);
+			if (cancelled == nullptr || cancelled->error_code != FT_ERR_INVALID_STATE
+				|| cancelled->chunk != nullptr || cancelled->loaded_from_terrain_store
+				|| cancelled->generation_duration_nanoseconds != 0U
+				|| cancelled->mesh_duration_nanoseconds != 0U)
+				error = FT_ERR_INVALID_STATE;
+		}
+		if (error == FT_ERR_SUCCESS)
+			error = world.update_around(x, z, 1, WorldCoordinates::MIN_RENDER_DISTANCE);
+		if (error == FT_ERR_SUCCESS && world.find_chunk(chunk_x, chunk_z) != nullptr)
+			error = FT_ERR_INVALID_STATE;
+		const auto deadline = std::chrono::steady_clock::now()
+			+ std::chrono::seconds(8);
+		while (error == FT_ERR_SUCCESS && world.find_chunk(chunk_x, chunk_z) == nullptr
+			&& std::chrono::steady_clock::now() < deadline)
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			error = world.update_around(x, z, 0, WorldCoordinates::MIN_RENDER_DISTANCE);
+		}
+		if (error == FT_ERR_SUCCESS)
+		{
+			const WorldChunk *loaded = world.find_chunk(chunk_x, chunk_z);
+			uint32_t deleted_id = UINT32_MAX;
+			uint32_t placed_id = GAME_VOXEL_AIR_BLOCK;
+			if (loaded == nullptr || !loaded->light_buffer_is_valid()
+				|| loaded->voxel_revision != saved.get_revision()
+				|| loaded->read_state == nullptr
+				|| loaded->read_state->voxel_revision != loaded->voxel_revision
+				|| loaded->read_state->block_at(3, 252, 4) != VOXEL_GENERATOR_STONE_BLOCK
+				|| loaded->chunk.read_block(3, 9, 4, &deleted_id) != FT_ERR_SUCCESS
+				|| loaded->chunk.read_block(3, 253, 4, &placed_id) != FT_ERR_SUCCESS
+				|| deleted_id != GAME_VOXEL_AIR_BLOCK
+				|| placed_id != VOXEL_GENERATOR_STONE_BLOCK)
+				error = FT_ERR_INVALID_STATE;
+		}
+		world.destroy();
+		if (store.is_initialized())
+		{
+			const int32_t cleanup_error = store.remove_chunk(chunk_x, chunk_z);
+			store.reset();
+			if (error == FT_ERR_SUCCESS)
+				error = cleanup_error;
+		}
+		if (error != FT_ERR_SUCCESS)
+			return (ApplicationError::fail("async-worldgen saved chunk streaming", error));
+		std::printf("async-worldgen: staged terrain protected newer data and loaded on worker\n");
+		return (FT_ERR_SUCCESS);
+	}
+
+	static int validate_read_state_edit_storage(World &world)
+	{
+		WorldChunk chunk;
+		int32_t result = chunk.chunk.initialize();
+		if (result == FT_ERR_SUCCESS)
+			result = chunk.light.initialize(voxel_light_pack(15U, 0U));
+		if (result == FT_ERR_SUCCESS)
+			result = chunk_mesh_initialize(chunk.mesh);
+		chunk.initialized = (result == FT_ERR_SUCCESS);
+		if (result == FT_ERR_SUCCESS)
+			result = chunk.publish_read_state();
+		if (result != FT_ERR_SUCCESS)
+			return (ApplicationError::fail("async-worldgen read-state setup", result));
+		const auto original = chunk.read_state;
+		std::weak_ptr<const WorldChunkReadState> previous;
+		constexpr int32_t y = 32;
+		for (uint32_t edit = 0U; edit < 128U; ++edit)
+		{
+			const uint32_t block = edit % 2U == 0U
+				? VOXEL_GENERATOR_STONE_BLOCK : GAME_VOXEL_AIR_BLOCK;
+			std::shared_ptr<WorldChunkReadState> prepared;
+			result = chunk.prepare_read_state_after_block_edit(0, y, 15,
+				block, prepared);
+			if (result == FT_ERR_SUCCESS)
+				result = chunk.chunk.write_block(0, y, 15, block);
+			if (result != FT_ERR_SUCCESS)
+				return (ApplicationError::fail("async-worldgen read-state edit", result));
+			chunk.voxel_revision += 1U;
+			chunk.mark_content_changed();
+			chunk.commit_prepared_read_state(prepared);
+			if (chunk.read_state->block_at(0, y, 15) != block
+				|| chunk.read_state->light != original->light
+				|| chunk.read_state->block_sections[0] != original->block_sections[0]
+				|| !previous.expired())
+				return (ApplicationError::fail("async-worldgen read-state sharing", 1));
+			previous = chunk.read_state;
+		}
+		if (original->block_at(0, y, 15) != GAME_VOXEL_AIR_BLOCK
+			|| original->voxel_revision == chunk.read_state->voxel_revision)
+			return (ApplicationError::fail("async-worldgen retained read state", 1));
+		std::printf("async-worldgen: 128 read-state edits shared untouched sections and light\n");
+		/* Keep the capture worker stopped so supersession always happens
+		 * while the first capture is still in the queue. */
+		WorldChunkStreamer streamer(world);
+		chunk.mesh_dirty = true;
+		result = streamer.queue_chunk_remesh(chunk, FT_TRUE);
+		if (result != FT_ERR_SUCCESS || streamer.remesh_capture_tasks_.size() != 1U)
+			return (ApplicationError::fail("async-worldgen initial capture", 1));
+		const uint64_t first_token =
+			streamer.remesh_capture_tasks_.front().cancellation_token_value;
+		const uint64_t first_request = chunk.pending_mesh_request_id;
+		chunk.cancel_remesh_work();
+		result = streamer.queue_chunk_remesh(chunk, FT_TRUE);
+		if (result != FT_ERR_SUCCESS || streamer.remesh_capture_tasks_.size() != 1U)
+			return (ApplicationError::fail("async-worldgen replacement capture", 1));
+		const auto &replacement = streamer.remesh_capture_tasks_.front();
+		if (replacement.request_id != chunk.pending_mesh_request_id
+			|| replacement.request_id == first_request
+			|| replacement.cancellation_token_value == first_token
+			|| replacement.cancellation_token->load(std::memory_order_acquire)
+				!= replacement.cancellation_token_value
+			|| streamer.remesh_capture_in_flight_.load() != 1U)
+			return (ApplicationError::fail("async-worldgen stale replacement token", 1));
+		WorldGenerationPipeline &pipeline = streamer.pipeline();
+		result = pipeline.initialize(1U, 4U);
+		if (result != FT_ERR_SUCCESS)
+			return (ApplicationError::fail("async-worldgen stale submission setup", result));
+		result = pipeline.submit_remesh(first_request, replacement.world_epoch,
+			replacement.relevance_epoch, replacement.generation_revision,
+			replacement.chunk_x, replacement.chunk_z, replacement.voxel_revision,
+			replacement.light_revision, replacement.content_version,
+			replacement.light_input_version, WorldGenerationPipeline::WorldChunkSnapshot{},
+			nullptr, FT_TRUE, FT_FALSE, FT_FALSE, FT_FALSE, 0, 0, 0,
+			GAME_VOXEL_AIR_BLOCK, GAME_VOXEL_AIR_BLOCK, nullptr,
+			replacement.cancellation_token, first_token);
+		if (result != FT_ERR_INVALID_STATE || pipeline.remesh_in_flight_count() != 0U)
+			return (ApplicationError::fail("async-worldgen accepted cancelled capture", 1));
+		std::printf("async-worldgen: superseded capture retained the current cancellation token\n");
+		/* Model two occupied slots with the capture worker stopped. The edit
+		 * still needs to capture its new geometry before either solve ends. */
+		WorldChunkStreamer crowded_streamer(world);
+		crowded_streamer.remesh_capture_in_flight_.store(2U);
+		chunk.cancel_remesh_work();
+		chunk.light_ready_for_render = true;
+		chunk.light_version = chunk.content_version;
+		chunk.computed_light_input_version = chunk.light_input_version;
+		chunk.mark_light_input_changed();
+		const std::vector<WorldGenerationPipeline::IncrementalLightSeed> openings = {
+			{FT_TRUE, FT_FALSE, FT_FALSE, 0, y, 15, VOXEL_GENERATOR_STONE_BLOCK, GAME_VOXEL_AIR_BLOCK, 0U},
+			{FT_TRUE, FT_FALSE, FT_FALSE, 1, y, 15, VOXEL_GENERATOR_STONE_BLOCK, GAME_VOXEL_AIR_BLOCK, 0U}};
+		result = crowded_streamer.queue_chunk_remesh(chunk, FT_TRUE, FT_FALSE,
+			0, y, 15, VOXEL_GENERATOR_STONE_BLOCK, GAME_VOXEL_AIR_BLOCK, &openings);
+		if (result != FT_ERR_SUCCESS || crowded_streamer.remesh_capture_tasks_.size() != 1U
+			|| !crowded_streamer.remesh_capture_tasks_.front().geometry_preview_only
+			|| !chunk.pending_mesh_request_preview_only
+			|| crowded_streamer.remesh_capture_tasks_.front().incremental_light_seeds.size() != openings.size())
+			return (ApplicationError::fail("async-worldgen crowded edit capture", 1));
+		/* The pipeline also enforces the cap, independently of capture.
+		 * An ordinary remesh must still wait while both slots are occupied. */
+		pipeline.remesh_in_flight_.store(2U);
+		const auto submit_at_capacity = [&pipeline](bool preview) noexcept
+		{
+			WorldGenerationPipeline::WorldChunkSnapshot snapshot;
+			snapshot.geometry_preview_only = preview;
+			return (pipeline.submit_remesh(101U, 1U, 1U, 1U, 0, 0,
+				1U, 1U, 1U, 1U, std::move(snapshot), nullptr, FT_TRUE,
+				FT_FALSE, FT_FALSE, FT_FALSE, 0, 0, 0, GAME_VOXEL_AIR_BLOCK,
+				GAME_VOXEL_AIR_BLOCK, nullptr, nullptr, 0U));
+		};
+		const int32_t regular_result = submit_at_capacity(false);
+		const int32_t preview_result = submit_at_capacity(true);
+		pipeline.remesh_in_flight_.fetch_sub(2U);
+		if (regular_result != FT_ERR_FULL || preview_result != FT_ERR_SUCCESS)
+			return (ApplicationError::fail("async-worldgen crowded edit pipeline", 1));
+		std::printf("async-worldgen: a visible edit can bypass two active lighting solves\n");
+		return (0);
+	}
+}
 
 WorldAsyncGenerationValidator::WorldAsyncGenerationValidator()
 {
@@ -58,21 +307,1417 @@ bool WorldAsyncGenerationValidator::chunks_equal(const game_voxel_chunk &left,
 	return (true);
 }
 
-const WorldChunk *WorldAsyncGenerationValidator::stream_until_ready(World &world,
-	int32_t *frame) noexcept
+namespace
 {
+	static int initialize_halo_chunk(WorldChunk &chunk, int32_t chunk_x,
+		int32_t chunk_z, uint32_t corner_block) noexcept
+	{
+		int32_t error_code;
+
+		error_code = chunk.chunk.initialize();
+		if (error_code != FT_ERR_SUCCESS)
+			return (error_code);
+		chunk.chunk_x = chunk_x;
+		chunk.chunk_z = chunk_z;
+		chunk.world_x = chunk_x * GAME_VOXEL_CHUNK_WIDTH;
+		chunk.world_z = chunk_z * GAME_VOXEL_CHUNK_DEPTH;
+		chunk.initialized = true;
+		return (chunk.chunk.write_generated_block(
+			chunk_x < 0 ? GAME_VOXEL_CHUNK_WIDTH - 1 : 0, 8,
+			chunk_z < 0 ? GAME_VOXEL_CHUNK_DEPTH - 1 : 0, corner_block));
+	}
+
+	static int verify_halo_block(
+		WorldGenerationPipeline::WorldChunkSnapshot &snapshot, int32_t world_x,
+		int32_t world_z, uint32_t expected) noexcept
+	{
+		uint32_t actual;
+		int32_t error_code;
+
+		actual = 0U;
+		error_code = WorldChunkSnapshotReader::lookup_snapshot_block(&snapshot,
+			world_x, 8, world_z, &actual);
+		if (error_code != FT_ERR_SUCCESS || actual != expected)
+		{
+			std::fprintf(stderr,
+				"async-worldgen: diagonal halo mismatch world=(%d,8,%d) "
+				"expected=%u actual=%u error=%d\n", world_x, world_z,
+				expected, actual, error_code);
+			return (1);
+		}
+		return (0);
+	}
+
+	static int fill_halo_chunk(WorldChunk &chunk, uint32_t block_id) noexcept
+	{
+		int32_t local_z;
+		int32_t local_y;
+		int32_t local_x;
+		int32_t error_code;
+
+		local_z = 0;
+		while (local_z < GAME_VOXEL_CHUNK_DEPTH)
+		{
+			local_y = 0;
+			while (local_y < GAME_VOXEL_CHUNK_HEIGHT)
+			{
+				local_x = 0;
+				while (local_x < GAME_VOXEL_CHUNK_WIDTH)
+				{
+					error_code = chunk.chunk.write_generated_block(local_x,
+						local_y, local_z, block_id);
+					if (error_code != FT_ERR_SUCCESS)
+						return (error_code);
+					local_x += 1;
+				}
+				local_y += 1;
+			}
+			local_z += 1;
+		}
+		return (FT_ERR_SUCCESS);
+	}
+}
+
+int WorldAsyncGenerationValidator::validate_diagonal_lighting_halo() noexcept
+{
+	WorldChunk target;
+	WorldChunk northwest;
+	WorldChunk northeast;
+	WorldChunk southwest;
+	WorldChunk southeast;
+	WorldGenerationPipeline::WorldChunkSnapshot snapshot;
 	int32_t error_code;
 
-	while (world.find_chunk(-4, 2) == nullptr && *frame < 4000)
+	error_code = initialize_halo_chunk(target, 0, 0, 10U);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = initialize_halo_chunk(northwest, -1, -1, 101U);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = initialize_halo_chunk(northeast, 1, -1, 102U);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = initialize_halo_chunk(southwest, -1, 1, 103U);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = initialize_halo_chunk(southeast, 1, 1, 104U);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = WorldChunkSnapshotCapture::capture(target, nullptr,
+			nullptr, nullptr, nullptr, &northwest, &northeast, &southwest,
+			&southeast, snapshot);
+	if (error_code != FT_ERR_SUCCESS
+		|| verify_halo_block(snapshot, -1, -1, 101U) != 0
+		|| verify_halo_block(snapshot, GAME_VOXEL_CHUNK_WIDTH, -1, 102U) != 0
+		|| verify_halo_block(snapshot, -1, GAME_VOXEL_CHUNK_DEPTH, 103U) != 0
+		|| verify_halo_block(snapshot, GAME_VOXEL_CHUNK_WIDTH,
+			GAME_VOXEL_CHUNK_DEPTH, 104U) != 0)
 	{
+		std::fprintf(stderr,
+			"async-worldgen: diagonal lighting halo validation failed error=%d\n",
+			error_code);
+		return (1);
+	}
+	error_code = WorldChunkSnapshotCapture::capture(target, nullptr, nullptr,
+		nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, snapshot);
+	if (error_code != FT_ERR_SUCCESS
+		|| verify_halo_block(snapshot, -1, -1,
+			VOXEL_GENERATOR_STONE_BLOCK) != 0)
+		return (1);
+	return (0);
+}
+
+int WorldAsyncGenerationValidator::validate_cardinal_lighting_propagation() noexcept
+{
+	WorldChunk target;
+	WorldChunk west;
+	WorldGenerationPipeline::WorldChunkSnapshot snapshot;
+	voxel_light_chunk light;
+	int32_t error_code;
+	int32_t local_y;
+	uint8_t sky_light;
+
+	error_code = initialize_halo_chunk(target, 0, 0,
+		VOXEL_GENERATOR_STONE_BLOCK);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = initialize_halo_chunk(west, -1, 0,
+			VOXEL_GENERATOR_STONE_BLOCK);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = fill_halo_chunk(target, VOXEL_GENERATOR_STONE_BLOCK);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = fill_halo_chunk(west, VOXEL_GENERATOR_STONE_BLOCK);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = target.chunk.write_generated_block(0, 8, 0,
+			GAME_VOXEL_AIR_BLOCK);
+	local_y = 8;
+	while (error_code == FT_ERR_SUCCESS
+		&& local_y < GAME_VOXEL_CHUNK_HEIGHT)
+	{
+		error_code = west.chunk.write_generated_block(
+			GAME_VOXEL_CHUNK_WIDTH - 1, local_y, 0, GAME_VOXEL_AIR_BLOCK);
+		local_y += 1;
+	}
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = WorldChunkSnapshotCapture::capture(target, &west,
+			nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+			snapshot);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = voxel_light_build_chunk(light, 0, 0,
+			&WorldChunkSnapshotReader::lookup_snapshot_block, &snapshot);
+	if (error_code != FT_ERR_SUCCESS)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: cardinal propagation build failed error=%d\n",
+			error_code);
+		return (1);
+	}
+	sky_light = voxel_light_sky(light.get(0, 8, 0));
+	if (sky_light != 14U)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: cardinal propagation expected=14 actual=%u\n",
+			static_cast<unsigned int>(sky_light));
+		return (1);
+	}
+	error_code = WorldChunkSnapshotCapture::capture(target, nullptr, nullptr,
+		nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, snapshot);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = voxel_light_build_chunk(light, 0, 0,
+			&WorldChunkSnapshotReader::lookup_snapshot_block, &snapshot);
+	if (error_code != FT_ERR_SUCCESS)
+		return (1);
+	sky_light = voxel_light_sky(light.get(0, 8, 0));
+	if (sky_light != 0U)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: absent cardinal source leaked sky=%u\n",
+			static_cast<unsigned int>(sky_light));
+		return (1);
+	}
+	return (0);
+}
+
+int WorldAsyncGenerationValidator::validate_diagonal_lighting_propagation() noexcept
+{
+	WorldChunk target;
+	WorldChunk north;
+	WorldChunk northwest;
+	WorldGenerationPipeline::WorldChunkSnapshot snapshot;
+	voxel_light_chunk light;
+	int32_t error_code;
+	int32_t local_y;
+	uint8_t sky_light;
+
+	error_code = initialize_halo_chunk(target, 0, 0,
+		VOXEL_GENERATOR_STONE_BLOCK);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = initialize_halo_chunk(north, 0, -1,
+			VOXEL_GENERATOR_STONE_BLOCK);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = initialize_halo_chunk(northwest, -1, -1,
+			VOXEL_GENERATOR_STONE_BLOCK);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = fill_halo_chunk(target, VOXEL_GENERATOR_STONE_BLOCK);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = fill_halo_chunk(north, VOXEL_GENERATOR_STONE_BLOCK);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = fill_halo_chunk(northwest, VOXEL_GENERATOR_STONE_BLOCK);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = target.chunk.write_generated_block(0, 8, 0,
+			GAME_VOXEL_AIR_BLOCK);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = north.chunk.write_generated_block(0, 8,
+			GAME_VOXEL_CHUNK_DEPTH - 1, GAME_VOXEL_AIR_BLOCK);
+	local_y = 8;
+	while (error_code == FT_ERR_SUCCESS
+		&& local_y < GAME_VOXEL_CHUNK_HEIGHT)
+	{
+		error_code = northwest.chunk.write_generated_block(
+			GAME_VOXEL_CHUNK_WIDTH - 1, local_y,
+			GAME_VOXEL_CHUNK_DEPTH - 1, GAME_VOXEL_AIR_BLOCK);
+		local_y += 1;
+	}
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = WorldChunkSnapshotCapture::capture(target, nullptr,
+			nullptr, &north, nullptr, &northwest, nullptr, nullptr, nullptr,
+			snapshot);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = voxel_light_build_chunk(light, 0, 0,
+			&WorldChunkSnapshotReader::lookup_snapshot_block, &snapshot);
+	if (error_code != FT_ERR_SUCCESS)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: diagonal propagation build failed error=%d\n",
+			error_code);
+		return (1);
+	}
+	sky_light = voxel_light_sky(light.get(0, 8, 0));
+	if (sky_light != 13U)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: diagonal propagation expected=13 actual=%u\n",
+			static_cast<unsigned int>(sky_light));
+		return (1);
+	}
+	error_code = WorldChunkSnapshotCapture::capture(target, nullptr, nullptr,
+		&north, nullptr, nullptr, nullptr, nullptr, nullptr, snapshot);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = voxel_light_build_chunk(light, 0, 0,
+			&WorldChunkSnapshotReader::lookup_snapshot_block, &snapshot);
+	if (error_code != FT_ERR_SUCCESS)
+		return (1);
+	sky_light = voxel_light_sky(light.get(0, 8, 0));
+	if (sky_light != 0U)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: absent diagonal source leaked sky=%u\n",
+			static_cast<unsigned int>(sky_light));
+		return (1);
+	}
+	return (0);
+}
+
+int WorldAsyncGenerationValidator::validate_light_scheduler_configuration()
+	noexcept
+{
+	std::unique_ptr<World> world_storage(new (std::nothrow) World());
+	if (world_storage == nullptr)
+		return (1);
+	World &world = *world_storage;
+	voxel_light_update_config background;
+	voxel_light_update_config interactive;
+	voxel_light_update_config invalid;
+
+	voxel_light_update_config_defaults(background);
+	background.min_nodes_per_frame = 7U;
+	background.target_nodes_per_frame = 31U;
+	background.max_nodes_per_frame = 97U;
+	background.time_budget_microseconds = 211U;
+	if (world.set_light_update_config(background) != FT_ERR_SUCCESS
+		|| world.light_update_config().min_nodes_per_frame != 7U
+		|| world.light_update_config().target_nodes_per_frame != 31U
+		|| world.light_update_config().max_nodes_per_frame != 97U
+		|| world.light_update_config().time_budget_microseconds != 211U)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: background light scheduler config did not round-trip\n");
+		return (1);
+	}
+	voxel_light_update_config_defaults(interactive);
+	interactive.min_nodes_per_frame = 11U;
+	interactive.target_nodes_per_frame = 43U;
+	interactive.max_nodes_per_frame = 131U;
+	interactive.time_budget_microseconds = 307U;
+	if (world.set_interactive_light_update_config(interactive)
+		!= FT_ERR_SUCCESS
+		|| world.interactive_light_update_config().min_nodes_per_frame != 11U
+		|| world.interactive_light_update_config().target_nodes_per_frame != 43U
+		|| world.interactive_light_update_config().max_nodes_per_frame != 131U
+		|| world.interactive_light_update_config().time_budget_microseconds != 307U)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: interactive light scheduler config did not round-trip\n");
+		return (1);
+	}
+	invalid = interactive;
+	invalid.min_nodes_per_frame = invalid.target_nodes_per_frame + 1U;
+	if (world.set_interactive_light_update_config(invalid)
+		!= FT_ERR_INVALID_ARGUMENT)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: invalid light scheduler config was accepted\n");
+		return (1);
+	}
+	return (0);
+}
+
+int WorldAsyncGenerationValidator::validate_remesh_priority_metrics() noexcept
+{
+	std::unique_ptr<World> world_storage(new (std::nothrow) World());
+	if (world_storage == nullptr)
+		return (1);
+	World &world = *world_storage;
+	World::StreamDiagnostics diagnostics;
+	std::size_t index;
+	bool background_seen;
+
+	/* This fixture intentionally does not initialize World.  That leaves the
+	 * streamer without worker threads, so the queue ordering and diagnostics
+	 * can be checked without racing a worker that drains the entries. */
+	world.chunk_streamer.stream_frame_ = 0U;
+	world.chunk_streamer.enqueue_background_remesh(30, 30);
+	world.chunk_streamer.enqueue_background_remesh(31, 30);
+	auto continuation = std::make_unique<WorldGenerationPipeline::Request>();
+	continuation->request_id = 41U;
+	continuation->chunk_x = 30;
+	continuation->chunk_z = 30;
+	continuation->operation = WorldGenerationPipeline::WorldGenerationOperation::REMESH;
+	continuation->remesh_interactive = FT_FALSE;
+	continuation->remesh_in_progress = FT_TRUE;
+	continuation->incremental_processed_cells = 137U;
+	auto &pipeline = world.chunk_streamer.pipeline();
+	pipeline.requests_.push_back(std::move(continuation));
+	pipeline.remesh_in_flight_.store(2U);
+	world.chunk_streamer.stream_frame_ = 12U;
+	world.chunk_streamer.prioritize_chunk_remesh(7, 7);
+	world.chunk_streamer.prioritize_chunk_remesh(8, 8);
+	diagnostics = world.stream_diagnostics();
+	if (diagnostics.remesh_priority_queue_depth != 4U
+		|| diagnostics.interactive_remesh_queue_depth != 2U
+		|| diagnostics.oldest_remesh_queue_age != 12U)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: priority metrics mismatch depth=%zu "
+			"interactive=%zu oldest=%llu\n",
+			diagnostics.remesh_priority_queue_depth,
+			diagnostics.interactive_remesh_queue_depth,
+			static_cast<unsigned long long>(
+				diagnostics.oldest_remesh_queue_age));
+		return (1);
+	}
+	background_seen = false;
+	index = 0U;
+	for (const WorldChunkStreamer::RemeshPriority &priority
+		: world.chunk_streamer.priority_remeshes_)
+	{
+		if (!background_seen && !priority.interactive)
+			background_seen = true;
+		if (background_seen && priority.interactive)
+		{
+			std::fprintf(stderr,
+				"async-worldgen: interactive remesh followed background "
+				"entry at queue index=%zu\n", index);
+			return (1);
+		}
+		if (index == 0U && (priority.chunk_x != 7
+				|| priority.chunk_z != 7 || !priority.interactive))
+		{
+			std::fprintf(stderr,
+				"async-worldgen: oldest equal-distance interactive remesh was not first "
+				"chunk=(%d,%d) interactive=%d\n", priority.chunk_x,
+				priority.chunk_z, priority.interactive ? 1 : 0);
+			return (1);
+		}
+		if (index == 1U && (priority.chunk_x != 8
+				|| priority.chunk_z != 8 || !priority.interactive))
+		{
+			std::fprintf(stderr,
+				"async-worldgen: newer equal-distance interactive remesh was not second "
+				"chunk=(%d,%d) interactive=%d\n", priority.chunk_x,
+				priority.chunk_z, priority.interactive ? 1 : 0);
+			return (1);
+		}
+		index += 1U;
+	}
+	if (!background_seen)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: background remesh entries disappeared from "
+			"priority queue\n");
+		return (1);
+	}
+	world.chunk_streamer.stream_frame_ = 132U;
+	world.chunk_streamer.promote_starved_remeshes();
+	if (pipeline.queued_count() != 1U
+		|| pipeline.requests_.front()->request_id != 41U
+		|| pipeline.requests_.front()->incremental_processed_cells != 137U)
+		return (ApplicationError::fail("async-worldgen discarded remesh continuation",
+			FT_ERR_INVALID_STATE));
+	pipeline.remesh_in_flight_.store(1U);
+	pipeline.cancel_queued();
+	if (pipeline.queued_count() != 0U || pipeline.remesh_in_flight_count() != 0U
+		|| pipeline.has_request_or_result(41U) || pipeline.retired_requests_.size() != 1U
+		|| pipeline.retired_requests_.front()->request_id != 41U
+		|| pipeline.retired_requests_.front()->incremental_processed_cells != 137U)
+		return (ApplicationError::fail("async-worldgen cancelled continuation retirement",
+			FT_ERR_INVALID_STATE));
+	std::printf("async-worldgen: priority changes preserved an in-progress remesh\n");
+	diagnostics = world.stream_diagnostics();
+	if (diagnostics.remesh_starvation_promotions != 2U
+		|| diagnostics.interactive_remesh_queue_depth != 4U)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: starvation promotion mismatch promotions=%llu "
+			"interactive=%zu\n",
+			static_cast<unsigned long long>(
+				diagnostics.remesh_starvation_promotions),
+			diagnostics.interactive_remesh_queue_depth);
+		return (1);
+	}
+	/* Long-run queue stress: repeated notifications for an existing chunk must
+	 * replace/coalesce that entry instead of growing without bound.  Keep the
+	 * frame fixed while injecting the duplicates so the age contract remains
+	 * deterministic, then advance past the starvation threshold and require
+	 * every surviving background entry to be promoted. */
+	world.chunk_streamer.priority_remeshes_.clear();
+	world.chunk_streamer.remesh_starvation_promotions_ = 0U;
+	world.chunk_streamer.stream_frame_ = 0U;
+	for (int32_t chunk_index = 0; chunk_index < 64; ++chunk_index)
+		world.chunk_streamer.enqueue_background_remesh(chunk_index, 0);
+	for (int32_t repeat = 0; repeat < 10000; ++repeat)
+	{
+		const int32_t chunk_index = repeat % 64;
+		world.chunk_streamer.enqueue_background_remesh(chunk_index, 0);
+	}
+	if (world.chunk_streamer.priority_remeshes_.size() != 64U)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: long-run duplicate coalescing grew queue size=%zu\n",
+			world.chunk_streamer.priority_remeshes_.size());
+		return (1);
+	}
+	world.chunk_streamer.stream_frame_ = 120U;
+	world.chunk_streamer.promote_starved_remeshes();
+	diagnostics = world.stream_diagnostics();
+	if (diagnostics.remesh_starvation_promotions != 64U
+		|| diagnostics.interactive_remesh_queue_depth != 64U)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: long-run starvation mismatch promotions=%llu "
+			"interactive=%zu\n",
+			static_cast<unsigned long long>(
+				diagnostics.remesh_starvation_promotions),
+			diagnostics.interactive_remesh_queue_depth);
+		return (1);
+	}
+	std::printf("async-worldgen: long-run queue stress passed duplicates=10000 "
+		"unique=64 promotions=64\n");
+
+	/* Cross a chunk boundary with the latest edit queued behind obsolete
+	 * previews. The ready edit should still publish during this update. */
+	using Result = WorldGenerationPipeline::Result;
+	WorldChunk &target = world.chunks[0];
+	const uint64_t current_request = 113U;
+	const std::size_t obsolete_count = 12U;
+	if (chunk_mesh_initialize(target.mesh) != FT_ERR_SUCCESS)
+		return (ApplicationError::fail("async-worldgen publication fixture mesh", 1));
+	target.initialized = true;
+	target.voxel_revision = 2U;
+	target.content_version = 2U;
+	target.light_input_version = 2U;
+	target.light_version = target.content_version;
+	target.computed_light_input_version = target.light_input_version;
+	target.light_ready_for_render = true;
+	target.set_pending_remesh_request(current_request, FT_TRUE);
+	world.chunk_index_valid = true;
+	world.register_chunk_index(target);
+	for (std::size_t result_index = 0U; result_index <= obsolete_count; ++result_index)
+	{
+		auto result = std::make_unique<Result>();
+		result->operation = WorldGenerationPipeline::WorldGenerationOperation::REMESH;
+		result->request_id = current_request - (obsolete_count - result_index);
+		result->voxel_revision = target.voxel_revision;
+		result->light_revision = target.light_revision;
+		result->content_version = target.content_version;
+		result->light_input_version = target.light_input_version;
+		result->interactive_remesh = FT_TRUE;
+		result->stage_mask = Result::STAGE_GEOMETRY_ONLY
+			| (result->request_id == current_request
+				? Result::STAGE_GEOMETRY_FINAL : Result::STAGE_GEOMETRY_WAIT_FOR_LIGHT);
+		result->error_code = FT_ERR_SUCCESS;
+		result->mesh = std::make_unique<chunk_mesh>();
+		if (chunk_mesh_initialize(*result->mesh) != FT_ERR_SUCCESS)
+			return (ApplicationError::fail("async-worldgen publication result mesh", 1));
+		pipeline.results_.push_back(std::move(result));
+	}
+	auto terrain_result = std::make_unique<Result>();
+	terrain_result->operation = WorldGenerationPipeline::WorldGenerationOperation::STREAM;
+	terrain_result->chunk_x = 9;
+	terrain_result->chunk_z = 8;
+	pipeline.results_.push_back(std::move(terrain_result));
+	world.chunk_streamer.stream_frame_ = 123U;
+	if (world.update_around(GAME_VOXEL_CHUNK_WIDTH, 0.0, 0,
+		WorldCoordinates::MIN_RENDER_DISTANCE)
+		!= FT_ERR_SUCCESS || target.last_mesh_publication_voxel_revision != target.voxel_revision
+		|| pipeline.completed_count() != 1U
+		|| world.chunk_streamer.stale_remesh_pending_count_ != obsolete_count)
+		return (ApplicationError::fail("async-worldgen edit blocked by superseded previews", 1));
+	if (world.update_around(GAME_VOXEL_CHUNK_WIDTH, 0.0, 0,
+		WorldCoordinates::MIN_RENDER_DISTANCE) != FT_ERR_SUCCESS
+		|| pipeline.completed_count() != 0U)
+		return (ApplicationError::fail("async-worldgen deferred terrain publication", 1));
+	std::printf("async-worldgen: current edit survived recenter and superseded previews\n");
+
+	/* Keep the edit waiting on a worker across normal and reserved frames. */
+	target.voxel_revision += 1U;
+	target.mesh_dirty = true;
+	world.chunk_streamer.prioritize_chunk_remesh(target.chunk_x, target.chunk_z);
+	terrain_result = std::make_unique<Result>();
+	terrain_result->operation = WorldGenerationPipeline::WorldGenerationOperation::STREAM;
+	terrain_result->chunk_x = 9;
+	terrain_result->chunk_z = 8;
+	pipeline.results_.push_back(std::move(terrain_result));
+	if (WorldGenerationResultCommitter::drain(world.chunk_streamer, world)
+		!= FT_ERR_SUCCESS || pipeline.completed_count() != 1U)
+		return (ApplicationError::fail("async-worldgen pending edit lost publication window", 1));
+	world.chunk_streamer.stream_frame_ = 128U;
+	if (WorldGenerationResultCommitter::drain(world.chunk_streamer, world)
+		!= FT_ERR_SUCCESS || pipeline.completed_count() != 0U)
+		return (ApplicationError::fail("async-worldgen pending edit starved terrain publication", 1));
+	std::printf("async-worldgen: edit publication deferred terrain and preserved streaming progress\n");
+
+	/* A neighbour's new light invalidates the solve, while a ready preview
+	 * still describes the current shape of the edited chunk. */
+	const uint64_t preview_request = current_request + 1U;
+	target.set_pending_remesh_request(preview_request, FT_TRUE);
+	auto preview = std::make_unique<Result>();
+	preview->operation = WorldGenerationPipeline::WorldGenerationOperation::REMESH;
+	preview->request_id = preview_request;
+	preview->chunk_x = target.chunk_x;
+	preview->chunk_z = target.chunk_z;
+	preview->voxel_revision = target.voxel_revision;
+	preview->light_revision = target.light_revision;
+	preview->content_version = target.content_version;
+	preview->light_input_version = target.light_input_version;
+	preview->interactive_remesh = FT_TRUE;
+	preview->stage_mask = Result::STAGE_GEOMETRY_ONLY;
+	preview->mesh = std::make_unique<chunk_mesh>();
+	if (chunk_mesh_initialize(*preview->mesh) != FT_ERR_SUCCESS)
+		return (ApplicationError::fail("async-worldgen boundary preview mesh", 1));
+	pipeline.results_.push_back(std::move(preview));
+	const uint16_t old_computed_light = target.computed_light_input_version;
+	const uint16_t old_light_input = target.light_input_version;
+	Result border_light = {};
+	border_light.chunk_x = target.chunk_x - 1;
+	border_light.chunk_z = target.chunk_z;
+	border_light.changed_light_faces = 1U << 1U;
+	border_light.neighbor_relight_faces = border_light.changed_light_faces;
+	world.chunk_streamer.invalidate_boundary_receivers(border_light);
+	if (target.pending_mesh_request_id != preview_request
+		|| target.light_input_version == old_light_input)
+		return (ApplicationError::fail("async-worldgen boundary light discarded ready preview", 1));
+	if (WorldGenerationResultCommitter::drain(world.chunk_streamer, world, true)
+		!= FT_ERR_SUCCESS || target.last_mesh_publication_voxel_revision != target.voxel_revision
+		|| target.pending_mesh_request_id != 0U || !target.mesh_dirty
+		|| target.computed_light_input_version != old_computed_light || target.light_is_current())
+		return (ApplicationError::fail("async-worldgen boundary light blocked edit geometry", 1));
+	std::printf("async-worldgen: boundary relight kept ready edit geometry and rescheduled light\n");
+
+	/* This time the neighbour finishes while the standalone preview is still
+	 * building. Once ready, that same preview must also survive recentering. */
+	const uint64_t building_request = preview_request + 1U;
+	target.voxel_revision += 1U;
+	target.set_pending_remesh_request(building_request, FT_TRUE);
+	target.pending_mesh_request_preview_only = true;
+	preview = std::make_unique<Result>();
+	preview->operation = WorldGenerationPipeline::WorldGenerationOperation::REMESH;
+	preview->request_id = building_request;
+	preview->chunk_x = target.chunk_x;
+	preview->chunk_z = target.chunk_z;
+	preview->voxel_revision = target.voxel_revision;
+	preview->light_revision = target.light_revision;
+	preview->content_version = target.content_version;
+	preview->light_input_version = target.light_input_version;
+	preview->interactive_remesh = FT_TRUE;
+	preview->stage_mask = Result::STAGE_GEOMETRY_ONLY | Result::STAGE_GEOMETRY_WAIT_FOR_LIGHT;
+	preview->mesh = std::make_unique<chunk_mesh>();
+	if (chunk_mesh_initialize(*preview->mesh) != FT_ERR_SUCCESS)
+		return (ApplicationError::fail("async-worldgen in-flight preview mesh", 1));
+	world.chunk_streamer.invalidate_boundary_receivers(border_light);
+	if (target.pending_mesh_request_id != building_request)
+		return (ApplicationError::fail("async-worldgen boundary light canceled in-flight preview", 1));
+	auto pending_preview = std::make_unique<WorldGenerationPipeline::Request>();
+	pending_preview->request_id = building_request;
+	pending_preview->operation = WorldGenerationPipeline::WorldGenerationOperation::REMESH;
+	pending_preview->remesh_interactive = FT_TRUE;
+	pending_preview->cancellation_epoch = pipeline.interactive_remesh_epoch_.load();
+	const uint64_t preview_epoch = pending_preview->cancellation_epoch;
+	pipeline.requests_.push_back(std::move(pending_preview));
+	pipeline.remesh_in_flight_.store(1U);
+	auto old_terrain = std::make_unique<WorldGenerationPipeline::Request>();
+	old_terrain->operation = WorldGenerationPipeline::WorldGenerationOperation::STREAM;
+	old_terrain->request_id = building_request + 1U;
+	pipeline.requests_.push_back(std::move(old_terrain));
+	world.chunk_streamer.next_remesh_submission_frame_ = world.chunk_streamer.stream_frame_ + 2U;
+	if (world.update_around(0.0, 0.0, 0, WorldCoordinates::MIN_RENDER_DISTANCE)
+		!= FT_ERR_SUCCESS || target.pending_mesh_request_id != building_request
+		|| pipeline.interactive_remesh_epoch_.load() != preview_epoch
+		|| pipeline.queued_count() != 1U || pipeline.requests_.front()->request_id != building_request
+		|| pipeline.remesh_in_flight_count() != 1U)
+		return (ApplicationError::fail("async-worldgen unfinished edit canceled at recenter", 1));
+	pipeline.requests_.pop_front();
+	pipeline.release_remesh_slot();
+	pipeline.results_.push_back(std::move(preview));
+	if (WorldGenerationResultCommitter::drain(world.chunk_streamer, world, true)
+		!= FT_ERR_SUCCESS || target.last_mesh_publication_voxel_revision != target.voxel_revision
+		|| target.pending_mesh_request_id != 0U || target.pending_mesh_request_preview_only
+		|| !target.mesh_dirty || target.light_is_current())
+		return (ApplicationError::fail("async-worldgen light-stale preview lost at recenter", 1));
+	std::printf("async-worldgen: in-flight edit preview survived boundary light and recenter\n");
+	return (0);
+}
+
+int WorldAsyncGenerationValidator::validate_incremental_seed_coalescing() noexcept
+{
+	std::unique_ptr<World> world_storage(new (std::nothrow) World());
+	if (world_storage == nullptr)
+		return (1);
+	World &world = *world_storage;
+	WorldChunkStreamer::RemeshPriority *priority;
+
+	/* The fixture does not initialize World, so this exercises only the
+	 * scheduler's owned priority metadata and cannot race a worker. */
+	world.chunk_streamer.prioritize_chunk_remesh_from_origin(4, 4, 0, 0,
+		FT_TRUE, FT_FALSE, 3, 12, 5, GAME_VOXEL_AIR_BLOCK, 7U, 0U,
+		FT_FALSE);
+	world.chunk_streamer.prioritize_chunk_remesh_from_origin(4, 4, 0, 0,
+		FT_TRUE, FT_FALSE, 3, 12, 5, GAME_VOXEL_AIR_BLOCK, 7U, 0U,
+		FT_FALSE);
+	if (world.chunk_streamer.priority_remeshes_.size() != 1U)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: duplicate seed created another priority entry\n");
+		return (1);
+	}
+	priority = &world.chunk_streamer.priority_remeshes_.front();
+	if (priority->incremental_light_seeds.size() != 1U
+		|| priority->incremental_additive_light != FT_TRUE)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: identical seed was not coalesced\n");
+		return (1);
+	}
+	world.chunk_streamer.prioritize_chunk_remesh_from_origin(4, 4, 0, 0,
+		FT_TRUE, FT_FALSE, 3, 12, 5, GAME_VOXEL_AIR_BLOCK, 9U, 0U,
+		FT_FALSE);
+	if (world.chunk_streamer.priority_remeshes_.size() != 1U)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: conflicting seed created another priority entry\n");
+		return (1);
+	}
+	priority = &world.chunk_streamer.priority_remeshes_.front();
+	if (!priority->incremental_light_seeds.empty()
+		|| priority->incremental_additive_light != FT_FALSE
+		|| priority->incremental_removal_light != FT_FALSE)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: conflicting seed was not downgraded to full solve\n");
+		return (1);
+	}
+	world.chunk_streamer.prioritize_chunk_remesh_from_origin(4, 4, 0, 0,
+		FT_TRUE, FT_FALSE, 5, 12, 5, GAME_VOXEL_AIR_BLOCK, 7U, 0U,
+		FT_FALSE);
+	priority = &world.chunk_streamer.priority_remeshes_.front();
+	if (!priority->requires_full_light || !priority->incremental_light_seeds.empty())
+	{
+		std::fprintf(stderr,
+			"async-worldgen: later seed replaced unresolved full solve\n");
+		return (1);
+	}
+	return (0);
+}
+
+int WorldAsyncGenerationValidator::validate_missing_neighbor_mesh_boundary() noexcept
+{
+	WorldChunk chunks[2];
+	chunk_mesh mesh;
+	WorldGenerationPipeline::WorldChunkSnapshot snapshot;
+	int32_t error_code;
+	uint32_t snapshot_block_id;
+	bool east_face_found;
+	std::size_t vertex_index;
+
+	error_code = chunks[0].chunk.initialize();
+	if (error_code != FT_ERR_SUCCESS)
+		return (error_code);
+	chunks[0].chunk_x = 0;
+	chunks[0].chunk_z = 0;
+	chunks[0].world_x = 0;
+	chunks[0].world_z = 0;
+	chunks[0].initialized = true;
+	error_code = chunks[0].chunk.write_generated_block(
+		GAME_VOXEL_CHUNK_WIDTH - 1, 8, 8, VOXEL_GENERATOR_STONE_BLOCK);
+	if (error_code != FT_ERR_SUCCESS)
+	{
+		chunks[0].chunk.destroy();
+		return (error_code);
+	}
+	error_code = chunk_mesh_initialize(mesh);
+	if (error_code != FT_ERR_SUCCESS)
+	{
+		chunks[0].chunk.destroy();
+		return (error_code);
+	}
+	error_code = ChunkNeighborMesher::generate_with_neighbors(mesh,
+		chunks[0].chunk, 0, 0, chunks, 2);
+	if (error_code != FT_ERR_SUCCESS)
+	{
+		chunk_mesh_destroy(mesh);
+		chunks[0].chunk.destroy();
+		return (error_code);
+	}
+	east_face_found = false;
+	vertex_index = 0U;
+	while (vertex_index < mesh.vertices.size())
+	{
+		if (mesh.vertices[vertex_index].face == CHUNK_MESH_FACE_EAST)
+		{
+			east_face_found = true;
+			break ;
+		}
+		vertex_index += 1U;
+	}
+	if (!east_face_found)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: absent-neighbor boundary was left open\n");
+		chunk_mesh_destroy(mesh);
+		chunks[0].chunk.destroy();
+		return (1);
+	}
+	error_code = chunks[1].chunk.initialize();
+	if (error_code != FT_ERR_SUCCESS)
+	{
+		chunk_mesh_destroy(mesh);
+		chunks[0].chunk.destroy();
+		return (error_code);
+	}
+	chunks[1].chunk_x = 1;
+	chunks[1].chunk_z = 0;
+	chunks[1].world_x = GAME_VOXEL_CHUNK_WIDTH;
+	chunks[1].world_z = 0;
+	chunks[1].initialized = true;
+	error_code = chunks[1].chunk.write_generated_block(0, 8, 8,
+		VOXEL_GENERATOR_STONE_BLOCK);
+	if (error_code != FT_ERR_SUCCESS)
+	{
+		chunk_mesh_destroy(mesh);
+		chunks[1].chunk.destroy();
+		chunks[0].chunk.destroy();
+		return (error_code);
+	}
+	error_code = chunk_mesh_clear(mesh);
+	if (error_code != FT_ERR_SUCCESS)
+	{
+		chunk_mesh_destroy(mesh);
+		chunks[1].chunk.destroy();
+		chunks[0].chunk.destroy();
+		return (error_code);
+	}
+	error_code = ChunkNeighborMesher::generate_with_neighbors(mesh,
+		chunks[0].chunk, 0, 0, chunks, 2);
+	if (error_code != FT_ERR_SUCCESS)
+	{
+		chunk_mesh_destroy(mesh);
+		chunks[1].chunk.destroy();
+		chunks[0].chunk.destroy();
+		return (error_code);
+	}
+	east_face_found = false;
+	vertex_index = 0U;
+	while (vertex_index < mesh.vertices.size())
+	{
+		if (mesh.vertices[vertex_index].face == CHUNK_MESH_FACE_EAST)
+		{
+			east_face_found = true;
+			break ;
+		}
+		vertex_index += 1U;
+	}
+	chunk_mesh_destroy(mesh);
+	chunks[1].chunk.destroy();
+	chunks[0].chunk.destroy();
+	if (east_face_found)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: loaded-neighbor boundary face was not removed\n");
+		return (1);
+	}
+	snapshot.chunk_x = 0;
+	snapshot.chunk_z = 0;
+	snapshot.east_border_valid = FT_FALSE;
+	snapshot_block_id = GAME_VOXEL_AIR_BLOCK;
+	error_code = WorldChunkSnapshotReader::lookup_snapshot_mesh_block(&snapshot,
+		GAME_VOXEL_CHUNK_WIDTH, 8, 8, &snapshot_block_id);
+	if (error_code != FT_ERR_SUCCESS
+		|| snapshot_block_id != GAME_VOXEL_AIR_BLOCK)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: absent snapshot mesh border fallback mismatch "
+			"error=%d block=%u\n", error_code, snapshot_block_id);
+		return (1);
+	}
+	std::printf("async-worldgen: missing-neighbor mesh boundary passed\n");
+	return (0);
+}
+
+int WorldAsyncGenerationValidator::validate_evicted_neighbor_invalidation() noexcept
+{
+	World world;
+	WorldChunk &source = world.chunks[0];
+	WorldChunk &target = world.chunks[1];
+	uint16_t light_input_version;
+	int32_t error_code;
+
+	error_code = source.chunk.initialize();
+	if (error_code != FT_ERR_SUCCESS)
+		return (error_code);
+	error_code = target.chunk.initialize();
+	if (error_code != FT_ERR_SUCCESS)
+	{
+		source.destroy();
+		return (error_code);
+	}
+	source.chunk_x = 0;
+	source.chunk_z = 0;
+	source.world_x = 0;
+	source.world_z = 0;
+	source.initialized = true;
+	target.chunk_x = 1;
+	target.chunk_z = 0;
+	target.world_x = GAME_VOXEL_CHUNK_WIDTH;
+	target.world_z = 0;
+	target.initialized = true;
+	target.mesh_dirty = false;
+	world.center_chunk_x = 0;
+	world.center_chunk_z = 0;
+	world.chunk_index_center_x = 0;
+	world.chunk_index_center_z = 0;
+	world.chunk_index_valid = true;
+	world.register_chunk_index(source);
+	world.register_chunk_index(target);
+	light_input_version = target.light_input_version;
+	source.destroy();
+	world.chunk_streamer.mark_neighbor_remeshes(0, 0, false, true);
+	if (!target.mesh_dirty || target.light_input_version != light_input_version)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: evicted-neighbor invalidation mismatch dirty=%d "
+			"light_input=%u expected=%u\n", target.mesh_dirty ? 1 : 0,
+			static_cast<unsigned int>(target.light_input_version),
+			static_cast<unsigned int>(light_input_version));
+		target.destroy();
+		return (1);
+	}
+	target.destroy();
+	std::printf("async-worldgen: evicted-neighbor invalidation passed\n");
+	return (0);
+}
+
+int WorldAsyncGenerationValidator::validate_immutable_capture_equivalence(
+	World &world) noexcept
+{
+	WorldGenerationPipeline::WorldChunkSnapshot live_snapshot;
+	WorldGenerationPipeline::WorldChunkSnapshot state_snapshot;
+	WorldGenerationPipeline::WorldChunkSnapshot border_snapshot;
+	const WorldChunk *target = world.find_chunk(0, 0);
+	const WorldChunk *sources[9];
+	int32_t error_code;
+	int32_t offsets[9][2] = {{0, 0}, {-1, 0}, {1, 0}, {0, -1}, {0, 1},
+		{-1, -1}, {1, -1}, {-1, 1}, {1, 1}};
+
+	if (target == nullptr || target->read_state == nullptr)
+		return (1);
+	for (int32_t index = 0; index < 9; ++index)
+	{
+		sources[index] = world.find_chunk(offsets[index][0], offsets[index][1]);
+		if (sources[index] != nullptr && sources[index]->initialized
+			&& sources[index]->read_state == nullptr)
+			std::fprintf(stderr,
+				"async-worldgen: live source has no read state index=%d chunk=(%d,%d)\n",
+				index, sources[index]->chunk_x, sources[index]->chunk_z);
+	}
+	const auto capture = [&sources](
+		WorldGenerationPipeline::WorldChunkSnapshot &snapshot, bool full_halo)
+	{
+		return (WorldChunkSnapshotCapture::capture_read_states(
+			sources[0] == nullptr ? nullptr : sources[0]->read_state,
+			sources[1] == nullptr ? nullptr : sources[1]->read_state,
+			sources[2] == nullptr ? nullptr : sources[2]->read_state,
+			sources[3] == nullptr ? nullptr : sources[3]->read_state,
+			sources[4] == nullptr ? nullptr : sources[4]->read_state,
+			sources[5] == nullptr ? nullptr : sources[5]->read_state,
+			sources[6] == nullptr ? nullptr : sources[6]->read_state,
+			sources[7] == nullptr ? nullptr : sources[7]->read_state,
+			sources[8] == nullptr ? nullptr : sources[8]->read_state,
+			snapshot, full_halo));
+	};
+	error_code = world.capture_remesh_snapshot(0, 0, live_snapshot);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = capture(state_snapshot, true);
+	bool blocks_match = live_snapshot.blocks == state_snapshot.blocks;
+	bool light_match = live_snapshot.existing_light == state_snapshot.existing_light;
+	bool borders_match = live_snapshot.west_border == state_snapshot.west_border
+		&& live_snapshot.east_border == state_snapshot.east_border
+		&& live_snapshot.north_border == state_snapshot.north_border
+		&& live_snapshot.south_border == state_snapshot.south_border;
+	bool halo_match = live_snapshot.lighting_blocks
+		== state_snapshot.lighting_blocks
+		&& live_snapshot.lighting_existing_light
+			== state_snapshot.lighting_existing_light;
+	if (error_code != FT_ERR_SUCCESS || !blocks_match || !light_match
+		|| !borders_match || !halo_match
+		|| live_snapshot.lighting_halo_valid != state_snapshot.lighting_halo_valid)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: immutable capture mismatch error=%d blocks=%d "
+			"light=%d borders=%d halo=%d halo_valid=%d/%d\n", error_code,
+			blocks_match ? 1 : 0, light_match ? 1 : 0,
+			borders_match ? 1 : 0, halo_match ? 1 : 0,
+			live_snapshot.lighting_halo_valid ? 1 : 0,
+			state_snapshot.lighting_halo_valid ? 1 : 0);
+		for (std::size_t index = 0U;
+			index < live_snapshot.lighting_blocks.size()
+				&& index < state_snapshot.lighting_blocks.size(); ++index)
+			if (live_snapshot.lighting_blocks[index]
+				!= state_snapshot.lighting_blocks[index])
+			{
+				std::fprintf(stderr,
+					"async-worldgen: halo block mismatch index=%zu live=%u state=%u\n",
+					index, live_snapshot.lighting_blocks[index],
+					state_snapshot.lighting_blocks[index]);
+				break ;
+			}
+		for (std::size_t index = 0U;
+			index < live_snapshot.lighting_existing_light.size()
+				&& index < state_snapshot.lighting_existing_light.size(); ++index)
+			if (live_snapshot.lighting_existing_light[index]
+				!= state_snapshot.lighting_existing_light[index])
+			{
+				std::fprintf(stderr,
+					"async-worldgen: halo light mismatch index=%zu live=%u state=%u\n",
+					index, live_snapshot.lighting_existing_light[index],
+					state_snapshot.lighting_existing_light[index]);
+				break ;
+			}
+		return (1);
+	}
+	game_voxel_chunk reconstructed;
+	std::vector<uint32_t> reconstructed_blocks = std::move(live_snapshot.blocks);
+	error_code = WorldChunkSnapshotReader::initialize_snapshot_chunk(
+		reconstructed, state_snapshot);
+	if (error_code != FT_ERR_SUCCESS
+		|| reconstructed.copy_blocks(reconstructed_blocks.data(),
+			static_cast<uint32_t>(reconstructed_blocks.size())) != FT_ERR_SUCCESS
+		|| reconstructed_blocks != state_snapshot.blocks || !reconstructed.is_dirty())
+		return (ApplicationError::fail("async-worldgen snapshot reconstruction", 1));
+	error_code = capture(border_snapshot, false);
+	const std::size_t border_cells = static_cast<std::size_t>(
+		2 * (GAME_VOXEL_CHUNK_WIDTH + GAME_VOXEL_CHUNK_DEPTH) + 4)
+		* GAME_VOXEL_CHUNK_HEIGHT;
+	if (error_code != FT_ERR_SUCCESS
+		|| border_snapshot.blocks != state_snapshot.blocks
+		|| border_snapshot.existing_light != state_snapshot.existing_light
+		|| border_snapshot.lighting_blocks.size() != border_cells
+		|| border_snapshot.lighting_existing_light.size() != border_cells
+		|| border_snapshot.lighting_ring_offsets.size()
+			!= state_snapshot.lighting_ring_offsets.size())
+		return (ApplicationError::fail("async-worldgen compact capture size", 1));
+	for (std::size_t index = 0U;
+		index < border_snapshot.lighting_ring_offsets.size(); ++index)
+	{
+		const uint32_t border_offset = border_snapshot.lighting_ring_offsets[index];
+		if (border_offset == UINT32_MAX)
+			continue ;
+		const uint32_t full_offset = state_snapshot.lighting_ring_offsets[index];
+		if (border_offset > border_cells - GAME_VOXEL_CHUNK_HEIGHT
+			|| full_offset == UINT32_MAX
+			|| full_offset > state_snapshot.lighting_blocks.size()
+				- GAME_VOXEL_CHUNK_HEIGHT)
+			return (ApplicationError::fail("async-worldgen compact capture offset", 1));
+		for (uint32_t y = 0U; y < GAME_VOXEL_CHUNK_HEIGHT; ++y)
+		{
+			if (border_snapshot.lighting_blocks[border_offset + y]
+					!= state_snapshot.lighting_blocks[full_offset + y]
+				|| border_snapshot.lighting_existing_light[border_offset + y]
+					!= state_snapshot.lighting_existing_light[full_offset + y])
+				return (ApplicationError::fail("async-worldgen compact capture cell", 1));
+		}
+	}
+	/* A snapshot lookup must faithfully return a published zero. Open
+	 * columns gain skylight in the solver during the appropriate revision. */
+	const int32_t top = GAME_VOXEL_CHUNK_HEIGHT - 1;
+	const std::size_t east_top = static_cast<std::size_t>(top)
+		* GAME_VOXEL_CHUNK_DEPTH;
+	const int32_t halo = WorldGenerationPipeline::LIGHT_SNAPSHOT_HALO;
+	const std::size_t east_ring = static_cast<std::size_t>(halo)
+		* static_cast<std::size_t>(GAME_VOXEL_CHUNK_WIDTH + halo * 2)
+		+ static_cast<std::size_t>(GAME_VOXEL_CHUNK_WIDTH + halo);
+	border_snapshot.east_border_valid = FT_TRUE;
+	border_snapshot.east_border[east_top] = GAME_VOXEL_AIR_BLOCK;
+	border_snapshot.lighting_existing_light[
+		border_snapshot.lighting_ring_offsets[east_ring]
+			+ static_cast<std::size_t>(top)] = 0U;
+	uint8_t packed_light = 255U;
+	error_code = WorldChunkSnapshotReader::lookup_snapshot_light(
+		&border_snapshot, GAME_VOXEL_CHUNK_WIDTH, top, 0, &packed_light);
+	if (error_code != FT_ERR_SUCCESS || packed_light != 0U)
+		return (ApplicationError::fail("async-worldgen published zero light", 1));
+	return (0);
+}
+
+bool WorldAsyncGenerationValidator::mesh_payload_is_valid(
+	const chunk_mesh &mesh) noexcept
+{
+	ft_size_t index;
+
+	if (mesh.indices.size() != mesh.solid_indices.size()
+		+ mesh.water_indices.size())
+	{
+		std::fprintf(stderr,
+			"async-worldgen: mesh partition mismatch indices=%zu solid=%zu "
+			"water=%zu\n", mesh.indices.size(), mesh.solid_indices.size(),
+			mesh.water_indices.size());
+		return (false);
+	}
+	if (!mesh.vertices.empty() && mesh.has_occupied_bounds == FT_FALSE)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: mesh vertices exist without occupied bounds\n");
+		return (false);
+	}
+	index = 0U;
+	while (index < mesh.solid_indices.size())
+	{
+		if (mesh.solid_indices[index] >= mesh.vertices.size())
+		{
+			std::fprintf(stderr,
+				"async-worldgen: solid index out of bounds index=%zu vertex=%zu\n",
+				static_cast<size_t>(mesh.solid_indices[index]),
+				mesh.vertices.size());
+			return (false);
+		}
+		index += 1U;
+	}
+	index = 0U;
+	while (index < mesh.water_indices.size())
+	{
+		if (mesh.water_indices[index] >= mesh.vertices.size())
+		{
+			std::fprintf(stderr,
+				"async-worldgen: water index out of bounds index=%zu vertex=%zu\n",
+				static_cast<size_t>(mesh.water_indices[index]),
+				mesh.vertices.size());
+			return (false);
+		}
+		index += 1U;
+	}
+	return (true);
+}
+
+bool WorldAsyncGenerationValidator::playable_area_is_ready(
+	const World &world) noexcept
+{
+	const int32_t radius = WorldCoordinates::render_distance_to_chunk_radius(
+		WorldCoordinates::MIN_RENDER_DISTANCE);
+	const int32_t radius_squared = radius * radius;
+	int32_t offset_z;
+
+	offset_z = -radius;
+	while (offset_z <= radius)
+	{
+		int32_t offset_x = -radius;
+		while (offset_x <= radius)
+		{
+			if (offset_x * offset_x + offset_z * offset_z <= radius_squared)
+			{
+				const WorldChunk *chunk = world.find_chunk(
+					world.center_chunk_x + offset_x,
+					world.center_chunk_z + offset_z);
+				if (chunk == nullptr
+					|| !WorldChunk::mesh_is_drawable(chunk->mesh)
+					|| !WorldAsyncGenerationValidator::mesh_payload_is_valid(
+						chunk->mesh))
+					return (false);
+			}
+			offset_x += 1;
+		}
+		offset_z += 1;
+	}
+	return (true);
+}
+
+void WorldAsyncGenerationValidator::report_playable_area_gaps(
+	const World &world) noexcept
+{
+	const int32_t radius = WorldCoordinates::render_distance_to_chunk_radius(
+		WorldCoordinates::MIN_RENDER_DISTANCE);
+	const int32_t radius_squared = radius * radius;
+	int32_t offset_z;
+	int32_t reported;
+
+	reported = 0;
+	offset_z = -radius;
+	while (offset_z <= radius)
+	{
+		int32_t offset_x = -radius;
+		while (offset_x <= radius)
+		{
+			if (offset_x * offset_x + offset_z * offset_z <= radius_squared)
+			{
+				const int32_t chunk_x = world.center_chunk_x + offset_x;
+				const int32_t chunk_z = world.center_chunk_z + offset_z;
+				const WorldChunk *chunk = world.find_chunk(chunk_x, chunk_z);
+				if (chunk == nullptr)
+				{
+					std::fprintf(stderr,
+						"async-worldgen: missing playable chunk=(%d,%d)\n",
+						chunk_x, chunk_z);
+					for (const WorldChunkStreamer::StreamCandidate &candidate
+						: world.chunk_streamer.stream_candidates_)
+					{
+						if (candidate.offset_x == offset_x
+							&& candidate.offset_z == offset_z)
+						{
+							std::fprintf(stderr,
+								"async-worldgen: candidate state=%d request=%llu "
+								"queued_frame=%llu retry=%d last_error=%d\n",
+								static_cast<int>(candidate.state),
+								static_cast<unsigned long long>(candidate.request_id),
+								static_cast<unsigned long long>(candidate.queued_frame),
+								candidate.retry_count, candidate.last_error);
+							break ;
+						}
+					}
+					reported += 1;
+				}
+				else if (chunk->mesh.has_occupied_bounds == FT_FALSE
+					|| chunk->mesh.vertices.empty()
+					|| (chunk->mesh.solid_indices.empty()
+						&& chunk->mesh.water_indices.empty()))
+				{
+					std::fprintf(stderr,
+						"async-worldgen: non-drawable playable chunk=(%d,%d) "
+						"occupied=%d vertices=%zu solid=%zu water=%zu\n",
+						chunk_x, chunk_z,
+						chunk->mesh.has_occupied_bounds == FT_TRUE ? 1 : 0,
+						chunk->mesh.vertices.size(),
+						chunk->mesh.solid_indices.size(),
+						chunk->mesh.water_indices.size());
+					reported += 1;
+				}
+				else
+				{
+					bool nonzero_light = false;
+					for (int32_t light_z = 0;
+						light_z < GAME_VOXEL_CHUNK_DEPTH && !nonzero_light;
+						++light_z)
+						for (int32_t light_y = 0;
+							light_y < GAME_VOXEL_CHUNK_HEIGHT && !nonzero_light;
+							++light_y)
+							for (int32_t light_x = 0;
+								light_x < GAME_VOXEL_CHUNK_WIDTH; ++light_x)
+							{
+								if (chunk->light.get(light_x, light_y, light_z) != 0U)
+								{
+									nonzero_light = true;
+									break ;
+								}
+							}
+					if (!chunk->light_ready_for_render
+						|| !chunk->light_buffer_is_valid()
+						|| !nonzero_light)
+					{
+						std::fprintf(stderr,
+							"async-worldgen: invalid playable light baseline "
+							"chunk=(%d,%d) ready=%d valid=%d nonzero=%d "
+							"content=%u light=%u input=%u computed=%u\n",
+							chunk_x, chunk_z,
+							chunk->light_ready_for_render ? 1 : 0,
+							chunk->light_buffer_is_valid() ? 1 : 0,
+							nonzero_light ? 1 : 0,
+							chunk->content_version, chunk->light_version,
+							chunk->light_input_version,
+							chunk->computed_light_input_version);
+						reported += 1;
+					}
+				}
+			}
+			offset_x += 1;
+		}
+		offset_z += 1;
+	}
+	if (reported == 0)
+		std::fprintf(stderr,
+			"async-worldgen: playable area gap could not be classified\n");
+}
+
+const WorldChunk *WorldAsyncGenerationValidator::stream_until_ready(World &world,
+	int32_t *frame, bool *startup_edit_applied,
+	std::size_t *remesh_queue_peak,
+	int32_t *first_visible_mesh_frame, uint64_t *max_update_us,
+	bool *interactive_priority_observed,
+	bool *generation_progress_with_priority_pending) noexcept
+{
+	/* Require the same center-plus-playable-ring contract used by loading. */
+	const int32_t target_chunk_x = -1;
+	const int32_t target_chunk_z = 0;
+	World::StreamDiagnostics initial_diagnostics;
+	int32_t error_code;
+	int32_t priority_edit_rounds;
+	int32_t initial_loaded_chunk_count;
+
+	if (startup_edit_applied == nullptr || remesh_queue_peak == nullptr
+		|| first_visible_mesh_frame == nullptr || max_update_us == nullptr
+		|| interactive_priority_observed == nullptr
+		|| generation_progress_with_priority_pending == nullptr)
+		return (nullptr);
+	*startup_edit_applied = false;
+	*remesh_queue_peak = 0U;
+	*first_visible_mesh_frame = -1;
+	*max_update_us = 0U;
+	*interactive_priority_observed = false;
+	*generation_progress_with_priority_pending = false;
+	initial_diagnostics = world.stream_diagnostics();
+	initial_loaded_chunk_count = world.loaded_chunk_count;
+	priority_edit_rounds = 0;
+
+	while ((!WorldAsyncGenerationValidator::playable_area_is_ready(world)
+			|| world.find_chunk(target_chunk_x, target_chunk_z) == nullptr
+			|| !WorldChunk::mesh_is_drawable(world.find_chunk(target_chunk_x,
+				target_chunk_z)->mesh))
+		&& *frame < ASYNC_WORLDGEN_MAX_STARTUP_FRAMES)
+	{
+		/* Repeatedly exercise the same priority edit path while generation and
+		 * ordinary arrival remeshes are still active.  The interval is long
+		 * enough for the request to reach the worker, but the repeated rounds
+		 * keep interactive work pending long enough to expose starvation. */
+		if (*frame >= 2 && (*frame - 2)
+			% ASYNC_STARTUP_PRIORITY_EDIT_INTERVAL == 0
+			&& priority_edit_rounds < ASYNC_STARTUP_PRIORITY_EDIT_ROUNDS)
+		{
+			const WorldChunk *edit_chunk = world.find_chunk(0, 0);
+			if (edit_chunk != nullptr && edit_chunk->initialized)
+			{
+				int32_t edit_z = 0;
+				while (edit_z < GAME_VOXEL_CHUNK_DEPTH
+					&& priority_edit_rounds
+					< ASYNC_STARTUP_PRIORITY_EDIT_ROUNDS)
+				{
+					int32_t edit_y = 0;
+					while (edit_y < GAME_VOXEL_CHUNK_HEIGHT
+						&& priority_edit_rounds
+						< ASYNC_STARTUP_PRIORITY_EDIT_ROUNDS)
+					{
+						int32_t edit_x = 0;
+						while (edit_x < GAME_VOXEL_CHUNK_WIDTH
+							&& priority_edit_rounds
+							< ASYNC_STARTUP_PRIORITY_EDIT_ROUNDS)
+						{
+							uint32_t block_id = GAME_VOXEL_AIR_BLOCK;
+							if (edit_chunk->chunk.read_block(edit_x, edit_y,
+								edit_z, &block_id) == FT_ERR_SUCCESS
+								&& block_id != GAME_VOXEL_AIR_BLOCK
+								&& voxel_block_is_breakable(block_id) != FT_FALSE)
+							{
+								const int32_t world_x = edit_chunk->world_x + edit_x;
+								const int32_t world_z = edit_chunk->world_z + edit_z;
+								bool edit_sequence_succeeded;
+
+								edit_sequence_succeeded = true;
+								int32_t edit_round = 0;
+								while (edit_round < ASYNC_STARTUP_EDIT_REPETITIONS
+									&& edit_sequence_succeeded)
+								{
+									if (world.delete_block_at(world_x, edit_y,
+										world_z) != FT_ERR_SUCCESS
+										|| world.place_block_at(world_x, edit_y,
+										world_z, block_id) != FT_ERR_SUCCESS)
+										edit_sequence_succeeded = false;
+									edit_round += 1;
+								}
+				if (edit_sequence_succeeded)
+				{
+					*startup_edit_applied = true;
+					*interactive_priority_observed = true;
+					priority_edit_rounds += 1;
+								}
+							}
+							edit_x += 1;
+						}
+						edit_y += 1;
+					}
+					edit_z += 1;
+				}
+			}
+		}
+		const std::chrono::steady_clock::time_point update_start =
+			std::chrono::steady_clock::now();
 		error_code = world.update_around(0.0, 0.0, 4,
 				WorldCoordinates::REQUIRED_VISIBLE_DISTANCE);
-		if (error_code != FT_ERR_SUCCESS)
+		World::StreamDiagnostics current_diagnostics =
+			world.stream_diagnostics();
+		if (current_diagnostics.remesh_queue_peak > *remesh_queue_peak)
+			*remesh_queue_peak = current_diagnostics.remesh_queue_peak;
+		if (current_diagnostics.interactive_remesh_queue_depth
+			> current_diagnostics.remesh_priority_queue_depth
+			|| (current_diagnostics.remesh_priority_queue_depth == 0U
+				&& current_diagnostics.oldest_remesh_queue_age != 0U)
+			|| current_diagnostics.oldest_remesh_queue_age
+				> current_diagnostics.frame)
+		{
+			std::fprintf(stderr,
+				"async-worldgen: invalid remesh queue metrics frame=%llu "
+				"depth=%zu interactive=%zu oldest=%llu\n",
+				static_cast<unsigned long long>(current_diagnostics.frame),
+				current_diagnostics.remesh_priority_queue_depth,
+				current_diagnostics.interactive_remesh_queue_depth,
+				static_cast<unsigned long long>(
+					current_diagnostics.oldest_remesh_queue_age));
 			return (nullptr);
-		std::this_thread::yield();
+		}
+		if (current_diagnostics.interactive_remesh_queue_depth > 0U)
+		{
+			*interactive_priority_observed = true;
+			if (world.loaded_chunk_count > initial_loaded_chunk_count
+				|| current_diagnostics.progress_frame
+					> initial_diagnostics.progress_frame)
+				*generation_progress_with_priority_pending = true;
+		}
+		if (*startup_edit_applied
+			&& world.loaded_chunk_count > initial_loaded_chunk_count)
+			*generation_progress_with_priority_pending = true;
+		if (*first_visible_mesh_frame < 0
+			&& current_diagnostics.playable_drawable_count
+				> initial_diagnostics.playable_drawable_count)
+			*first_visible_mesh_frame = *frame;
+		const uint64_t update_us = static_cast<uint64_t>(
+			std::chrono::duration_cast<std::chrono::microseconds>(
+				std::chrono::steady_clock::now() - update_start).count());
+		if (*max_update_us < update_us)
+			*max_update_us = update_us;
+		if (error_code != FT_ERR_SUCCESS)
+		{
+			World::StreamDiagnostics diagnostics = current_diagnostics;
+			std::fprintf(stderr,
+				"async-worldgen: update failed frame=%d error=%d "
+				"pending=%zu ready=%zu active=%zu failed=%zu retry=%zu last_error=%d\n",
+				*frame, error_code, diagnostics.pending_count,
+				diagnostics.ready_count, diagnostics.active_generation_count,
+				diagnostics.failed_count,
+				diagnostics.retryable_count, diagnostics.last_error);
+			return (nullptr);
+		}
+		if (update_us >= ASYNC_WORLDGEN_MAX_UPDATE_US)
+		{
+			World::StreamDiagnostics diagnostics = current_diagnostics;
+			std::fprintf(stderr,
+				"async-worldgen: update budget exceeded frame=%d duration_us=%llu "
+				"loaded=%d pending=%zu ready=%zu active=%zu failed=%zu retry=%zu "
+				"last_error=%d\n", *frame,
+				static_cast<unsigned long long>(update_us),
+				world.loaded_chunk_count, diagnostics.pending_count,
+				diagnostics.ready_count, diagnostics.active_generation_count,
+				diagnostics.failed_count,
+				diagnostics.retryable_count, diagnostics.last_error);
+			return (nullptr);
+		}
+		if ((*frame % 100) == 0)
+		{
+			World::StreamDiagnostics diagnostics = current_diagnostics;
+			std::fprintf(stderr,
+				"async-worldgen: progress frame=%d loaded=%d pending=%zu "
+				"ready=%zu active=%zu failed=%zu retry=%zu result_age_ns=%llu\n", *frame,
+				world.loaded_chunk_count, diagnostics.pending_count,
+				diagnostics.ready_count, diagnostics.active_generation_count,
+				diagnostics.failed_count,
+				diagnostics.retryable_count,
+				static_cast<unsigned long long>(
+					diagnostics.oldest_result_age_nanoseconds));
+		}
+		/* Do not busy-spin while the persistent workers are generating. A
+		 * tight validator loop can otherwise consume the scheduling opportunity
+		 * needed by the very workers this test is intended to exercise. */
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		*frame += 1;
 	}
-	return (world.find_chunk(-4, 2));
+	return (world.find_chunk(target_chunk_x, target_chunk_z));
 }
 
 void WorldAsyncGenerationValidator::report_failure(const World &world,
@@ -87,39 +1732,208 @@ void WorldAsyncGenerationValidator::report_failure(const World &world,
 		"async-worldgen: pending=%zu failed=%zu retry=%zu error=%d\n",
 		diagnostics.pending_count, diagnostics.failed_count,
 		diagnostics.retryable_count, diagnostics.last_error);
+	std::fprintf(stderr,
+		"async-worldgen: remesh_priority=%zu interactive=%zu oldest=%llu "
+		"capture=%zu pipeline=%zu remesh_in_flight=%zu\n",
+		diagnostics.remesh_priority_queue_depth,
+		diagnostics.interactive_remesh_queue_depth,
+		static_cast<unsigned long long>(diagnostics.oldest_remesh_queue_age),
+		world.chunk_streamer.remesh_capture_in_flight_.load(),
+		world.chunk_streamer.pipeline().queued_count(),
+		world.chunk_streamer.pipeline().remesh_in_flight_count());
+	if (!WorldAsyncGenerationValidator::playable_area_is_ready(world))
+	{
+		std::fprintf(stderr,
+			"async-worldgen: playable startup area is incomplete around "
+			"center=(%d,%d)\n", world.center_chunk_x, world.center_chunk_z);
+		WorldAsyncGenerationValidator::report_playable_area_gaps(world);
+	}
 }
 
 int WorldAsyncGenerationValidator::validate() const
 {
-	World world;
-	game_voxel_chunk expected;
+	/* World and game_voxel_chunk both own sizeable voxel storage.  Keeping
+	 * them as automatic variables makes this validator exceed the default
+	 * Windows thread stack after the lighting buffers were expanded.  The
+	 * resulting 0xC00000FD looked like a generation hang because no validator
+	 * output was flushed before the process died. */
+	std::unique_ptr<World> world_storage(new (std::nothrow) World());
+	std::unique_ptr<game_voxel_chunk> expected_storage(
+		new (std::nothrow) game_voxel_chunk());
+	World *world_pointer;
+	game_voxel_chunk *expected_pointer;
 	const WorldChunk *generated;
 	int32_t error_code;
 	int32_t frame;
+	int32_t initial_loaded_chunk_count;
+	int32_t final_loaded_chunk_count;
+	std::size_t remesh_queue_peak;
+	int32_t first_visible_mesh_frame;
+	uint64_t max_update_us;
+	bool interactive_priority_observed;
+	bool generation_progress_with_priority_pending;
+	World::StreamDiagnostics final_diagnostics;
 
-	error_code = world.initialize("async-validator");
+	if (!world_storage || !expected_storage)
+		return (1);
+	world_pointer = world_storage.get();
+	expected_pointer = expected_storage.get();
+
+	error_code = validate_read_state_edit_storage(*world_pointer);
+	if (error_code != 0)
+		return (error_code);
+	error_code = WorldAsyncGenerationValidator::validate_diagonal_lighting_halo();
+	if (error_code != 0)
+		return (error_code);
+	error_code = WorldAsyncGenerationValidator::validate_cardinal_lighting_propagation();
+	if (error_code != 0)
+		return (error_code);
+	error_code = WorldAsyncGenerationValidator::validate_diagonal_lighting_propagation();
+	if (error_code != 0)
+		return (error_code);
+	error_code = WorldAsyncGenerationValidator::validate_light_scheduler_configuration();
+	if (error_code != 0)
+		return (error_code);
+	error_code = WorldAsyncGenerationValidator::validate_remesh_priority_metrics();
+	if (error_code != 0)
+		return (error_code);
+	error_code = WorldAsyncGenerationValidator::validate_incremental_seed_coalescing();
+	if (error_code != 0)
+		return (error_code);
+	error_code = WorldAsyncGenerationValidator::validate_missing_neighbor_mesh_boundary();
+	if (error_code != 0)
+		return (error_code);
+	error_code = WorldAsyncGenerationValidator::validate_evicted_neighbor_invalidation();
+	if (error_code != 0)
+		return (error_code);
+	error_code = validate_saved_chunk_streaming(*world_pointer);
+	if (error_code != 0)
+		return (error_code);
+	error_code = world_pointer->initialize("async-validator");
 	if (error_code != FT_ERR_SUCCESS)
 	{
 		std::fprintf(stderr, "async-worldgen: initialize failed error=%d\n",
 			error_code);
 		return (1);
 	}
-	frame = 0;
-	generated = WorldAsyncGenerationValidator::stream_until_ready(world,
-			&frame);
-	if (generated == nullptr || expected.initialize() != FT_ERR_SUCCESS
-		|| terrain_generate_chunk(expected, -64, 32,
-			"async-validator") != FT_ERR_SUCCESS
-		|| !WorldAsyncGenerationValidator::chunks_equal(generated->chunk,
-			expected))
+	if (WorldAsyncGenerationValidator::validate_immutable_capture_equivalence(
+		*world_pointer) != 0)
 	{
-		WorldAsyncGenerationValidator::report_failure(world, frame);
-		(void)expected.destroy();
-		world.destroy();
+		std::fprintf(stderr,
+			"async-worldgen: immutable capture equivalence failed\n");
+		world_pointer->destroy();
 		return (1);
 	}
-	(void)expected.destroy();
-	world.destroy();
-	std::printf("async-worldgen: ok frame=%d\n", frame);
+	initial_loaded_chunk_count = world_pointer->loaded_chunk_count;
+	frame = 0;
+	bool startup_edit_applied = false;
+	generated = WorldAsyncGenerationValidator::stream_until_ready(*world_pointer,
+			&frame, &startup_edit_applied, &remesh_queue_peak,
+			&first_visible_mesh_frame, &max_update_us,
+			&interactive_priority_observed,
+			&generation_progress_with_priority_pending);
+	if (generated == nullptr
+		|| frame >= ASYNC_WORLDGEN_MAX_STARTUP_FRAMES
+		|| world_pointer->loaded_chunk_count <= initial_loaded_chunk_count
+		|| !startup_edit_applied
+		|| !interactive_priority_observed
+		|| !generation_progress_with_priority_pending
+		|| first_visible_mesh_frame < 0
+		|| (generated != nullptr
+			&& !WorldAsyncGenerationValidator::mesh_payload_is_valid(
+				generated->mesh))
+		|| expected_pointer->initialize() != FT_ERR_SUCCESS
+		|| voxel_generate_chunk(*expected_pointer, -16, 0,
+			"async-validator") != FT_ERR_SUCCESS
+		|| !WorldAsyncGenerationValidator::chunks_equal(generated->chunk,
+			*expected_pointer))
+	{
+		if (!startup_edit_applied)
+			std::fprintf(stderr,
+				"async-worldgen: startup edit could not be applied while loading\n");
+		WorldAsyncGenerationValidator::report_failure(*world_pointer, frame);
+		error_code = expected_pointer->destroy();
+		if (error_code != FT_ERR_SUCCESS)
+			std::fprintf(stderr,
+				"async-worldgen: expected cleanup failed error=%d\n", error_code);
+		world_pointer->destroy();
+		return (1);
+	}
+	final_loaded_chunk_count = world_pointer->loaded_chunk_count;
+	final_diagnostics = world_pointer->stream_diagnostics();
+	error_code = expected_pointer->destroy();
+	if (error_code != FT_ERR_SUCCESS)
+	{
+		std::fprintf(stderr,
+			"async-worldgen: expected cleanup failed error=%d\n", error_code);
+		return (1);
+	}
+	world_pointer->destroy();
+	std::printf("async-worldgen: ok frame=%d initial_loaded=%d final_loaded=%d\n",
+		frame, initial_loaded_chunk_count, final_loaded_chunk_count);
+	std::printf("async-worldgen: startup_edit=1 remesh_queue_peak=%zu "
+		"stale_result_count=%zu stale_stream=%zu stale_remesh=%zu "
+		"incremental_remesh=%llu full_remesh=%llu geometry_only=%llu "
+		"canceled_remesh=%llu "
+		"first_visible_mesh_frame=%d max_update_us=%llu "
+		"startup_budget_frames=%d\n",
+		remesh_queue_peak,
+		final_diagnostics.stale_result_count,
+		final_diagnostics.stale_stream_result_count,
+		final_diagnostics.stale_remesh_result_count,
+		static_cast<unsigned long long>(
+			final_diagnostics.remesh_incremental_completed_count),
+		static_cast<unsigned long long>(
+			final_diagnostics.remesh_full_completed_count),
+		static_cast<unsigned long long>(
+			final_diagnostics.remesh_geometry_only_count),
+		static_cast<unsigned long long>(
+			final_diagnostics.remesh_canceled_count),
+		first_visible_mesh_frame,
+		static_cast<unsigned long long>(max_update_us),
+		ASYNC_WORLDGEN_MAX_STARTUP_FRAMES);
+	std::printf("async-worldgen-metrics: {\"frames\":%d,"
+		"\"initial_loaded\":%d,\"final_loaded\":%d,"
+		"\"remesh_queue_peak\":%zu,\"priority_queue_depth\":%zu,"
+		"\"starvation_promotions\":%llu,"
+		"\"interactive_queue_depth\":%zu,\"oldest_remesh_age\":%llu,"
+		"\"snapshot_bytes\":%llu,\"capture_ns\":%llu,"
+		"\"capture_count\":%llu,"
+		"\"scanned_cells\":%llu,\"propagated_cells\":%llu,"
+		"\"light_queue_peak\":%llu,\"remesh_completed\":%llu,"
+		"\"incremental_remesh\":%llu,\"full_remesh\":%llu,"
+		"\"geometry_only\":%llu,\"canceled_remesh\":%llu,"
+		"\"stale_results\":%zu,\"stale_stream\":%zu,"
+		"\"stale_remesh\":%zu,\"stale_capture\":%zu,"
+		"\"max_update_us\":%llu,\"first_visible_mesh_frame\":%d}\n",
+		frame, initial_loaded_chunk_count, final_loaded_chunk_count,
+		remesh_queue_peak,
+		final_diagnostics.remesh_priority_queue_depth,
+		static_cast<unsigned long long>(
+			final_diagnostics.remesh_starvation_promotions),
+		final_diagnostics.interactive_remesh_queue_depth,
+		static_cast<unsigned long long>(
+			final_diagnostics.oldest_remesh_queue_age),
+		static_cast<unsigned long long>(final_diagnostics.remesh_snapshot_bytes),
+		static_cast<unsigned long long>(
+			final_diagnostics.remesh_capture_duration_nanoseconds),
+		static_cast<unsigned long long>(final_diagnostics.remesh_capture_count),
+		static_cast<unsigned long long>(final_diagnostics.remesh_scanned_cells),
+		static_cast<unsigned long long>(final_diagnostics.remesh_propagated_cells),
+		static_cast<unsigned long long>(final_diagnostics.remesh_light_queue_peak),
+		static_cast<unsigned long long>(final_diagnostics.remesh_completed_count),
+		static_cast<unsigned long long>(
+			final_diagnostics.remesh_incremental_completed_count),
+		static_cast<unsigned long long>(
+			final_diagnostics.remesh_full_completed_count),
+		static_cast<unsigned long long>(
+			final_diagnostics.remesh_geometry_only_count),
+		static_cast<unsigned long long>(final_diagnostics.remesh_canceled_count),
+		final_diagnostics.stale_result_count,
+		final_diagnostics.stale_stream_result_count,
+		final_diagnostics.stale_remesh_result_count,
+		final_diagnostics.stale_remesh_capture_count,
+		static_cast<unsigned long long>(max_update_us),
+		first_visible_mesh_frame);
 	return (0);
 }

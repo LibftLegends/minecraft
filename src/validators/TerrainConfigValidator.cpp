@@ -20,48 +20,48 @@ TerrainConfigValidator &TerrainConfigValidator::operator=(const TerrainConfigVal
 	return (*this);
 }
 
-int TerrainConfigValidator::validate_biome_size_overrides(terrain_generation_config &config) noexcept
+int TerrainConfigValidator::validate_biome_size_overrides(voxel_generation_config &config) noexcept
 {
 	if (config.enable_biome_size_control != FT_TRUE
-		|| config.biome_size_min != TERRAIN_BIOME_ZONE_WIDTH
-		|| config.biome_size_max != TERRAIN_BIOME_ZONE_WIDTH
+		|| config.biome_size_min != VOXEL_BIOME_ZONE_WIDTH
+		|| config.biome_size_max != VOXEL_BIOME_ZONE_WIDTH
 		|| config.set_biome_size_range(1024, 2048) != FT_ERR_SUCCESS
 		|| config.set_biome_size_range(2048, 1024) == FT_ERR_SUCCESS
-		|| config.set_biome_size_range_for_biome(TERRAIN_BIOME_MOUNTAINS, 16,
+		|| config.set_biome_size_range_for_biome(VOXEL_BIOME_MOUNTAINS, 16,
 			64) != FT_ERR_SUCCESS
-		|| config.set_biome_size_override_enabled(TERRAIN_BIOME_MOUNTAINS,
+		|| config.set_biome_size_override_enabled(VOXEL_BIOME_MOUNTAINS,
 			FT_FALSE) != FT_ERR_SUCCESS
-		|| config.set_biome_size_override_enabled(TERRAIN_BIOME_MOUNTAINS,
+		|| config.set_biome_size_override_enabled(VOXEL_BIOME_MOUNTAINS,
 			FT_TRUE) != FT_ERR_SUCCESS)
 		return (1);
-	config.set_biome_size_override_enabled(TERRAIN_BIOME_MOUNTAINS, FT_TRUE);
+	config.set_biome_size_override_enabled(VOXEL_BIOME_MOUNTAINS, FT_TRUE);
 	return (0);
 }
 
-int TerrainConfigValidator::validate_biome_zone_widths(terrain_generation_config &config) noexcept
+int TerrainConfigValidator::validate_biome_zone_widths(voxel_generation_config &config) noexcept
 {
 	uint64_t validator_seed;
 	int32_t biome_width;
 	int32_t mountain_width;
 
 	validator_seed = UINT64_C(0xC0FFEE1234567890);
-	biome_width = terrain_get_biome_zone_width(config, validator_seed);
-	mountain_width = terrain_get_biome_zone_width_for_biome(config,
-			validator_seed, TERRAIN_BIOME_MOUNTAINS);
+	biome_width = voxel_get_biome_zone_width(config, validator_seed);
+	mountain_width = voxel_get_biome_zone_width_for_biome(config,
+			validator_seed, VOXEL_BIOME_MOUNTAINS);
 	if (biome_width < 1024 || biome_width > 2048 || mountain_width < 16
 		|| mountain_width > 64
 		|| config.set_biome_size_control_enabled(FT_FALSE) != FT_ERR_SUCCESS
-		|| terrain_get_biome_zone_width(config, validator_seed) != 128
+		|| voxel_get_biome_zone_width(config, validator_seed) != 128
 		|| config.set_biome_size_control_enabled(FT_TRUE) != FT_ERR_SUCCESS
-		|| terrain_select_biome(config, validator_seed, 0,
-			0) != terrain_select_biome(config, validator_seed, 0, 0))
+		|| voxel_select_biome(config, validator_seed, 0,
+			0) != voxel_select_biome(config, validator_seed, 0, 0))
 		return (1);
 	return (0);
 }
 
-void TerrainConfigValidator::configure_single_biome(terrain_generation_config &config) noexcept
+void TerrainConfigValidator::configure_single_biome(voxel_generation_config &config) noexcept
 {
-	terrain_biome_profile profile;
+	voxel_biome_profile profile;
 
 	config.set_biome_count(1U);
 	config.set_sea_level(0);
@@ -70,26 +70,26 @@ void TerrainConfigValidator::configure_single_biome(terrain_generation_config &c
 	profile.height_variation = 0;
 	profile.topsoil_depth = 0;
 	config.biomes[0].set_profile(profile);
-	config.biomes[0].set_block_palette(TERRAIN_GENERATOR_SAND_BLOCK,
-		TERRAIN_GENERATOR_SAND_BLOCK, TERRAIN_GENERATOR_STONE_BLOCK);
+	config.biomes[0].set_block_palette(VOXEL_GENERATOR_SAND_BLOCK,
+		VOXEL_GENERATOR_SAND_BLOCK, VOXEL_GENERATOR_STONE_BLOCK);
 	config.biomes[0].set_decoration_policy(FT_FALSE, FT_FALSE, 6U, 18U);
 }
 
-int TerrainConfigValidator::verify_generated_block(const terrain_generation_config &config) noexcept
+int TerrainConfigValidator::verify_generated_block(const voxel_generation_config &config) noexcept
 {
 	game_voxel_chunk chunk;
 	uint32_t block_id;
 
 	if (chunk.initialize() != FT_ERR_SUCCESS)
 		return (1);
-	if (terrain_generate_chunk(chunk, 0, 0, "config-validator",
+	if (voxel_generate_chunk(chunk, 0, 0, "config-validator",
 			config) != FT_ERR_SUCCESS)
 	{
 		(void)chunk.destroy();
 		return (1);
 	}
 	if (chunk.read_block(0, 32, 0, &block_id) != FT_ERR_SUCCESS
-		|| block_id != TERRAIN_GENERATOR_SAND_BLOCK)
+		|| block_id != VOXEL_GENERATOR_SAND_BLOCK)
 	{
 		(void)chunk.destroy();
 		return (1);
@@ -100,9 +100,9 @@ int TerrainConfigValidator::verify_generated_block(const terrain_generation_conf
 
 int TerrainConfigValidator::validate() const
 {
-	terrain_generation_config config;
+	voxel_generation_config config;
 
-	terrain_default_generation_config(config);
+	voxel_default_generation_config(config);
 	if (TerrainConfigValidator::validate_biome_size_overrides(config) != 0
 		|| TerrainConfigValidator::validate_biome_zone_widths(config) != 0)
 		return (1);

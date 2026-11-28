@@ -3,6 +3,7 @@
 
 # include "../../src/edits/DeleteBlockCommand.hpp"
 # include "../../src/edits/PlaceBlockCommand.hpp"
+# include "../../src/world/WorldTerrainChunkStore.hpp"
 # include "../ft_vox.hpp"
 
 class	World;
@@ -19,6 +20,13 @@ class WorldBlockEditor
 		int32_t world_y, int32_t world_z);
 	static int32_t place_block_at(World &world, int32_t world_x,
 		int32_t world_y, int32_t world_z, uint32_t block_id);
+	static int32_t replace_fluid_source(World &world, int32_t world_x,
+		int32_t world_y, int32_t world_z, uint32_t expected_block_id,
+		uint32_t replacement_block_id, uint64_t expected_voxel_revision);
+	static int32_t replace_block_state(World &world, int32_t world_x,
+		int32_t world_y, int32_t world_z, uint32_t expected_block_id,
+		uint32_t replacement_block_id, uint64_t expected_voxel_revision,
+		WorldTerrainChunkStore::PreparedEdit *prepared = nullptr);
 	static int32_t undo(World &world);
 	static int32_t redo(World &world);
 };

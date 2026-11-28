@@ -19,6 +19,7 @@ class WorldRegenerationProgress
 	bool is_active_for(uint64_t relevance_epoch) const noexcept;
 	void set_job_count(std::size_t job_count) noexcept;
 	std::size_t job_count() const noexcept;
+	std::size_t completed_job_count() const noexcept;
 	void record_completed() noexcept;
 	void record_error(int32_t error_code) noexcept;
 	void record_skipped() noexcept;

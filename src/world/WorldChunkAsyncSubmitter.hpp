@@ -11,6 +11,7 @@ class WorldChunkAsyncSubmitter
 	~WorldChunkAsyncSubmitter();
 	WorldChunkAsyncSubmitter &operator=(const WorldChunkAsyncSubmitter &other);
 
+	static int32_t submit_dirty_remeshes(WorldChunkStreamer &streamer) noexcept;
 	static int32_t stream_chunks_async(WorldChunkStreamer &streamer,
 		int32_t stream_radius, int32_t budget, int32_t *generated) noexcept;
 
@@ -21,7 +22,6 @@ class WorldChunkAsyncSubmitter
 	static bool process_async_candidate(WorldChunkStreamer &streamer,
 		WorldChunkStreamer::StreamCandidate &candidate, int32_t *submitted,
 		int32_t budget) noexcept;
-	static void submit_dirty_remeshes(WorldChunkStreamer &streamer) noexcept;
 };
 
 #endif

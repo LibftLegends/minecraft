@@ -134,17 +134,33 @@ void DebugOverlayRenderer::draw_overlay_info(ft_render_framebuffer &fb,
 
 void DebugOverlayRenderer::draw_revision_cell(ft_render_framebuffer &fb,
 	int32_t x, int32_t z, int32_t radius, int32_t cell, int32_t origin_x,
-	int32_t origin_y, uint8_t state)
+	int32_t origin_y, uint8_t state, uint8_t protection_reasons,
+	bool feature_highlight, bool barriers_active)
 {
 	uint32_t	color;
 	int32_t		px;
 	int32_t		py;
 
 	color = RendererColor::rgba(70U, 70U, 70U);
-	if (state == 1U)
-		color = RendererColor::rgba(210U, 75U, 75U);
+	if (feature_highlight)
+		color = RendererColor::rgba(45U, 205U, 220U);
+	else if (state == 1U)
+	{
+		if ((protection_reasons & RenderDebug::REVISION_PROTECTION_OCCUPIED)
+			!= 0U)
+			color = RendererColor::rgba(230U, 135U, 45U);
+		else if ((protection_reasons & RenderDebug::REVISION_PROTECTION_LOOM)
+			!= 0U)
+			color = RendererColor::rgba(155U, 90U, 205U);
+		else if ((protection_reasons & RenderDebug::REVISION_PROTECTION_MANUAL)
+			!= 0U)
+			color = RendererColor::rgba(210U, 75U, 75U);
+		else
+			color = RendererColor::rgba(145U, 55U, 65U);
+	}
 	else if (state == 2U)
-		color = RendererColor::rgba(75U, 190U, 85U);
+		color = barriers_active ? RendererColor::rgba(65U, 225U, 235U)
+			: RendererColor::rgba(75U, 190U, 85U);
 	else if (state == 3U)
 		color = RendererColor::rgba(220U, 185U, 70U);
 	px = origin_x + (x + radius) * cell;
@@ -154,6 +170,25 @@ void DebugOverlayRenderer::draw_revision_cell(ft_render_framebuffer &fb,
 			if (px + sx >= 0 && px + sx < fb.width && py + sy >= 0 && py
 				+ sy < fb.height)
 				fb.pixels[(py + sy) * fb.width + px + sx] = color;
+	if (barriers_active && state == 2U)
+	{
+		const uint32_t glow = RendererColor::rgba(225U, 255U, 255U);
+		for (int32_t offset = 0; offset < cell - 1; ++offset)
+		{
+			const int32_t border_x[2] = {px + offset, px + offset};
+			const int32_t border_y[2] = {py, py + cell - 2};
+			for (int32_t edge = 0; edge < 2; ++edge)
+				if (border_x[edge] >= 0 && border_x[edge] < fb.width
+					&& border_y[edge] >= 0 && border_y[edge] < fb.height)
+					fb.pixels[border_y[edge] * fb.width + border_x[edge]] = glow;
+			const int32_t side_x[2] = {px, px + cell - 2};
+			const int32_t side_y[2] = {py + offset, py + offset};
+			for (int32_t edge = 0; edge < 2; ++edge)
+				if (side_x[edge] >= 0 && side_x[edge] < fb.width
+					&& side_y[edge] >= 0 && side_y[edge] < fb.height)
+					fb.pixels[side_y[edge] * fb.width + side_x[edge]] = glow;
+		}
+	}
 }
 
 void DebugOverlayRenderer::draw_revision_grid(ft_render_framebuffer &fb,
@@ -162,6 +197,8 @@ void DebugOverlayRenderer::draw_revision_grid(ft_render_framebuffer &fb,
 {
 	int32_t	map_index;
 	uint8_t	state;
+	uint8_t	protection_reasons;
+	bool feature_highlight;
 
 	for (int32_t z = -radius; z <= radius; ++z)
 	{
@@ -169,8 +206,12 @@ void DebugOverlayRenderer::draw_revision_grid(ft_render_framebuffer &fb,
 		{
 			map_index = (z + radius) * (radius * 2 + 1) + x + radius;
 			state = d->revision_map[map_index];
+			protection_reasons = d->revision_protection_reasons[map_index];
+			feature_highlight =
+				d->revision_feature_highlights[map_index] != 0U;
 			draw_revision_cell(fb, x, z, radius, cell, origin_x, origin_y,
-				state);
+				state, protection_reasons, feature_highlight,
+				d->revision_barriers_active);
 		}
 	}
 }
@@ -185,7 +226,8 @@ void DebugOverlayRenderer::draw_revision_preview(ft_render_framebuffer &fb,
 	char	text[128];
 
 	if (d == nullptr || !d->revision_preview_visible
-		|| d->revision_map_radius == 0)
+		|| d->revision_map_radius == 0
+		|| d->revision_map_radius > RenderDebug::REVISION_PREVIEW_RADIUS)
 		return ;
 	radius = d->revision_map_radius;
 	cell = 12;
@@ -193,13 +235,22 @@ void DebugOverlayRenderer::draw_revision_preview(ft_render_framebuffer &fb,
 	origin_y = 18;
 	draw_revision_grid(fb, d, radius, cell, origin_x, origin_y);
 	std::snprintf(text, sizeof(text), "%s  P:%u S:%u T:%u U:%u",
-		d->revision_pending ? "REVISION PENDING" : "REVISION PREVIEW",
+		d->revision_barriers_active ? "BARRIER ACTIVE"
+			: (d->revision_pending ? "REVISION PENDING" : "REVISION PREVIEW"),
 		d->revision_protected_count, d->revision_selected_count,
 		d->revision_transition_count, d->revision_unchanged_count);
 	draw_debug_text(fb, origin_x, origin_y + (radius * 2 + 1) * cell + 8, text,
 		2);
 	draw_debug_text(fb, origin_x, origin_y + (radius * 2 + 1) * cell + 28,
-		"RED PROTECTED  GREEN SELECTED  GOLD TRANSITION", 2);
+		"PURPLE LOOM  ORANGE PLAYER  RED PROTECTED", 2);
+	draw_debug_text(fb, origin_x, origin_y + (radius * 2 + 1) * cell + 48,
+		"GREEN SELECTED  GOLD TRANSITION  GRAY OPEN", 2);
+	if (d->revision_barriers_active)
+		draw_debug_text(fb, origin_x, origin_y + (radius * 2 + 1) * cell + 68,
+			"CYAN OUTLINED CHUNKS ARE BARRIERS", 2);
+	draw_debug_text(fb, origin_x, origin_y + (radius * 2 + 1) * cell
+		+ (d->revision_barriers_active ? 88 : 68),
+		"CYAN VOLCANO FOOTPRINT", 2);
 }
 
 void DebugOverlayRenderer::draw_debug_overlay(ft_render_framebuffer &framebuffer,

@@ -11,7 +11,8 @@ class WorldGenerationResultCommitter
 	~WorldGenerationResultCommitter();
 	WorldGenerationResultCommitter &operator=(const WorldGenerationResultCommitter &other);
 
-	static int32_t drain(WorldChunkStreamer &streamer, World &world) noexcept;
+	static int32_t drain(WorldChunkStreamer &streamer, World &world,
+		bool remesh_only = false) noexcept;
 	static int32_t move_mesh(chunk_mesh &destination,
 		chunk_mesh &source) noexcept;
 
@@ -26,7 +27,8 @@ class WorldGenerationResultCommitter
 		World &world, WorldGenerationPipeline::Result &result,
 		WorldChunkStreamer::StreamCandidate &candidate) noexcept;
 	static void populate_chunk_slot(WorldChunk &slot,
-		const WorldGenerationPipeline::Result &result) noexcept;
+		const WorldGenerationPipeline::Result &result,
+		uint64_t geometry_revision) noexcept;
 };
 
 # include "../../src/world/WorldDeferredEditApplier.hpp"

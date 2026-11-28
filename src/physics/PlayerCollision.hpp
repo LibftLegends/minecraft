@@ -23,12 +23,17 @@ class PlayerCollision
 	static bool any_solid_in_range(const World &world, int32_t min_x,
 		int32_t max_x, int32_t min_y, int32_t max_y, int32_t min_z,
 		int32_t max_z);
+	static bool player_box_intersects_revision_barrier(const World &world,
+		double x, double eye_y, double z);
 	static void resolve_block_collision(int axis, double delta, int32_t bx,
 		int32_t by, int32_t bz, double &next_x, double &next_y, double &next_z,
 		bool &collided);
 	static void scan_and_resolve(const World &world, int axis, double delta,
 		int32_t min_x, int32_t max_x, int32_t min_y, int32_t max_y,
 		int32_t min_z, int32_t max_z, double &next_x, double &next_y,
+		double &next_z, bool ignore_revision_barriers, bool &collided);
+	static void resolve_revision_barrier_collision(const World &world,
+		int axis, double delta, double old_x, double old_z, double &next_x,
 		double &next_z, bool &collided);
 };
 
