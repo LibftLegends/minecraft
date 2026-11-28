@@ -856,7 +856,8 @@ int32_t GameSessionPersistence::save_validated_session_snapshot(
 		&host_config_state, serialized_snapshot, true));
 }
 
-static int32_t game_session_persistence_load_file_once(const char *file_path,
+static int32_t game_session_persistence_load_validated_snapshot(
+	const std::vector<uint8_t> &bytes,
 	game_character &character, WorldItemStore &world_items,
 	MinecraftRecipeCatalog *recipe_catalog,
 	GameTransactionJournal *transaction_journal,
@@ -872,7 +873,6 @@ static int32_t game_session_persistence_load_file_once(const char *file_path,
 		std::vector<uint8_t> *host_config_state = nullptr,
 		bool *state_commit_started_out = nullptr) noexcept
 {
-	std::vector<uint8_t> bytes;
 	std::vector<uint8_t> staged_card_session_state;
 	std::vector<uint8_t> staged_regeneration_rules_state;
 	std::vector<uint8_t> staged_chunk_instability_state;
@@ -908,22 +908,16 @@ static int32_t game_session_persistence_load_file_once(const char *file_path,
 	uint64_t restored_output_session_id = 0U;
 	uint64_t next_instance_id = 1U;
 	uint64_t maximum_instance_id = 0U;
-	uint64_t stored_checksum;
 	uint32_t version;
 	std::string character_json;
 	std::size_t payload_end;
 	int32_t result;
 
-	if (file_path == nullptr || file_path[0] == '\0')
-		return (FT_ERR_INVALID_ARGUMENT);
 	if (state_commit_started_out != nullptr)
 		*state_commit_started_out = false;
 	if (transaction_journal != nullptr
 		&& !transaction_journal->is_initialized())
 		return (FT_ERR_INVALID_OPERATION);
-	result = read_file(file_path, bytes);
-	if (result != FT_ERR_SUCCESS)
-		return (result);
 	const bool is_legacy_world_items = bytes.size() >= 4U
 		&& bytes[0] == 'W' && bytes[1] == 'I'
 		&& bytes[2] == 'S' && bytes[3] == 'P';
@@ -969,15 +963,6 @@ static int32_t game_session_persistence_load_file_once(const char *file_path,
 		return (result);
 	}
 	result = FT_ERR_SUCCESS;
-	if (bytes.size() < 32U || bytes[0] != 'M' || bytes[1] != 'C'
-		|| bytes[2] != 'S' || bytes[3] != 'P')
-		return (FT_ERR_INVALID_ARGUMENT);
-	stored_checksum = 0U;
-	for (uint32_t index = 0U; index < 8U; ++index)
-		stored_checksum |= static_cast<uint64_t>(
-			bytes[bytes.size() - 8U + index]) << (index * 8U);
-	if (checksum(bytes.data(), bytes.size() - 8U) != stored_checksum)
-		return (FT_ERR_INVALID_ARGUMENT);
 	reader.bytes = bytes.data();
 	reader.size = bytes.size() - 8U;
 	reader.offset = 4U;
@@ -1557,67 +1542,47 @@ static int32_t game_session_persistence_load_file(const char *file_path,
 {
 	if (file_path == nullptr || file_path[0] == '\0')
 		return (FT_ERR_INVALID_ARGUMENT);
-	std::vector<uint8_t> primary_probe;
-	const int32_t probe_result = read_file(file_path, primary_probe);
-	const bool primary_is_mcsp = probe_result == FT_ERR_SUCCESS
-		&& primary_probe.size() >= 4U && primary_probe[0] == 'M'
-		&& primary_probe[1] == 'C' && primary_probe[2] == 'S'
-		&& primary_probe[3] == 'P';
-	const bool primary_is_wisp = probe_result == FT_ERR_SUCCESS
-		&& primary_probe.size() >= 4U && primary_probe[0] == 'W'
-		&& primary_probe[1] == 'I' && primary_probe[2] == 'S'
-		&& primary_probe[3] == 'P';
-	bool recover_from_backup = probe_result == FT_ERR_IO
-		|| probe_result == FT_ERR_OUT_OF_RANGE
-		|| (primary_is_mcsp && !is_valid_mcsp_snapshot(primary_probe))
-		|| (probe_result == FT_ERR_SUCCESS
-			&& !primary_is_mcsp && !primary_is_wisp);
-	bool primary_commit_started = false;
-	int32_t primary_load_result = probe_result;
-	if (probe_result == FT_ERR_SUCCESS && primary_is_mcsp
-		&& !is_valid_mcsp_snapshot(primary_probe))
-		primary_load_result = FT_ERR_INVALID_ARGUMENT;
-	else if (probe_result == FT_ERR_SUCCESS && !primary_is_mcsp
-		&& !primary_is_wisp)
-		primary_load_result = FT_ERR_INVALID_ARGUMENT;
-	if (probe_result == FT_ERR_SUCCESS
-		&& (primary_is_wisp || (primary_is_mcsp
-			&& is_valid_mcsp_snapshot(primary_probe))))
+	std::vector<uint8_t> primary_bytes;
+	const int32_t read_result = read_file(file_path, primary_bytes);
+	int32_t primary_load_result = read_result;
+	if (read_result == FT_ERR_SUCCESS)
 	{
-		primary_load_result = game_session_persistence_load_file_once(file_path,
-			character, world_items, recipe_catalog, transaction_journal,
-			card_session_state, regeneration_rules_state,
-			chunk_instability_state, revision_metadata_state, fluid_state,
-			entity_state, crop_growth_policy_state, output_session_id_out,
-			revision_server_state, host_config_state, &primary_commit_started);
-		if (primary_load_result == FT_ERR_SUCCESS || primary_commit_started)
+		const bool primary_is_wisp = primary_bytes.size() >= 4U
+			&& primary_bytes[0] == 'W' && primary_bytes[1] == 'I'
+			&& primary_bytes[2] == 'S' && primary_bytes[3] == 'P';
+		primary_load_result = FT_ERR_INVALID_ARGUMENT;
+		if (primary_is_wisp || is_valid_mcsp_snapshot(primary_bytes))
 		{
-			std::vector<uint8_t>().swap(primary_probe);
-			return (primary_load_result);
+			bool primary_commit_started = false;
+			primary_load_result = game_session_persistence_load_validated_snapshot(
+				primary_bytes, character, world_items, recipe_catalog,
+				transaction_journal, card_session_state, regeneration_rules_state,
+				chunk_instability_state, revision_metadata_state, fluid_state,
+				entity_state, crop_growth_policy_state, output_session_id_out,
+				revision_server_state, host_config_state, &primary_commit_started);
+			if (primary_load_result == FT_ERR_SUCCESS || primary_commit_started)
+				return (primary_load_result);
 		}
-		recover_from_backup = true;
 	}
-	std::vector<uint8_t>().swap(primary_probe);
-	if (!recover_from_backup)
-		return (primary_load_result);
+	else if (read_result != FT_ERR_IO && read_result != FT_ERR_OUT_OF_RANGE)
+		return (read_result);
+	std::vector<uint8_t>().swap(primary_bytes);
 	std::string backup_path;
 	const int32_t path_result = make_backup_path(file_path, backup_path);
 	if (path_result != FT_ERR_SUCCESS)
-		return (probe_result == FT_ERR_SUCCESS
-			? primary_load_result : probe_result);
+		return (primary_load_result);
 	std::vector<uint8_t> backup_bytes;
 	const int32_t backup_read_result = read_file(backup_path.c_str(),
 		backup_bytes);
 	if (backup_read_result != FT_ERR_SUCCESS
 		|| !is_valid_mcsp_snapshot(backup_bytes))
-		return (probe_result == FT_ERR_SUCCESS
-			? primary_load_result : probe_result);
+		return (primary_load_result);
 	const int32_t repair_result = file_replace_safe(file_path,
 		reinterpret_cast<const char *>(backup_bytes.data()),
 		backup_bytes.size());
 	if (repair_result != FT_ERR_SUCCESS)
 		return (repair_result);
-	return (game_session_persistence_load_file_once(file_path, character,
+	return (game_session_persistence_load_validated_snapshot(backup_bytes, character,
 		world_items, recipe_catalog, transaction_journal, card_session_state,
 		regeneration_rules_state, chunk_instability_state,
 		revision_metadata_state, fluid_state, entity_state,

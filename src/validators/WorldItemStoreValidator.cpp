@@ -1561,6 +1561,10 @@ int WorldItemStoreValidator::validate() const
 	}
 	const char *snapshot_file = "build_logs/world_item_store_validator_snapshot.tmp";
 	const char *session_snapshot_file = "build_logs/game_session_validator_snapshot.tmp";
+	const char *invalid_snapshot_file =
+		"build_logs/game_session_invalid_snapshot_validator.tmp";
+	const char *invalid_snapshot_backup =
+		"build_logs/game_session_invalid_snapshot_validator.tmp.bak";
 	const char *duplicate_id_save_file =
 		"build_logs/world_item_duplicate_id_save_validator.tmp";
 	const char *pickup_recovery_file = "build_logs/world_item_pickup_recovery.tmp";
@@ -2523,10 +2527,10 @@ int WorldItemStoreValidator::validate() const
 		{
 			input.close();
 			corrupted[8] ^= 0x01U;
-			if (filesystem_atomic_write(session_snapshot_file,
+			if (filesystem_atomic_write(invalid_snapshot_file,
 				reinterpret_cast<const char *>(corrupted.data()),
 				corrupted.size()) != FT_ERR_SUCCESS
-				|| GameSessionPersistence::load_file(session_snapshot_file,
+				|| GameSessionPersistence::load_file(invalid_snapshot_file,
 					loaded_character, session_restored_store,
 					loaded_recipe_catalog)
 					!= FT_ERR_INVALID_ARGUMENT
@@ -2594,10 +2598,10 @@ int WorldItemStoreValidator::validate() const
 						= static_cast<uint8_t>(checksum >> shift);
 					shift += 8U;
 				}
-				if (filesystem_atomic_write(session_snapshot_file,
+				if (filesystem_atomic_write(invalid_snapshot_file,
 					reinterpret_cast<const char *>(corrupted.data()),
 					corrupted.size()) != FT_ERR_SUCCESS
-					|| GameSessionPersistence::load_file(session_snapshot_file,
+					|| GameSessionPersistence::load_file(invalid_snapshot_file,
 						loaded_character, session_restored_store,
 						loaded_recipe_catalog) != FT_ERR_INVALID_ARGUMENT
 					|| loaded_character.get_coins() != 42
@@ -2672,10 +2676,10 @@ int WorldItemStoreValidator::validate() const
 				for (uint32_t shift = 0U; shift < 64U; shift += 8U)
 					corrupted[corrupted.size() - 8U + shift / 8U]
 						= static_cast<uint8_t>(checksum >> shift);
-				if (filesystem_atomic_write(session_snapshot_file,
+				if (filesystem_atomic_write(invalid_snapshot_file,
 					reinterpret_cast<const char *>(corrupted.data()),
 					corrupted.size()) != FT_ERR_SUCCESS
-					|| GameSessionPersistence::load_file(session_snapshot_file,
+					|| GameSessionPersistence::load_file(invalid_snapshot_file,
 						loaded_character, session_restored_store,
 						loaded_recipe_catalog) != FT_ERR_INVALID_ARGUMENT
 					|| loaded_character.get_coins() != 42
@@ -3212,6 +3216,24 @@ int WorldItemStoreValidator::validate() const
 			WorldItemProcessingTransaction::journal_scope(), 7001U,
 			&journal_record);
 	if (error_code == FT_ERR_SUCCESS
+		&& journal_record.state != GameTransactionJournal::PREPARED)
+		error_code = FT_ERR_INVALID_STATE;
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = WorldItemProcessingTransaction::recover_pending(
+			processing_recovery_file, processing_recovered_character,
+			processing_recovered_store, processing_recovered_recipe_catalog,
+			processing_recovered_journal, &processing_writer,
+			[](uint32_t station_id, int32_t x, int32_t y, int32_t z,
+				uint64_t revision, void *) noexcept
+			{
+				return (station_id == MinecraftRecipeCatalog::FURNACE_STATION_ID
+					&& x == 0 && y == 0 && z == 0 && revision == 1U);
+			});
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = processing_recovered_journal.find(
+			WorldItemProcessingTransaction::journal_scope(), 7001U,
+			&journal_record);
+	if (error_code == FT_ERR_SUCCESS
 		&& (journal_record.state != GameTransactionJournal::COMMITTED
 			|| processing_recovered_character.get_inventory().count_item(
 				MinecraftItemCatalog::RAW_BEEF_ITEM_ID) != 0
@@ -3401,10 +3423,10 @@ int WorldItemStoreValidator::validate() const
 				for (uint32_t shift = 0U; shift < 64U; shift += 8U)
 					corrupted[corrupted.size() - 8U + shift / 8U]
 						= static_cast<uint8_t>(checksum >> shift);
-				if (filesystem_atomic_write(session_snapshot_file,
+				if (filesystem_atomic_write(invalid_snapshot_file,
 					reinterpret_cast<const char *>(corrupted.data()),
 					corrupted.size()) != FT_ERR_SUCCESS
-					|| GameSessionPersistence::load_file(session_snapshot_file,
+					|| GameSessionPersistence::load_file(invalid_snapshot_file,
 						loaded_character, session_restored_store,
 						loaded_recipe_catalog, loaded_transaction_journal)
 						!= FT_ERR_INVALID_ARGUMENT
@@ -3570,7 +3592,7 @@ int WorldItemStoreValidator::validate() const
 			{
 				input.close();
 				corrupted[corrupted.size() - 9U] ^= 0x01U;
-				error_code = filesystem_atomic_write(session_snapshot_file,
+				error_code = filesystem_atomic_write(invalid_snapshot_file,
 					reinterpret_cast<const char *>(corrupted.data()),
 					corrupted.size());
 				if (error_code == FT_ERR_SUCCESS)
@@ -3581,7 +3603,7 @@ int WorldItemStoreValidator::validate() const
 					restored_revision_metadata_state = sentinel;
 					restored_fluid_state = sentinel;
 					const int32_t corrupt_result =
-						GameSessionPersistence::load_file(session_snapshot_file,
+						GameSessionPersistence::load_file(invalid_snapshot_file,
 							loaded_character, session_restored_store,
 							loaded_recipe_catalog, loaded_transaction_journal,
 							restored_card_session_state,
@@ -3615,7 +3637,7 @@ int WorldItemStoreValidator::validate() const
 		{
 			input.close();
 			corrupted[corrupted.size() - 9U] ^= 0x01U;
-			error_code = filesystem_atomic_write(session_snapshot_file,
+			error_code = filesystem_atomic_write(invalid_snapshot_file,
 				reinterpret_cast<const char *>(corrupted.data()),
 				corrupted.size());
 			if (error_code == FT_ERR_SUCCESS)
@@ -3625,7 +3647,7 @@ int WorldItemStoreValidator::validate() const
 				restored_chunk_instability_state = sentinel;
 				restored_revision_metadata_state = sentinel;
 				const int32_t corrupt_load_result =
-					GameSessionPersistence::load_file(session_snapshot_file,
+					GameSessionPersistence::load_file(invalid_snapshot_file,
 						loaded_character, session_restored_store,
 						loaded_recipe_catalog, loaded_transaction_journal,
 						restored_card_session_state,
@@ -3996,7 +4018,7 @@ int WorldItemStoreValidator::validate() const
 			for (uint32_t shift = 0U; shift < 64U; shift += 8U)
 				future_version[future_version.size() - 8U + shift / 8U]
 					= static_cast<uint8_t>(checksum >> shift);
-			error_code = filesystem_atomic_write(session_snapshot_file,
+			error_code = filesystem_atomic_write(invalid_snapshot_file,
 				reinterpret_cast<const char *>(future_version.data()),
 				future_version.size());
 			if (error_code == FT_ERR_SUCCESS)
@@ -4006,7 +4028,7 @@ int WorldItemStoreValidator::validate() const
 				restored_chunk_instability_state = sentinel;
 				restored_revision_metadata_state = sentinel;
 				const int32_t future_load_result =
-					GameSessionPersistence::load_file(session_snapshot_file,
+					GameSessionPersistence::load_file(invalid_snapshot_file,
 						loaded_character, session_restored_store,
 						loaded_recipe_catalog, loaded_transaction_journal,
 						restored_card_session_state,
@@ -4111,13 +4133,14 @@ int WorldItemStoreValidator::validate() const
 			std::istreambuf_iterator<char>());
 		const std::vector<uint8_t> sentinel = {0xC3U};
 
-		if (!input.is_open() || input.bad() || corrupted.empty())
+		if (!input.is_open() || input.bad() || corrupted.size() < 16U)
 			error_code = FT_ERR_IO;
 		else
 		{
 			input.close();
+			const std::vector<uint8_t> valid = corrupted;
 			corrupted[corrupted.size() - 9U] ^= 0x01U;
-			error_code = filesystem_atomic_write(session_snapshot_file,
+			error_code = filesystem_atomic_write(invalid_snapshot_file,
 				reinterpret_cast<const char *>(corrupted.data()),
 				corrupted.size());
 			if (error_code == FT_ERR_SUCCESS)
@@ -4126,7 +4149,7 @@ int WorldItemStoreValidator::validate() const
 				restored_regeneration_rules_state = sentinel;
 				restored_chunk_instability_state = sentinel;
 				const int32_t corrupt_load_result =
-					GameSessionPersistence::load_file(session_snapshot_file,
+					GameSessionPersistence::load_file(invalid_snapshot_file,
 						loaded_character, session_restored_store,
 						loaded_recipe_catalog, loaded_transaction_journal,
 						restored_card_session_state,
@@ -4144,6 +4167,26 @@ int WorldItemStoreValidator::validate() const
 						restored_card_session_state.size(),
 						restored_regeneration_rules_state.size());
 				}
+			}
+			if (error_code == FT_ERR_SUCCESS)
+				error_code = filesystem_atomic_write(invalid_snapshot_backup,
+					reinterpret_cast<const char *>(valid.data()), valid.size());
+			if (error_code == FT_ERR_SUCCESS)
+				error_code = GameSessionPersistence::load_file(invalid_snapshot_file,
+					loaded_character, session_restored_store, loaded_recipe_catalog,
+					loaded_transaction_journal, restored_card_session_state,
+					restored_regeneration_rules_state, restored_chunk_instability_state);
+			if (error_code == FT_ERR_SUCCESS)
+			{
+				std::ifstream repaired(invalid_snapshot_file, std::ios::binary);
+				const std::vector<uint8_t> repaired_bytes(
+					(std::istreambuf_iterator<char>(repaired)),
+					std::istreambuf_iterator<char>());
+				if (!repaired.is_open() || repaired.bad() || repaired_bytes != valid
+					|| restored_card_session_state != card_session_test_state
+					|| restored_regeneration_rules_state != regeneration_rules_test_state
+					|| !restored_chunk_instability_state.empty())
+					error_code = FT_ERR_INVALID_STATE;
 			}
 		}
 	}
@@ -4244,6 +4287,8 @@ int WorldItemStoreValidator::validate() const
 			error_code);
 	(void)std::remove(snapshot_file);
 	(void)std::remove(session_snapshot_file);
+	(void)std::remove(invalid_snapshot_file);
+	(void)std::remove(invalid_snapshot_backup);
 	(void)std::remove(duplicate_id_save_file);
 	(void)std::remove(pickup_recovery_file);
 	(void)std::remove(craft_recovery_file);

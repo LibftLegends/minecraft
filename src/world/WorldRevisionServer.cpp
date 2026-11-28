@@ -578,7 +578,7 @@ int32_t WorldRevisionServer::initialize()
 	error_code = this->server_.initialize();
 	if (error_code != FT_ERR_SUCCESS)
 		return (error_code);
-	this->server_.set_message_callback(&WorldRevisionServer::handle_message,
+	this->server_.set_parsed_message_callback(&WorldRevisionServer::handle_parsed_message,
 		this);
 	this->initialized_ = true;
 	return (FT_ERR_SUCCESS);
@@ -1218,103 +1218,90 @@ int32_t WorldRevisionServer::destroy()
 int32_t WorldRevisionServer::handle_message(int32_t client_handle,
 	const char *message, void *user_data)
 {
-	WorldRevisionServer *server;
-	uint64_t actor_id = 0U;
-	uint64_t loom_id = 0U;
-	int32_t error_code;
-	json_item *request_id_item;
-	json_item *protocol_version_item;
-	uint64_t request_id;
-	uint64_t protocol_version;
-	std::size_t message_length = 0U;
+	return (handle_message_with_revision(client_handle, message, nullptr, user_data));
+}
 
+int32_t WorldRevisionServer::handle_parsed_message(int32_t client_handle,
+	const char *message, json_group &revision, void *user_data)
+{
+	return (handle_message_with_revision(client_handle, message, &revision, user_data));
+}
+
+int32_t WorldRevisionServer::handle_message_with_revision(int32_t client_handle,
+	const char *message, json_group *revision, void *user_data)
+{
 	if (user_data == nullptr || message == nullptr)
 		return (FT_ERR_INVALID_ARGUMENT);
+	std::size_t message_length = 0U;
 	while (message_length <= 4096U && message[message_length] != '\0')
 		++message_length;
 	if (message_length > 4096U)
 		return (FT_ERR_OUT_OF_RANGE);
-	server = static_cast<WorldRevisionServer *>(user_data);
+
+	auto *server = static_cast<WorldRevisionServer *>(user_data);
 	if (server->authorizer_ == nullptr)
 		return (FT_ERR_PERMISSION_DENIED);
-	error_code = server->authorizer_(client_handle, message, &actor_id,
+	uint64_t actor_id = 0U;
+	uint64_t loom_id = 0U;
+	const int32_t auth_error = server->authorizer_(client_handle, message, &actor_id,
 		&loom_id, server->authorizer_user_data_);
-	if (error_code != FT_ERR_SUCCESS)
-		return (error_code);
+	if (auth_error != FT_ERR_SUCCESS)
+		return (auth_error);
 	if (actor_id == 0U || loom_id == 0U)
 		return (FT_ERR_PERMISSION_DENIED);
+	if (revision != nullptr)
+		return (server->dispatch_revision_message(client_handle, message, revision,
+			actor_id, loom_id));
 	json_group *groups = json_read_from_string(message);
 	if (groups == nullptr)
 		return (FT_ERR_INVALID_ARGUMENT);
-	json_group *revision = json_find_group(groups, "world_revision");
-	protocol_version_item = revision == nullptr ? nullptr
-		: json_find_item(revision, "protocol_version");
+	const int32_t result = server->dispatch_revision_message(client_handle, message,
+		json_find_group(groups, "world_revision"), actor_id, loom_id);
+	json_free_groups(groups);
+	return (result);
+}
+
+int32_t WorldRevisionServer::dispatch_revision_message(int32_t client_handle,
+	const char *message, json_group *revision, uint64_t actor_id, uint64_t loom_id)
+{
+	if (revision == nullptr)
+		return (FT_ERR_CONFIGURATION);
+	const json_item *protocol_version_item = json_find_item(revision, "protocol_version");
+	uint64_t protocol_version;
 	if (protocol_version_item == nullptr
 		|| world_revision_parse_u64(protocol_version_item->value,
 			&protocol_version) != FT_ERR_SUCCESS
 		|| protocol_version != 1U)
-	{
-		json_free_groups(groups);
 		return (FT_ERR_CONFIGURATION);
-	}
-	json_item *action_item = revision == nullptr ? nullptr
-		: json_find_item(revision, "action");
-	if (action_item != nullptr
-		&& std::strcmp(action_item->value, "status") == 0)
-	{
-		error_code = server->handle_status_message(client_handle, revision,
-			actor_id, loom_id);
-		json_free_groups(groups);
-		return (error_code);
-	}
-	if (action_item != nullptr
-		&& std::strcmp(action_item->value, "card_hand") == 0)
-	{
-		error_code = server->handle_card_hand_message(client_handle, message,
-			revision, actor_id, loom_id);
-		json_free_groups(groups);
-		return (error_code);
-	}
-	if (action_item != nullptr
-		&& std::strcmp(action_item->value, "preview") == 0)
-	{
-		error_code = server->handle_preview_message(client_handle, message,
-			revision, actor_id, loom_id);
-		json_free_groups(groups);
-		return (error_code);
-	}
-	if (action_item != nullptr
-		&& std::strcmp(action_item->value, "quote") == 0)
-	{
-		error_code = server->handle_quote_message(client_handle, message,
-			revision, actor_id, loom_id);
-		json_free_groups(groups);
-		return (error_code);
-	}
-	if (action_item != nullptr
-		&& std::strcmp(action_item->value, "instability_view") == 0)
-	{
-		error_code = server->handle_instability_view_message(client_handle,
-			message, revision, actor_id, loom_id);
-		json_free_groups(groups);
-		return (error_code);
-	}
-	request_id_item = revision == nullptr ? nullptr
-		: json_find_item(revision, "request_id");
-	if (action_item == nullptr || request_id_item == nullptr
+	const json_item *action_item = json_find_item(revision, "action");
+	if (action_item == nullptr)
+		return (FT_ERR_INVALID_ARGUMENT);
+	const char *action = action_item->value;
+	if (std::strcmp(action, "status") == 0)
+		return (this->handle_status_message(client_handle, revision, actor_id, loom_id));
+	if (std::strcmp(action, "card_hand") == 0)
+		return (this->handle_card_hand_message(client_handle, message, revision, actor_id, loom_id));
+	if (std::strcmp(action, "preview") == 0)
+		return (this->handle_preview_message(client_handle, message, revision, actor_id, loom_id));
+	if (std::strcmp(action, "quote") == 0)
+		return (this->handle_quote_message(client_handle, message, revision, actor_id, loom_id));
+	if (std::strcmp(action, "instability_view") == 0)
+		return (this->handle_instability_view_message(client_handle, message, revision,
+			actor_id, loom_id));
+	const json_item *request_id_item = json_find_item(revision, "request_id");
+	uint64_t request_id;
+	if (request_id_item == nullptr
 		|| world_revision_parse_u64(request_id_item->value, &request_id)
 			!= FT_ERR_SUCCESS
 		|| request_id == 0U)
-	{
-		json_free_groups(groups);
-		return (server->handle_revision_message(message, actor_id, loom_id));
-	}
-	error_code = server->handle_revision_message(message, actor_id, loom_id);
-	int32_t send_error = server->send_action_response(client_handle, message,
-		actor_id, loom_id, request_id, error_code);
-	json_free_groups(groups);
-	return (send_error == FT_ERR_SUCCESS ? error_code : send_error);
+		return (FT_ERR_INVALID_ARGUMENT);
+	const int32_t result = this->execute_revision_action(message, revision, action,
+		request_id, actor_id, loom_id);
+	const int32_t send_error = this->send_action_response(client_handle, message,
+		actor_id, loom_id, request_id, result);
+	return (send_error == FT_ERR_SUCCESS ? result : send_error);
 }
+
 
 int32_t WorldRevisionServer::send_action_response(int32_t client_handle,
 	const char *message, uint64_t actor_id, uint64_t loom_id,
@@ -2315,46 +2302,43 @@ int32_t WorldRevisionServer::handle_select_or_protect_action(json_group *revisio
 int32_t WorldRevisionServer::handle_revision_message(const char *message,
 	uint64_t actor_id, uint64_t loom_id)
 {
-	json_group	*groups;
-	json_group	*revision;
-	json_item	*action_item;
-	json_item	*request_id_item;
-	const char	*action;
-	uint64_t	request_id;
-	int32_t		result;
-	std::tuple<uint64_t, uint64_t, uint64_t> request_key;
-	std::map<std::tuple<uint64_t, uint64_t, uint64_t>, CachedRequest>::iterator cached_request;
-
 	if (message == nullptr || this->world_ == nullptr)
 		return (FT_ERR_INVALID_ARGUMENT);
-	groups = json_read_from_string(message);
+	json_group *groups = json_read_from_string(message);
 	if (groups == nullptr)
 		return (FT_ERR_INVALID_ARGUMENT);
-	revision = json_find_group(groups, "world_revision");
-	action_item = revision == nullptr ? nullptr : json_find_item(revision,
-			"action");
-	if (action_item == nullptr)
+	json_group *revision = json_find_group(groups, "world_revision");
+	int32_t result = FT_ERR_INVALID_ARGUMENT;
+	uint64_t request_id;
+	if (revision != nullptr)
 	{
-		json_free_groups(groups);
-		return (FT_ERR_INVALID_ARGUMENT);
+		const json_item *action_item = json_find_item(revision, "action");
+		const json_item *request_id_item = json_find_item(revision, "request_id");
+		if (action_item != nullptr && request_id_item != nullptr
+			&& world_revision_parse_u64(request_id_item->value, &request_id) == FT_ERR_SUCCESS
+			&& request_id != 0U)
+			result = this->execute_revision_action(message, revision, action_item->value,
+				request_id, actor_id, loom_id);
 	}
-	request_id_item = json_find_item(revision, "request_id");
-	if (request_id_item == nullptr
-		|| world_revision_parse_u64(request_id_item->value, &request_id)
-			!= FT_ERR_SUCCESS
-		|| request_id == 0U)
-	{
-		json_free_groups(groups);
+	json_free_groups(groups);
+	return (result);
+}
+
+int32_t WorldRevisionServer::execute_revision_action(const char *message,
+	json_group *revision, const char *action, uint64_t request_id,
+	uint64_t actor_id, uint64_t loom_id)
+{
+	if (this->world_ == nullptr)
 		return (FT_ERR_INVALID_ARGUMENT);
-	}
-	action = action_item->value;
-	request_key = std::make_tuple(actor_id, loom_id, request_id);
+	int32_t result;
+	std::map<std::tuple<uint64_t, uint64_t, uint64_t>, CachedRequest>::iterator cached_request;
+	const auto request_key = std::make_tuple(actor_id, loom_id, request_id);
+
 	cached_request = this->request_cache_.find(request_key);
 	if (cached_request != this->request_cache_.end())
 	{
 		if (cached_request->second.payload != message)
 		{
-			json_free_groups(groups);
 			return (FT_ERR_INVALID_ARGUMENT);
 		}
 		if (std::strcmp(action, "begin") == 0
@@ -2373,7 +2357,6 @@ int32_t WorldRevisionServer::handle_revision_message(const char *message,
 			result = this->authorize_station_access(actor_id, loom_id, message);
 			if (result != FT_ERR_SUCCESS)
 			{
-				json_free_groups(groups);
 				return (result);
 			}
 		}
@@ -2397,7 +2380,6 @@ int32_t WorldRevisionServer::handle_revision_message(const char *message,
 		const int32_t checkpoint_result = this->commit_checkpoint();
 		if (checkpoint_result != FT_ERR_SUCCESS)
 			result = checkpoint_result;
-		json_free_groups(groups);
 		return (result);
 	}
 	if ((std::strcmp(action, "begin") == 0
@@ -2409,12 +2391,10 @@ int32_t WorldRevisionServer::handle_revision_message(const char *message,
 		&& this->request_cache_.size()
 			>= WorldRevisionServer::REQUEST_CACHE_LIMIT)
 	{
-		json_free_groups(groups);
 		return (FT_ERR_FULL);
 	}
 	if (this->request_cache_.size() >= WorldRevisionServer::REQUEST_CACHE_LIMIT)
 	{
-		json_free_groups(groups);
 		return (FT_ERR_FULL);
 	}
 	try
@@ -2448,7 +2428,6 @@ int32_t WorldRevisionServer::handle_revision_message(const char *message,
 	}
 	catch (...)
 	{
-		json_free_groups(groups);
 		return (FT_ERR_NO_MEMORY);
 	}
 	if (std::strcmp(action, "begin") == 0
@@ -2462,7 +2441,6 @@ int32_t WorldRevisionServer::handle_revision_message(const char *message,
 		if (result != FT_ERR_SUCCESS)
 		{
 			this->request_cache_.erase(cached_request);
-			json_free_groups(groups);
 			return (result);
 		}
 	}
@@ -2767,7 +2745,6 @@ int32_t WorldRevisionServer::handle_revision_message(const char *message,
 		/* An early timeout poll must not consume its request ID; the exact same
 		 * request can be retried when the host clock reaches a deadline. */
 		this->request_cache_.erase(cached_request);
-		json_free_groups(groups);
 		return (result);
 	}
 	if (std::strcmp(action, "confirm") == 0
@@ -2778,7 +2755,6 @@ int32_t WorldRevisionServer::handle_revision_message(const char *message,
 		 * GameSession callback restores its journal to the pre-request snapshot
 		 * on that boundary, so an exact retry can safely attempt preparation. */
 		this->request_cache_.erase(cached_request);
-		json_free_groups(groups);
 		return (result);
 	}
 	cached_request->second.result = result;
@@ -2799,6 +2775,5 @@ int32_t WorldRevisionServer::handle_revision_message(const char *message,
 	const int32_t checkpoint_result = this->commit_checkpoint();
 	if (checkpoint_result != FT_ERR_SUCCESS)
 		result = checkpoint_result;
-	json_free_groups(groups);
 	return (result);
 }

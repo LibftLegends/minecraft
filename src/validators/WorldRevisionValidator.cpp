@@ -1945,26 +1945,25 @@ int32_t WorldRevisionValidator::test_server_draft_authorization(
 	WorldRevisionServer unconfigured_server(world);
 	WorldRevisionServerAuthorizationFixture fixture;
 	const char *begin_message =
-		"{\"world_revision\":{\"action\":\"begin\",\"mode\":\"3\",\"request_id\":\"1\"}}";
+		"{\"world_revision\":{\"protocol_version\":\"1\",\"action\":\"begin\",\"mode\":\"3\",\"request_id\":\"1\"}}";
 	const char *altered_begin_message =
-		"{\"world_revision\":{\"action\":\"begin\",\"mode\":\"2\",\"request_id\":\"1\"}}";
+		"{\"world_revision\":{\"protocol_version\":\"1\",\"action\":\"begin\",\"mode\":\"2\",\"request_id\":\"1\"}}";
 	const char *select_message =
-		"{\"world_revision\":{\"action\":\"select\",\"request_id\":\"2\"}}";
+		"{\"world_revision\":{\"protocol_version\":\"1\",\"action\":\"select\",\"request_id\":\"2\"}}";
 	const char *cancel_message =
-		"{\"world_revision\":{\"action\":\"cancel\",\"request_id\":\"8\"}}";
+		"{\"world_revision\":{\"protocol_version\":\"1\",\"action\":\"cancel\",\"request_id\":\"8\"}}";
 	char quote_message[256];
 	char altered_quote_message[257];
 	char confirm_message[320];
 	char altered_confirm_message[320];
-	char unconfigured_confirm_message[320];
 	const char *instability_message =
-		"{\"world_revision\":{\"action\":\"instability_view\",\"request_id\":\"77\",\"chunk_x\":\"-8\",\"chunk_z\":\"11\"}}";
+		"{\"world_revision\":{\"protocol_version\":\"1\",\"action\":\"instability_view\",\"request_id\":\"77\",\"chunk_x\":\"-8\",\"chunk_z\":\"11\"}}";
 	const char *altered_instability_message =
-		"{\"world_revision\":{\"action\":\"instability_view\",\"request_id\":\"77\",\"chunk_x\":\"-7\",\"chunk_z\":\"11\"}}";
+		"{\"world_revision\":{\"protocol_version\":\"1\",\"action\":\"instability_view\",\"request_id\":\"77\",\"chunk_x\":\"-7\",\"chunk_z\":\"11\"}}";
 	const char *hidden_instability_message =
-		"{\"world_revision\":{\"action\":\"instability_view\",\"request_id\":\"78\",\"chunk_x\":\"999\",\"chunk_z\":\"11\"}}";
+		"{\"world_revision\":{\"protocol_version\":\"1\",\"action\":\"instability_view\",\"request_id\":\"78\",\"chunk_x\":\"999\",\"chunk_z\":\"11\"}}";
 	const char *overflow_instability_message =
-		"{\"world_revision\":{\"action\":\"instability_view\",\"request_id\":\"79\",\"chunk_x\":\"2147483648\",\"chunk_z\":\"11\"}}";
+		"{\"world_revision\":{\"protocol_version\":\"1\",\"action\":\"instability_view\",\"request_id\":\"79\",\"chunk_x\":\"2147483648\",\"chunk_z\":\"11\"}}";
 	int32_t error_code;
 	World::WorldRevision revision;
 	WorldRevisionCostQuote quote = {};
@@ -2025,6 +2024,14 @@ int32_t WorldRevisionValidator::test_server_draft_authorization(
 	if (error_code == FT_ERR_SUCCESS)
 		error_code = server.set_start_committer(
 			&world_revision_validator_start_commit, &fixture);
+	if (error_code == FT_ERR_SUCCESS)
+		error_code = server.set_checkpoint_committer(
+			[](const uint8_t *bytes, std::size_t byte_count, void *) noexcept -> int32_t
+			{
+				if (bytes == nullptr || byte_count == 0U)
+					return (FT_ERR_INVALID_ARGUMENT);
+				return (FT_ERR_SUCCESS);
+			}, nullptr);
 	if (error_code == FT_ERR_SUCCESS)
 		error_code = server.initialize();
 	if (error_code != FT_ERR_SUCCESS)
@@ -2092,10 +2099,22 @@ int32_t WorldRevisionValidator::test_server_draft_authorization(
 		}
 	}
 	failure_stage = "begin action";
+	const auto replay_parsed_begin = [&server, begin_message]() -> int32_t
+	{
+		json_group *groups = json_read_from_string(begin_message);
+		if (groups == nullptr)
+			return (FT_ERR_INVALID_STATE);
+		json_group *parsed_revision = json_find_group(groups, "world_revision");
+		int32_t result = FT_ERR_INVALID_STATE;
+		if (parsed_revision != nullptr)
+			result = WorldRevisionServer::handle_parsed_message(10, begin_message,
+				*parsed_revision, &server);
+		json_free_groups(groups);
+		return (result);
+	};
 	if (WorldRevisionServer::handle_message(10, begin_message, &server)
 		!= FT_ERR_SUCCESS
-		|| WorldRevisionServer::handle_message(10, begin_message, &server)
-			!= FT_ERR_SUCCESS
+		|| replay_parsed_begin() != FT_ERR_SUCCESS
 		|| WorldRevisionServer::handle_message(10, altered_begin_message, &server)
 			!= FT_ERR_INVALID_ARGUMENT
 		|| WorldRevisionServer::handle_message(11, select_message, &server)
@@ -2235,7 +2254,7 @@ int32_t WorldRevisionValidator::test_server_draft_authorization(
 		{
 			failure_stage = "quote action";
 			std::snprintf(quote_message, sizeof(quote_message),
-				"{\"world_revision\":{\"action\":\"quote\",\"request_id\":\"5\",\"selection_revision\":\"%llu\",\"policy_revision\":\"%llu\",\"opening_card_count\":\"6\"}}",
+				"{\"world_revision\":{\"protocol_version\":\"1\",\"action\":\"quote\",\"request_id\":\"5\",\"selection_revision\":\"%llu\",\"policy_revision\":\"%llu\",\"opening_card_count\":\"6\"}}",
 				static_cast<unsigned long long>(selection_revision),
 				static_cast<unsigned long long>(policy_revision));
 			std::snprintf(altered_quote_message,
@@ -2311,16 +2330,16 @@ int32_t WorldRevisionValidator::test_server_draft_authorization(
 				else
 				{
 					std::snprintf(quote_message, sizeof(quote_message),
-						"{\"world_revision\":{\"action\":\"quote\",\"request_id\":\"7\",\"selection_revision\":\"%llu\",\"policy_revision\":\"%llu\",\"opening_card_count\":\"6\"}}",
+						"{\"world_revision\":{\"protocol_version\":\"1\",\"action\":\"quote\",\"request_id\":\"7\",\"selection_revision\":\"%llu\",\"policy_revision\":\"%llu\",\"opening_card_count\":\"6\"}}",
 						static_cast<unsigned long long>(selection_revision),
 						static_cast<unsigned long long>(policy_revision));
 					std::snprintf(confirm_message, sizeof(confirm_message),
-						"{\"world_revision\":{\"action\":\"confirm\",\"request_id\":\"9\",\"selection_revision\":\"%llu\",\"policy_revision\":\"%llu\",\"opening_card_count\":\"6\"}}",
+						"{\"world_revision\":{\"protocol_version\":\"1\",\"action\":\"confirm\",\"request_id\":\"9\",\"selection_revision\":\"%llu\",\"policy_revision\":\"%llu\",\"opening_card_count\":\"6\"}}",
 						static_cast<unsigned long long>(selection_revision),
 						static_cast<unsigned long long>(policy_revision));
 				std::snprintf(altered_confirm_message,
 					sizeof(altered_confirm_message),
-					"{\"world_revision\":{\"action\":\"confirm\",\"request_id\":\"9\",\"selection_revision\":\"%llu\",\"policy_revision\":\"%llu\",\"opening_card_count\":\"7\"}}",
+					"{\"world_revision\":{\"protocol_version\":\"1\",\"action\":\"confirm\",\"request_id\":\"9\",\"selection_revision\":\"%llu\",\"policy_revision\":\"%llu\",\"opening_card_count\":\"7\"}}",
 					static_cast<unsigned long long>(selection_revision),
 					static_cast<unsigned long long>(policy_revision));
 					failure_stage = "confirm actions";
@@ -2366,9 +2385,9 @@ int32_t WorldRevisionValidator::test_server_draft_authorization(
 	{
 		failure_stage = "accepted commit";
 		const char *accepted_begin_message =
-			"{\"world_revision\":{\"action\":\"begin\",\"mode\":\"3\",\"request_id\":\"12\"}}";
+			"{\"world_revision\":{\"protocol_version\":\"1\",\"action\":\"begin\",\"mode\":\"3\",\"request_id\":\"12\"}}";
 		const char *accepted_cancel_message =
-			"{\"world_revision\":{\"action\":\"cancel\",\"request_id\":\"14\"}}";
+			"{\"world_revision\":{\"protocol_version\":\"1\",\"action\":\"cancel\",\"request_id\":\"14\"}}";
 		char accepted_confirm_message[320];
 		char altered_accepted_confirm_message[320];
 		World::WorldRevision accepted_revision = {};
@@ -2379,14 +2398,14 @@ int32_t WorldRevisionValidator::test_server_draft_authorization(
 		accepted_revision = world.world_revision();
 		std::snprintf(accepted_confirm_message,
 			sizeof(accepted_confirm_message),
-			"{\"world_revision\":{\"action\":\"confirm\",\"request_id\":\"13\",\"selection_revision\":\"%llu\",\"policy_revision\":\"%llu\",\"opening_card_count\":\"4\"}}",
+			"{\"world_revision\":{\"protocol_version\":\"1\",\"action\":\"confirm\",\"request_id\":\"13\",\"selection_revision\":\"%llu\",\"policy_revision\":\"%llu\",\"opening_card_count\":\"4\"}}",
 			static_cast<unsigned long long>(
 				accepted_revision.selection_revision),
 			static_cast<unsigned long long>(
 				accepted_revision.cost_policy_revision));
 		std::snprintf(altered_accepted_confirm_message,
 			sizeof(altered_accepted_confirm_message),
-			"{\"world_revision\":{\"action\":\"confirm\",\"request_id\":\"13\",\"selection_revision\":\"%llu\",\"policy_revision\":\"%llu\",\"opening_card_count\":\"5\"}}",
+			"{\"world_revision\":{\"protocol_version\":\"1\",\"action\":\"confirm\",\"request_id\":\"13\",\"selection_revision\":\"%llu\",\"policy_revision\":\"%llu\",\"opening_card_count\":\"5\"}}",
 			static_cast<unsigned long long>(
 				accepted_revision.selection_revision),
 			static_cast<unsigned long long>(
@@ -2413,8 +2432,7 @@ int32_t WorldRevisionValidator::test_server_draft_authorization(
 		error_code = FT_ERR_INVALID_STATE;
 	if (error_code == FT_ERR_SUCCESS)
 	{
-		failure_stage = "unconfigured confirm";
-		World::WorldRevision unconfigured_revision = {};
+		failure_stage = "unconfigured server";
 
 		if (unconfigured_server.set_authorizer(
 				&world_revision_validator_authorize_client, &fixture)
@@ -2428,27 +2446,14 @@ int32_t WorldRevisionValidator::test_server_draft_authorization(
 			|| unconfigured_server.set_epoch_provider(
 				&world_revision_validator_provide_epoch, &fixture)
 			!= FT_ERR_SUCCESS
-			|| unconfigured_server.initialize() != FT_ERR_SUCCESS
+			|| unconfigured_server.initialize() != FT_ERR_PERMISSION_DENIED
 			|| WorldRevisionServer::handle_message(10, instability_message,
 				&unconfigured_server) != FT_ERR_PERMISSION_DENIED
 			|| fixture.instability_response_count != 2U
 			|| unconfigured_server.handle_revision_message(begin_message,
-				42U, 99U) != FT_ERR_SUCCESS)
-			error_code = FT_ERR_INVALID_STATE;
-		unconfigured_revision = world.world_revision();
-		std::snprintf(unconfigured_confirm_message,
-			sizeof(unconfigured_confirm_message),
-			"{\"world_revision\":{\"action\":\"confirm\",\"request_id\":\"10\",\"selection_revision\":\"%llu\",\"policy_revision\":\"%llu\",\"opening_card_count\":\"4\"}}",
-			static_cast<unsigned long long>(
-				unconfigured_revision.selection_revision),
-			static_cast<unsigned long long>(
-				unconfigured_revision.cost_policy_revision));
-		if (error_code == FT_ERR_SUCCESS
-			&& (unconfigured_server.handle_revision_message(
-					unconfigured_confirm_message, 42U, 99U)
-					!= FT_ERR_INVALID_OPERATION
-				|| !world.world_revision().pending
-				|| world.world_revision().regenerating))
+				42U, 99U) != FT_ERR_NOT_INITIALISED
+			|| world.world_revision().pending
+			|| world.world_revision().regenerating)
 			error_code = FT_ERR_INVALID_STATE;
 		if (world.world_revision().pending)
 			(void)world.cancel_world_revision();
@@ -3224,7 +3229,7 @@ int32_t WorldRevisionValidator::test_game_session_committed_start_retry()
 {
 	static const uint64_t start_scope = 0x574F524C444C4F4FULL;
 	static const uint32_t start_transaction_type = 6U;
-	const uint64_t actor_id = 42U;
+	constexpr uint64_t actor_id = 42U;
 	const uint64_t loom_id = 99U;
 	const uint64_t request_id = 701U;
 	const uint64_t selection_revision = 1U;
@@ -3268,6 +3273,12 @@ int32_t WorldRevisionValidator::test_game_session_committed_start_retry()
 	result = session->configure_revision_clock_provider(
 		&world_revision_validator_clock,
 		&clock_epoch_ms);
+	if (result == FT_ERR_SUCCESS)
+		result = session->configure_authenticated_actor_authorizer(
+			[](uint64_t candidate_actor_id, void *) noexcept
+			{
+				return (candidate_actor_id == actor_id);
+			}, nullptr);
 	if (result == FT_ERR_SUCCESS)
 		result = session->start(seed, window, *renderer);
 	if (result == FT_ERR_SUCCESS)

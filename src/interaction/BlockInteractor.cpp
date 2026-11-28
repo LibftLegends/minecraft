@@ -145,15 +145,15 @@ int32_t BlockInteractor::try_delete_target_block(World *world,
 			return (error_code);
 		if (character != nullptr)
 		{
-			ft_sharedptr<game_item> *equipped_tool =
-				character->get_equipped_item(EQUIP_WEAPON);
-			if (equipped_tool == nullptr)
-				return (character->get_error());
-			if (!(*equipped_tool))
+			ft_sharedptr<game_item> equipped_tool;
+			error_code = character->read_equipped_item(EQUIP_WEAPON, equipped_tool);
+			if (error_code != FT_ERR_SUCCESS)
+				return (error_code);
+			if (!equipped_tool)
 				error_code = FT_ERR_PERMISSION_DENIED;
 			else
 			{
-				const int32_t item_id = (*equipped_tool)->get_item_id();
+				const int32_t item_id = equipped_tool->get_item_id();
 				const bool matching_class =
 					required_class == MINECRAFT_MINING_TOOL_PICKAXE
 						? item_id >= MinecraftItemCatalog::WOOD_PICKAXE_ITEM_ID
@@ -166,13 +166,13 @@ int32_t BlockInteractor::try_delete_target_block(World *world,
 				uint32_t maximum = 0U;
 				equipped_snapshot.item_id = item_id;
 				equipped_snapshot.instance_id =
-					(*equipped_tool)->get_instance_id();
+					equipped_tool->get_instance_id();
 				equipped_snapshot.stack_size = 1;
 				equipped_snapshot.max_stack = 1;
 				equipped_snapshot.modifier1_id =
-					(*equipped_tool)->get_modifier1_id();
+					equipped_tool->get_modifier1_id();
 				equipped_snapshot.modifier1_value =
-					(*equipped_tool)->get_modifier1_value();
+					equipped_tool->get_modifier1_value();
 				error_code = catalog.resolve_equipment_rule(item_id,
 					&equipped_rule);
 				if (error_code == FT_ERR_SUCCESS
@@ -194,8 +194,6 @@ int32_t BlockInteractor::try_delete_target_block(World *world,
 				inventory_revision = snapshot.revision;
 			}
 			(void)maximum;
-			(void)equipped_tool->destroy();
-			delete equipped_tool;
 		}
 		}
 		else

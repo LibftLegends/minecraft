@@ -278,8 +278,16 @@ class WorldRevisionServer
 
 	static int32_t handle_message(int32_t client_handle, const char *message,
 		void *user_data);
+	static int32_t handle_parsed_message(int32_t client_handle,
+		const char *message, json_group &revision, void *user_data);
+	static int32_t handle_message_with_revision(int32_t client_handle,
+		const char *message, json_group *revision, void *user_data);
+	int32_t dispatch_revision_message(int32_t client_handle, const char *message,
+		json_group *revision, uint64_t actor_id, uint64_t loom_id);
 	int32_t handle_revision_message(const char *message, uint64_t actor_id,
 		uint64_t loom_id);
+	int32_t execute_revision_action(const char *message, json_group *revision,
+		const char *action, uint64_t request_id, uint64_t actor_id, uint64_t loom_id);
 	int32_t handle_quote_message(int32_t client_handle, const char *message,
 		json_group *revision, uint64_t actor_id, uint64_t loom_id);
 	int32_t handle_status_message(int32_t client_handle, json_group *revision,

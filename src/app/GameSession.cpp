@@ -415,24 +415,23 @@ namespace
 		for (uint32_t index = 0U;
 			index < sizeof(character_slots) / sizeof(character_slots[0]); ++index)
 		{
-			ft_sharedptr<game_item> *item = character.get_equipped_item(
-				character_slots[index]);
-			if (item == nullptr)
-				return (character.get_error());
-			if (*item)
+			ft_sharedptr<game_item> item;
+			int32_t result = character.read_equipped_item(character_slots[index], item);
+			if (result != FT_ERR_SUCCESS)
+				return (result);
+			if (item)
 			{
 				MinecraftEquipmentRule rule = {};
 				game_inventory_item_snapshot snapshot = {};
 				uint32_t current_durability = 0U;
 				uint32_t maximum_durability = 0U;
-				int32_t result = catalog.resolve_equipment_rule(
-					(*item)->get_item_id(), &rule);
+				result = catalog.resolve_equipment_rule(item->get_item_id(), &rule);
 				if (result == FT_ERR_SUCCESS
 					&& rule.slot != catalog_slots[index])
 					result = FT_ERR_INVALID_STATE;
-				snapshot.item_id = (*item)->get_item_id();
-				snapshot.modifier1_id = (*item)->get_modifier1_id();
-				snapshot.modifier1_value = (*item)->get_modifier1_value();
+				snapshot.item_id = item->get_item_id();
+				snapshot.modifier1_id = item->get_modifier1_id();
+				snapshot.modifier1_value = item->get_modifier1_value();
 				if (result == FT_ERR_SUCCESS)
 					result = catalog.query_equipment_durability(snapshot,
 						&current_durability, &maximum_durability);
@@ -448,16 +447,9 @@ namespace
 					else if (set_tier != rule.material_tier)
 						matching_set_tier = false;
 				}
-			(void)item->destroy();
-			delete item;
-			if (result != FT_ERR_SUCCESS)
-				return (result);
-		}
-		else
-		{
-			(void)item->destroy();
-			delete item;
-		}
+				if (result != FT_ERR_SUCCESS)
+					return (result);
+			}
 		}
 		if (functional_piece_mask == 0x0FU && matching_set_tier)
 			total_armor += FULL_ARMOR_SET_BONUS;
@@ -11731,23 +11723,22 @@ int32_t GameSession::query_equipped_armor_cached(
 	for (uint32_t index = 0U;
 		index < sizeof(character_slots) / sizeof(character_slots[0]); ++index)
 	{
-		ft_sharedptr<game_item> *item = this->player_character_.get_equipped_item(
-			character_slots[index]);
-		if (item == nullptr)
-			return (this->player_character_.get_error());
-		if (*item)
+		ft_sharedptr<game_item> item;
+		const int32_t read_result = this->player_character_.read_equipped_item(
+			character_slots[index], item);
+		if (read_result != FT_ERR_SUCCESS)
+			return (read_result);
+		if (item)
 		{
 			const std::size_t offset = index * 4U;
 			fingerprint[offset] = static_cast<uint64_t>(
-				static_cast<int64_t>((*item)->get_item_id()));
-			fingerprint[offset + 1U] = (*item)->get_instance_id();
+				static_cast<int64_t>(item->get_item_id()));
+			fingerprint[offset + 1U] = item->get_instance_id();
 			fingerprint[offset + 2U] = static_cast<uint64_t>(
-				static_cast<int64_t>((*item)->get_modifier1_id()));
+				static_cast<int64_t>(item->get_modifier1_id()));
 			fingerprint[offset + 3U] = static_cast<uint64_t>(
-				static_cast<int64_t>((*item)->get_modifier1_value()));
+				static_cast<int64_t>(item->get_modifier1_value()));
 		}
-		(void)item->destroy();
-		delete item;
 	}
 	if (this->equipped_armor_cache_valid_
 		&& std::memcmp(fingerprint, this->equipped_armor_fingerprint_,

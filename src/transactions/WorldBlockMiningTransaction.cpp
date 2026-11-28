@@ -319,29 +319,29 @@ namespace
 				if (read_u32(record.payload, 4U)
 					== MINING_EQUIPPED_TOOL_VERSION)
 				{
-					ft_sharedptr<game_item> *equipped_tool = character == nullptr
-						? nullptr : character->get_equipped_item(EQUIP_WEAPON);
-					if (equipped_tool == nullptr)
-						result = character == nullptr ? FT_ERR_INVALID_STATE
-							: character->get_error();
+					ft_sharedptr<game_item> equipped_tool;
+					const int32_t read_result = character == nullptr ? FT_ERR_INVALID_STATE
+						: character->read_equipped_item(EQUIP_WEAPON, equipped_tool);
+					if (read_result != FT_ERR_SUCCESS)
+						result = read_result;
 					else
 					{
-						if (*equipped_tool
-									&& (*equipped_tool)->get_item_id()
+						if (equipped_tool
+							&& equipped_tool->get_item_id()
 								== static_cast<int32_t>(read_u32(
 									record.payload, 92U))
-							&& (*equipped_tool)->get_instance_id()
+							&& equipped_tool->get_instance_id()
 								== read_u64(record.payload, 96U))
 						{
 							game_inventory_item_snapshot tool = {};
-									tool.item_id = (*equipped_tool)->get_item_id();
-							tool.instance_id = (*equipped_tool)->get_instance_id();
+							tool.item_id = equipped_tool->get_item_id();
+							tool.instance_id = equipped_tool->get_instance_id();
 							tool.stack_size = 1;
 							tool.max_stack = 1;
 							tool.modifier1_id =
-								(*equipped_tool)->get_modifier1_id();
+								equipped_tool->get_modifier1_id();
 							tool.modifier1_value =
-								(*equipped_tool)->get_modifier1_value();
+								equipped_tool->get_modifier1_value();
 							uint32_t durability = 0U;
 							uint32_t maximum = 0U;
 							MinecraftMiningToolClass tool_class =
@@ -377,17 +377,15 @@ namespace
 								result = FT_ERR_INVALID_OPERATION;
 							if (result == FT_ERR_SUCCESS)
 							{
-								(*equipped_tool)->set_modifier1_id(
+								equipped_tool->set_modifier1_id(
 									MinecraftItemCatalog::EQUIPMENT_DURABILITY_MODIFIER_ID);
-								(*equipped_tool)->set_modifier1_value(
+								equipped_tool->set_modifier1_value(
 									durability > 1U
 										? static_cast<int32_t>(durability - 1U) : 0);
 							}
 							(void)maximum;
 							(void)broken;
 						}
-						(void)equipped_tool->destroy();
-						delete equipped_tool;
 					}
 				}
 				else
